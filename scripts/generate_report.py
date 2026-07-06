@@ -145,35 +145,12 @@ def main():
         else:
             md.append(f"{idx}. **{name}** 展示了显著的一阶自相关性（$\\phi = {phi:.4f}$）。经 Geltner 去平滑修正后，其真实年化波动率由 **{orig_vol*100.0:.2f}% 调增至 {un_vol*100.0:.2f}%**，复利年化超额收益为 **{orig_ex*100.0:.2f}% / {un_ex*100.0:.2f}%**，去平滑后的 Sortino 比率从 **{orig_sortino:.2f} 修正为 {un_sortino:.2f}**，这更真实地揭示了真实的下行风险。")
             
-    md.append("\n## 三、 信用利差分解与杠杆收益分析 (最新当期快照)")
-    md.append("根据各基金最新披露的资产组合配置、杠杆比例与借贷成本，我们对最新的月度净收益进行了底层资产信用利差（Credit Spread）与杠杆收益贡献（Leverage Contribution）的静态分解：\n")
-    
-    md.append("| 基金名称 | 当月净收益率 | 杠杆倍数 $L$ | 估算借贷成本 | 资产收益率 $R_{assets}$ | 信用利差 (Asset Spread) | 杠杆贡献 (Gearing Cont.) |")
-    md.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
-    
-    for fund_id, m in funds_metrics.items():
-        name = m["fund_name"]
-        decomp = m["credit_spread_decomposition"]
-        if decomp:
-            net_ret = decomp["net_return_latest"]
-            L = decomp["leverage_ratio"]
-            borrow = decomp["borrowing_cost_latest"]
-            assets_ret = decomp["asset_return_latest"]
-            spread = decomp["credit_spread_latest"]
-            gearing = decomp["leverage_contribution_latest"]
-            
-            md.append(
-                f"| {name} | {net_ret*100.0:.2f}% | {L:.1f}x | {borrow*100.0:.3f}% | "
-                f"{assets_ret*100.0:.2f}% | {spread*100.0:.3f}% | {gearing*100.0:.3f}% |"
-            )
-        else:
-            md.append(f"| {name} | - | - | - | - | - (数据未披露) | - (数据未披露) |")
-            
-    md.append("\n> **分析结论**：由于月度报告中实时杠杆数据解析困难，本表的杠杆倍数与借贷成本基于基金注册表中的官方 PDS 策略中枢（Target Configuration）进行估算倒推。此分解揭示了基金底层的真实信用利差水平及杠杆放大效应，非精确日度快照。\n")
-    
-    md.append("## 四、 基金对比核心总结与投资建议")
+    # ponytail: Removed section "三、 信用利差分解与杠杆收益分析" and adjusted section numbering.
+    # Leverage ratio cannot be parsed dynamically, so we strip this unnecessary analysis.
+
+    md.append("\n## 三、 基金对比核心总结与投资建议")
     md.append("1. **综合风险收益表现 (Sortino 比率 - 超额收益视角)**：")
-    
+
     sorted_funds = sorted(funds_metrics.values(), key=lambda x: x["unsmoothed_metrics"]["sortino_ratio"] if x["is_geltner_applied"] else x["original_metrics"]["sortino_ratio"], reverse=True)
     for m in sorted_funds:
         name = m["fund_name"]
@@ -182,10 +159,10 @@ def main():
         ex_ret = m["unsmoothed_metrics"]["annualized_excess_return"] if m["is_geltner_applied"] else m["original_metrics"]["annualized_excess_return"]
         sortino = m["unsmoothed_metrics"]["sortino_ratio"] if m["is_geltner_applied"] else m["original_metrics"]["sortino_ratio"]
         vol = m["unsmoothed_metrics"]["annualized_volatility"] if m["is_geltner_applied"] else m["original_metrics"]["annualized_volatility"]
-        
+
         cycle_note = f"经历了 {n} 个月历史大周期" if n >= 36 else f"仅有 {n} 个月历史短期业绩"
         md.append(f"   - **{name}** ({cycle_note})：年化复利绝对收益率 **{orig_ret*100.0:.2f}%**，复利年化超额收益（扣除 RBA Cash Rate 之后）为 **{ex_ret*100.0:.2f}%**，在真实的年化波动率 **{vol*100.0:.2f}%** 下实现了 **{sortino:.2f}** 的超额 Sortino 比率。")
-        
+
     md.append("2. **去平滑风险防范**：")
     for m in funds_metrics.values():
         name = m["fund_name"]
@@ -194,15 +171,15 @@ def main():
         un_vol = m["unsmoothed_metrics"]["annualized_volatility"]
         if m["is_geltner_applied"]:
             md.append(f"   - **{name}**：由于存在明显的平滑效应（一阶自相关系数 $\\phi = {phi:.4f}$），其账面年化波动率（{orig_vol*100.0:.2f}%）显著低估。经 Geltner 修正后的真实年化波动率为 **{un_vol*100.0:.2f}%**，在大类配置与风控限额管理中必须以修正后的真实波动率为基准。")
-            
+
     # Save report.md to data output directory
     output_dir = os.path.join(BASE_DIR, "data", "output")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "report.md")
 
     # Generate AI investment advice based on calculated metrics
-    md.append("\n## 五、 AI 投资建议")
-    md.append("基于各固定收益基金的风险收益特征、Geltner 去平滑波动率修正以及最新信用利差与杠杆快照，提供以下投资建议：\n")
+    md.append("\n## 四、 AI 投资建议")
+    md.append("基于各固定收益基金的风险收益特征与 Geltner 去平滑波动率修正，提供以下投资建议：\n")
     for idx, m in enumerate(sorted_funds, 1):
         name = m["fund_name"]
         sortino = m["unsmoothed_metrics"]["sortino_ratio"] if m["is_geltner_applied"] else m["original_metrics"]["sortino_ratio"]

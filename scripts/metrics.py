@@ -250,47 +250,9 @@ def main():
     downside_unsmoothed = calculate_downside_deviation_excess(excess_returns_unsmoothed)
     sortino_unsmoothed = ann_excess_return_unsmoothed / downside_unsmoothed if downside_unsmoothed > 0 else 0.0
     
-    REGISTRY_PATH = os.path.join(BASE_DIR, "references", "fund_registry.yaml")
-    fund_info = {}
-    if os.path.exists(REGISTRY_PATH):
-        import yaml
-        try:
-            with open(REGISTRY_PATH, "r", encoding="utf-8") as rf:
-                registry = yaml.safe_load(rf) or {}
-                fund_info = registry.get(fund_id, {})
-        except Exception as e:
-            print(f"Warning: Could not read registry for leverage info: {e}")
+    # ponytail: Removed credit spread decomposition and leverage contribution calculations.
+    # We no longer calculate credit spread or leverage effects since leverage ratio data cannot be parsed reliably.
 
-    # 5. Credit Spread Decomposition (Latest Month Snapshot)
-    latest_dp = time_series[-1]
-    net_return_latest = latest_dp["net_return"]
-
-    L = fund_info.get("target_leverage", 1.0)
-    borrowing_spread = fund_info.get("borrowing_spread", 0.002) # Default 20 bps over RBA
-    latest_rf_monthly = fund_rf_rates[-1] / 12.0
-    borrowing_cost = latest_rf_monthly + (borrowing_spread / 12.0)
-
-    if L <= 1.0:
-        asset_return = net_return_latest
-        gearing_contrib = 0.0
-    else:
-        # R_net = R_assets + (L - 1) * (R_assets - R_borrow)
-        # R_assets = (R_net + (L - 1) * R_borrow) / L
-        asset_return = (net_return_latest + (L - 1.0) * borrowing_cost) / L
-        gearing_contrib = net_return_latest - asset_return
-
-    credit_spread = asset_return - latest_rf_monthly
-
-    decomp = {
-        "leverage_ratio": L,
-        "net_return_latest": net_return_latest,
-        "risk_free_rate_latest": latest_rf_monthly,
-        "borrowing_cost_latest": borrowing_cost,
-        "asset_return_latest": asset_return,
-        "credit_spread_latest": credit_spread,
-        "leverage_contribution_latest": gearing_contrib
-    }
-        
     metrics_result = {
         "fund_id": fund_id,
         "fund_name": data["fund_name"],
@@ -318,8 +280,7 @@ def main():
             "sortino_ratio": sortino_unsmoothed,
             "downside_deviation": downside_unsmoothed,
             "max_drawdown": max_dd
-        },
-        "credit_spread_decomposition": decomp
+        }
     }
     
     output_file = os.path.join(BASE_DIR, "data", "cleaned", fund_id, f"{date_period}.metrics.json")
