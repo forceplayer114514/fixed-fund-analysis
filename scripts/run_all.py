@@ -22,10 +22,14 @@ def main():
     print("==================================================================")
     print("Australian Fixed Income Fund Comparison Pipeline (End-to-End Run)")
     print("==================================================================")
-    
+
     parser = argparse.ArgumentParser(description="Run comparison pipeline for fixed income funds.")
     parser.add_argument("--funds", nargs="+", help="Optional: run pipeline for specific fund IDs.")
     args = parser.parse_args()
+
+    # Step 0: Validate Registry Schema (Pre-flight check)
+    print("\n--- Pipeline Pre-check 0: Validating fund_registry.yaml ---")
+    run_cmd(["python3", "scripts/validate_registry.py"])
 
     # 1. Load registry
     if not os.path.exists(REGISTRY_PATH):
