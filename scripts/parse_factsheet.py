@@ -263,8 +263,7 @@ def parse_bentham(fund_dir):
             if net_return is not None:
                 pass
             else:
-                print(f"Warning: Could not parse net return from PDF {local_path}. Skipping.")
-                continue
+                raise ValueError(f"CRITICAL DATA GAP: Could not parse net return from PDF {local_path}. Three regex rules all failed. Aborting to prevent data corruption.")
 
             raw_data_points.append({
                 "date": date_str,
