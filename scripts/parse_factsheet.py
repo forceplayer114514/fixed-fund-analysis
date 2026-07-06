@@ -236,7 +236,9 @@ def parse_bentham(fund_dir):
 
             # Format 1 (table): "Total return (after fees)1 1.32 -0.78 ..."
             # Note that sometimes there's a footnote '1' or '2' attached to it without space, or with space
-            ret_match = re.search(r'Total return \(after fees\)\s*\d*([-\s0-9.]+)', text, re.IGNORECASE)
+            # We must be careful not to match "Total Return (after fees) is calculated..." or similar boilerplate text.
+            # Usually the table format puts numbers right after. We can bound it by Benchmark.
+            ret_match = re.search(r'Total return \(after fees\)\d*\s*(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
             if ret_match:
                 numbers = ret_match.group(1).split()
                 for num in numbers:
