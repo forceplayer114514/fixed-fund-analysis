@@ -238,19 +238,32 @@ def parse_bentham(fund_dir):
             # Note that sometimes there's a footnote '1' or '2' attached to it without space, or with space
             # We must be careful not to match "Total Return (after fees) is calculated..." or similar boilerplate text.
             # Usually the table format puts numbers right after. We can bound it by Benchmark.
-            ret_match = re.search(r'Total return \(after fees\)\d*\s*(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
+            ret_match = re.search(r'Total return \(after fees\)\s*1?\s*(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
             if ret_match:
                 numbers = ret_match.group(1).split()
-                for num in numbers:
+                if numbers:
+                    num_str = numbers[0]
+                    # Handle cases where footnote "1" is prepended directly to a positive return, e.g., "11.25" meant to be "1" and "1.25"
+                    # But be careful not to clip legitimate "11.25" if it was meant to be 11.25%.
+                    # We can use a safer approach: look for a stray '1' footnote at the start of the match if it's stuck.
+                    if num_str.startswith('1') and len(num_str) > 1 and num_str[1] in '.-0123456789':
+                        # Check if taking off the 1 still leaves a valid float
+                        try:
+                            test_float = float(num_str[1:])
+                            # In monthly fixed income, a monthly return of >10% is extremely unlikely,
+                            # whereas <10% is normal. We only strip if the original float is suspiciously large (e.g., >= 10).
+                            if float(num_str) >= 10.0:
+                                num_str = num_str[1:]
+                        except ValueError:
+                            pass
                     try:
-                        net_return = float(num) / 100.0
-                        break
+                        net_return = float(num_str) / 100.0
                     except ValueError:
                         pass
 
-            # Format 2 (sentence, mostly older reports): "had a total return (after fees*) of 1.18 percent"
+            # Format 2 (sentence, mostly older reports): "had a total return (after fees*) of 1.18 percent" or "of 1.18%"
             if net_return is None:
-                ret_match = re.search(r'total return\s*\(after fees\*?\)\s*of\s*(-?[0-9.]+)\s*percent', text, re.IGNORECASE)
+                ret_match = re.search(r'total return\s*\(after fees\*?\)\s*of\s*(-?[0-9.]+)\s*(?:%|percent)', text, re.IGNORECASE)
                 if ret_match:
                     net_return = float(ret_match.group(1)) / 100.0
 
