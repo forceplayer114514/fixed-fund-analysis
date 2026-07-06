@@ -157,13 +157,177 @@ def parse_stake(fund_dir):
     output_data = {
         "fund_id": "stake_accumulate",
         "fund_name": "Stake Accumulate",
-        "apir_code": "K2A5816AU",
+        "apir_code": "NO_APIR",
         "scraped_at": datetime.datetime.now().isoformat(),
         "source_url": manifest["source_url"],
         "data_period": latest_month,
         "time_series": time_series
     }
     
+    return latest_month, output_data
+
+def parse_bentham(fund_dir):
+    manifest_path = os.path.join(fund_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        raise FileNotFoundError(f"Manifest not found for Bentham Global Income Fund: {manifest_path}")
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    raw_data_points = []
+
+    for file_info in manifest.get("files", []):
+        local_path = file_info.get("local_path")
+        if not local_path or not local_path.endswith(".pdf"):
+            continue
+
+        pdf_path = os.path.join(fund_dir, local_path)
+        print(f"Parsing Bentham PDF: {local_path}")
+
+        try:
+            reader = PdfReader(pdf_path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+
+            text = clean_spacing(text)
+
+            # Find the report date
+            date_match = re.search(
+                r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
+                text,
+                re.IGNORECASE
+            )
+            if not date_match:
+                date_match = re.search(
+                    r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
+                    text,
+                    re.IGNORECASE
+                )
+            if not date_match:
+                date_match = re.search(
+                    r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
+                    text,
+                    re.IGNORECASE
+                )
+            if not date_match:
+                date_match = re.search(
+                    r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
+                    text,
+                    re.IGNORECASE
+                )
+
+            if not date_match:
+                print(f"Warning: Could not parse date from PDF {local_path}. Skipping.")
+                continue
+
+            month_name = date_match.group(1).lower()
+            year = int(date_match.group(2))
+            # handle 'sept' abbreviation fallback if needed, map matches mostly exactly
+            if month_name == 'sept': month_name = 'sep'
+
+            month_num = MONTH_MAP[month_name]
+
+            report_date = get_last_day_of_month(year, month_num)
+            date_str = report_date.strftime("%Y-%m-%d")
+
+            # Extract 1 Month net return
+            net_return = None
+
+            # Format 1 (table): "Total return (after fees)1 1.32 -0.78 ..."
+            # Note that sometimes there's a footnote '1' or '2' attached to it without space, or with space
+            ret_match = re.search(r'Total return \(after fees\)\s*\d*([-\s0-9.]+)', text, re.IGNORECASE)
+            if ret_match:
+                numbers = ret_match.group(1).split()
+                for num in numbers:
+                    try:
+                        net_return = float(num) / 100.0
+                        break
+                    except ValueError:
+                        pass
+
+            # Format 2 (sentence, mostly older reports): "had a total return (after fees*) of 1.18 percent"
+            if net_return is None:
+                ret_match = re.search(r'total return\s*\(after fees\*?\)\s*of\s*(-?[0-9.]+)\s*percent', text, re.IGNORECASE)
+                if ret_match:
+                    net_return = float(ret_match.group(1)) / 100.0
+
+            # Format 3: specific table snippet used around 2018
+            if net_return is None:
+                match = re.search(r'As at \d+\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+([-\d.]+)', text, re.IGNORECASE)
+                if match:
+                    net_return = float(match.group(1)) / 100.0
+
+            if net_return is not None:
+                pass
+            else:
+                print(f"Warning: Could not parse net return from PDF {local_path}. Skipping.")
+                continue
+
+            raw_data_points.append({
+                "date": date_str,
+                "net_return": net_return,
+                "nav": 1.0,  # Placeholder, will be computed cumulatively
+                "leverage_ratio": 1.0
+            })
+
+        except Exception as e:
+            print(f"Error parsing Bentham PDF {local_path}: {e}", file=sys.stderr)
+
+    if not raw_data_points:
+        raise ValueError("No data points parsed for Bentham Global Income Fund.")
+
+    # Remove duplicates if any (due to multiple fetches or overlapping reports)
+    unique_points = {}
+    for p in raw_data_points:
+        unique_points[p["date"]] = p
+    raw_data_points = list(unique_points.values())
+
+    # Sort chronologically
+    raw_data_points.sort(key=lambda x: x["date"])
+
+    # Compute cumulative NAV
+    # Start base month at NAV = 1.0 (one month before first data point)
+    first_date_parts = [int(p) for p in raw_data_points[0]["date"].split("-")]
+    first_date = datetime.date(first_date_parts[0], first_date_parts[1], first_date_parts[2])
+    # Base date is one month before first_date
+    if first_date.month == 1:
+        base_date = get_last_day_of_month(first_date.year - 1, 12)
+    else:
+        base_date = get_last_day_of_month(first_date.year, first_date.month - 1)
+
+    time_series = [
+        {
+            "date": base_date.strftime("%Y-%m-%d"),
+            "net_return": 0.0,
+            "nav": 1.0,
+            "leverage_ratio": 1.0
+        }
+    ]
+
+    current_nav = 1.0
+    for dp in raw_data_points:
+        current_nav = current_nav * (1.0 + dp["net_return"])
+        time_series.append({
+            "date": dp["date"],
+            "net_return": dp["net_return"],
+            "nav": current_nav,
+            "leverage_ratio": dp["leverage_ratio"]
+        })
+
+    # Latest month
+    latest_month = time_series[-1]["date"][:7] # YYYY-MM
+
+    output_data = {
+        "fund_id": "bentham_global_income_fund",
+        "fund_name": "Bentham Global Income Fund",
+        "apir_code": "CSA0038AU",
+        "scraped_at": datetime.datetime.now().isoformat(),
+        "source_url": manifest["source_url"],
+        "data_period": latest_month,
+        "time_series": time_series
+    }
+
     return latest_month, output_data
 
 def parse_coolabah(fund_id, fund_dir):
@@ -282,6 +446,8 @@ def main():
     try:
         if fund_id == "stake_accumulate":
             latest_month, data = parse_stake(fund_dir)
+        elif fund_id == "bentham_global_income_fund":
+            latest_month, data = parse_bentham(fund_dir)
         else:
             latest_month, data = parse_coolabah(fund_id, fund_dir)
             

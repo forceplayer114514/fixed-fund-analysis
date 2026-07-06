@@ -1,18 +1,28 @@
-sample_fund_1:
-  apir_code: APIR1234AU
-  borrowing_spread: 0.0
-  confirmed_url: https://example.com/performance-report
+bentham_global_income_fund:
+  apir_code: CSA0038AU
+  confirmed_url: https://www.benthamam.com/funds/bentham-global-income-fund/
   fetch_method: requests+BeautifulSoup
-  fund_name: Sample Ungeared Fixed Income Fund
+  fund_name: Bentham Global Income Fund
+  url_type: factsheet
+  verification_signal: Verified existing registry URL
+  verified_at: '2026-07-06'
+coolabah_floating_rate_high_yield:
+  apir_code: ETL5010AU
+  borrowing_spread: 0.0
+  confirmed_url: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-report-coolabah-floating-rate-high-yield-fund-ai.html
+  fetch_method: requests+BeautifulSoup
+  fund_name: Coolabah Floating-Rate High Yield Fund
   target_leverage: 1.0
   url_type: compliance_docs_monthly_reports
-sample_fund_leveraged:
-  apir_code: APIR9999AU
-  borrowing_spread: 0.002
-  confirmed_url: https://www.template.net/business/report-templates/monthly-report-sample/
+  verification_signal: Verified existing registry URL
+  verified_at: '2026-07-06'
+stake_accumulate:
+  apir_code: NO_APIR
+  borrowing_spread: 0.0
+  confirmed_url: https://hellostake.com/legal/monthly-performance-report
   fetch_method: requests+BeautifulSoup
-  fund_name: Sample Leveraged High Yield Fund
-  target_leverage: 2.0
+  fund_name: Stake Accumulate Fund
+  target_leverage: 1.0
   url_type: compliance_docs_monthly_reports
   verification_signal: Verified existing registry URL
-  verified_at: '2026-07-05'
+  verified_at: '2026-07-06'
