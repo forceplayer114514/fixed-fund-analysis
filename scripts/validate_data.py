@@ -3,6 +3,7 @@ import sys
 import argparse
 import json
 import datetime
+from anomaly_detection import detect_anomalies
 
 # Path setup
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +46,15 @@ def validate_time_series(time_series, fund_id):
             
     print("Time series validation passed. No gaps found.")
 
+    # Run anomaly detection
+    anomalies = detect_anomalies(time_series, threshold_sigma=3.0)
+    if anomalies:
+        print(f"WARNING: {len(anomalies)} statistical anomalies detected in returns.")
+        for a in anomalies:
+            print(f"  -> Anomaly on {a['date']}: Return {a['value']*100:.2f}% (Z-score: {a['z_score']:.2f})")
+
+    return {"time_series": time_series, "anomalies": anomalies}
+
 def main():
     parser = argparse.ArgumentParser(description="Validate fund return time series data for gaps and types.")
     parser.add_argument("--fund", required=True, help="Fund ID (e.g. stake_accumulate)")
@@ -72,7 +82,8 @@ def main():
                 raise KeyError(f"Missing required top-level key: {k}")
                 
         # Validate time series gaps
-        validate_time_series(data["time_series"], fund_id)
+        validation_result = validate_time_series(data["time_series"], fund_id)
+        data["anomalies"] = validation_result.get("anomalies", [])
         
         # Save to cleaned directory
         cleaned_dir = os.path.join(BASE_DIR, "data", "cleaned", fund_id)

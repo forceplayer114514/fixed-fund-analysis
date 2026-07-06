@@ -178,7 +178,7 @@ def main():
     output_path = os.path.join(output_dir, "report.md")
 
     # Generate AI investment advice based on calculated metrics
-    md.append("\n## 四、 AI 投资建议")
+    md.append("\n## 五、 AI 投资建议")
     md.append("基于各固定收益基金的风险收益特征与 Geltner 去平滑波动率修正，提供以下投资建议：\n")
     for idx, m in enumerate(sorted_funds, 1):
         name = m["fund_name"]
