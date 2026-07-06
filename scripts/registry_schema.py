@@ -31,9 +31,7 @@ class FundEntrySchema(BaseModel):
     @field_validator('apir_code')
     @classmethod
     def validate_apir_code(cls, v: str) -> str:
-        # 澳洲 APIR 格式正则：3位大写字母 + 4位数字 + 'AU'
-        if not re.match(r'^[A-Z]{3,4}\d{4}AU$', v):
-            raise ValueError(f"Invalid APIR code format: {v}. Must match 3-4 uppercase letters, 4 digits, and end with 'AU'.")
+        # 取消APIR格式强校验，以适配部分无标准APIR代码的直销基金
         return v
 
     @field_validator('verified_at')

@@ -8,6 +8,8 @@ import requests
 from bs4 import BeautifulSoup
 import yaml
 import re
+import asyncio
+import aiohttp
 
 # Path setup
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,7 +34,7 @@ def log_attempt(message):
                 f.write(f"# URL Discovery Log (Rotated on {datetime.datetime.now().isoformat()})\n\n")
         except Exception as e:
             print(f"Warning: Failed to rotate log file: {e}", file=sys.stderr)
-            
+
     try:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -42,95 +44,174 @@ def log_attempt(message):
     except Exception as e:
         print(f"Warning: Failed to write to log file: {e}", file=sys.stderr)
 
-def verify_url(url, fund_id, fund_name, apir_code):
+async def verify_url_async(session, url, fund_id, fund_name, apir_code):
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15, stream=True)
-        if resp.status_code != 200:
-            resp.close()
-            return False
-            
-        content_bytes = b""
-        for chunk in resp.iter_content(chunk_size=4096):
-            if chunk:
-                content_bytes += chunk
-            if len(content_bytes) >= 500 * 1024:
-                break
-        resp.close()
-        
-        content = content_bytes.decode('utf-8', errors='ignore')
-        content_lower = content.lower()
-        
-        # Check title for 404
-        title_text = ""
-        title_match = re.search(r'<title>(.*?)</title>', content_lower)
-        if title_match:
-            title_text = title_match.group(1)
-            if "404" in title_text and ("not found" in title_text or "page not found" in title_text or "error" in title_text):
-                return False
-        
-        # Specific identifier checks to prevent cross-fund collisions
-        check_str = (url.lower() + " " + title_text).lower()
-        if fund_id == "coolabah_smarter_money":
-            if "smarter" not in check_str or "money" not in check_str:
-                return False
-            if "long-short" in url.lower() or "higher-income" in url.lower():
-                return False
-        elif fund_id == "coolabah_long_short_credit":
-            if "long" not in check_str or "short" not in check_str or "credit" not in check_str:
-                return False
-        elif fund_id == "coolabah_floating_rate_high_yield":
-            if "floating" not in check_str or "rate" not in check_str or "high" not in check_str or "yield" not in check_str:
-                return False
-            if "global" in check_str:
-                return False
-        elif fund_id == "coolabah_long_short_opportunities":
-            if "long" not in check_str or "short" not in check_str or "opportunities" not in check_str:
-                return False
-            if "credit" in check_str:
-                return False
-        elif fund_id == "stake_accumulate":
-            pass
-        else:
-            # Fallback to generic name keywords check
-            cleaned_name = fund_name.replace('(', '').replace(')', '').replace('-', ' ')
-            for stop_word in ["fund", "class", "assisted", "direct", "investor"]:
-                cleaned_name = re.sub(r'\b' + stop_word + r'\b', '', cleaned_name, flags=re.IGNORECASE)
-            name_keywords = [kw.lower() for kw in cleaned_name.split() if len(kw) > 2]
-            
-            has_apir = (apir_code.lower() in content_lower or apir_code.lower() in url.lower()) if apir_code else False
-            if not has_apir:
-                matches = 0
-                for kw in name_keywords:
-                    if kw in content_lower or kw in url.lower():
-                        matches += 1
-                required_matches = min(2, len(name_keywords))
-                if matches < required_matches:
-                    return False
+        async with session.get(url, headers=HEADERS, timeout=15) as resp:
+            if resp.status != 200:
+                return False, url
 
-        # Topic signals
-        topic_signals = ["performance", "report", "factsheet", "returns", "monthly", "nav"]
-        if not any(sig in content_lower or sig in url.lower() for sig in topic_signals):
-            return False
-            
-        # Strict context verification
-        if fund_id == "stake_accumulate":
-            soup = BeautifulSoup(content, 'html.parser')
-            has_pdf = False
-            for a in soup.find_all('a', href=True):
-                href = a['href'].lower()
-                if ".pdf" in href and "accumulate" in href:
-                    has_pdf = True
+            content_bytes = b""
+            chunk_count = 0
+            async for chunk in resp.content.iter_chunked(4096):
+                if chunk:
+                    content_bytes += chunk
+                if len(content_bytes) >= 500 * 1024:
                     break
-            if not has_pdf:
-                return False
-        elif "coolabah" in fund_id:
-            # Must contain plotly widgets
-            if "htmlwidgets" not in content_lower and "plotly" not in content_lower and "visdat" not in content_lower:
-                return False
-            
-        return True
+
+            content = content_bytes.decode('utf-8', errors='ignore')
+            content_lower = content.lower()
+
+            # Check title for 404
+            title_text = ""
+            title_match = re.search(r'<title>(.*?)</title>', content_lower)
+            if title_match:
+                title_text = title_match.group(1)
+                if "404" in title_text and ("not found" in title_text or "page not found" in title_text or "error" in title_text):
+                    return False, url
+
+            # Specific identifier checks to prevent cross-fund collisions
+            check_str = (url.lower() + " " + title_text).lower()
+            if fund_id == "coolabah_smarter_money":
+                if "smarter" not in check_str or "money" not in check_str:
+                    return False, url
+                if "long-short" in url.lower() or "higher-income" in url.lower():
+                    return False, url
+            elif fund_id == "coolabah_long_short_credit":
+                if "long" not in check_str or "short" not in check_str or "credit" not in check_str:
+                    return False, url
+            elif fund_id == "coolabah_floating_rate_high_yield":
+                if "floating" not in check_str or "rate" not in check_str or "high" not in check_str or "yield" not in check_str:
+                    return False, url
+                if "global" in check_str:
+                    return False, url
+            elif fund_id == "coolabah_long_short_opportunities":
+                if "long" not in check_str or "short" not in check_str or "opportunities" not in check_str:
+                    return False, url
+                if "credit" in check_str:
+                    return False, url
+            elif fund_id == "stake_accumulate":
+                pass
+            else:
+                # Fallback to generic name keywords check
+                cleaned_name = fund_name.replace('(', '').replace(')', '').replace('-', ' ')
+                for stop_word in ["fund", "class", "assisted", "direct", "investor"]:
+                    cleaned_name = re.sub(r'\b' + stop_word + r'\b', '', cleaned_name, flags=re.IGNORECASE)
+                name_keywords = [kw.lower() for kw in cleaned_name.split() if len(kw) > 2]
+
+                has_apir = (apir_code.lower() in content_lower or apir_code.lower() in url.lower()) if apir_code else False
+                if not has_apir:
+                    matches = 0
+                    for kw in name_keywords:
+                        if kw in content_lower or kw in url.lower():
+                            matches += 1
+                    required_matches = min(2, len(name_keywords))
+                    if matches < required_matches:
+                        return False, url
+
+            # Topic signals
+            topic_signals = ["performance", "report", "factsheet", "returns", "monthly", "nav"]
+            if not any(sig in content_lower or sig in url.lower() for sig in topic_signals):
+                return False, url
+
+            # Strict context verification
+            if fund_id == "stake_accumulate":
+                soup = BeautifulSoup(content, 'html.parser')
+                has_pdf = False
+                for a in soup.find_all('a', href=True):
+                    href = a.get('href', '').lower()
+                    if ".pdf" in href and "accumulate" in href:
+                        has_pdf = True
+                        break
+                if not has_pdf:
+                    return False, url
+            elif "coolabah" in fund_id:
+                # Must contain plotly widgets
+                if "htmlwidgets" not in content_lower and "plotly" not in content_lower and "visdat" not in content_lower:
+                    return False, url
+
+            return True, url
     except Exception:
-        return False
+        return False, url
+
+def verify_url(url, fund_id, fund_name, apir_code):
+    # This is kept for backward compatibility for single synchronous calls
+    # but the async version is preferred for bulk candidates
+    return asyncio.run(_single_verify(url, fund_id, fund_name, apir_code))
+
+async def _single_verify(url, fund_id, fund_name, apir_code):
+    async with aiohttp.ClientSession() as session:
+        success, _ = await verify_url_async(session, url, fund_id, fund_name, apir_code)
+        return success
+
+async def verify_candidates_async(candidates, fund_id, fund_name, apir_code):
+    async with aiohttp.ClientSession() as session:
+        tasks = [verify_url_async(session, candidate, fund_id, fund_name, apir_code) for candidate in candidates]
+        results = await asyncio.gather(*tasks)
+
+        # Return the first successful URL, if any
+        for success, url in results:
+            if success:
+                return url
+        return None
+
+async def fetch_yahoo_async(session, query):
+    url = "https://search.yahoo.com/search"
+    params = {'p': query}
+    try:
+        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
+            if resp.status != 200:
+                return []
+            text = await resp.text()
+            soup = BeautifulSoup(text, 'html.parser')
+            links = []
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if "r.search.yahoo.com" in href:
+                    cleaned = clean_yahoo_link(href)
+                    if cleaned.startswith('http') and "yahoo.com" not in cleaned:
+                        links.append(cleaned)
+            return list(dict.fromkeys(links))
+    except Exception as e:
+        return []
+
+async def fetch_ddg_async(session, query):
+    url = "https://html.duckduckgo.com/html/"
+    params = {'q': query}
+    try:
+        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
+            if resp.status != 200:
+                return []
+            text = await resp.text()
+            soup = BeautifulSoup(text, 'html.parser')
+            result_links = []
+            for a in soup.find_all('a', class_='result__a'):
+                href = a.get('href', '')
+                if href:
+                    parsed = urllib.parse.urlparse(href)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    if 'uddg' in qs:
+                        result_links.append(qs['uddg'][0])
+                    else:
+                        result_links.append(href)
+            return result_links
+    except Exception:
+        return []
+
+async def run_searches_async(queries):
+    # Concurrently search both Yahoo and DDG for all queries
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for q in queries:
+            tasks.append(fetch_yahoo_async(session, q))
+            tasks.append(fetch_ddg_async(session, q))
+
+        results = await asyncio.gather(*tasks)
+
+        all_links = []
+        for links in results:
+            all_links.extend(links)
+
+        return list(dict.fromkeys(all_links))
 
 def clean_yahoo_link(url):
     match = re.search(r'/RU=([^/]+)', url)
@@ -138,77 +219,9 @@ def clean_yahoo_link(url):
         return urllib.parse.unquote(match.group(1))
     return url
 
-def search_yahoo(query):
-    url = "https://search.yahoo.com/search"
-    params = {'p': query}
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if "r.search.yahoo.com" in href:
-                cleaned = clean_yahoo_link(href)
-                if cleaned.startswith('http') and "yahoo.com" not in cleaned:
-                    links.append(cleaned)
-        return list(dict.fromkeys(links))
-    except Exception as e:
-        log_attempt(f"Yahoo search failed for query '{query}': {e}")
-        return []
-
-def search_ddg(query):
-    url = "https://html.duckduckgo.com/html/"
-    params = {'q': query}
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        result_links = []
-        for a in soup.find_all('a', class_='result__a'):
-            href = a.get('href', '')
-            if href:
-                parsed = urllib.parse.urlparse(href)
-                qs = urllib.parse.parse_qs(parsed.query)
-                if 'uddg' in qs:
-                    result_links.append(qs['uddg'][0])
-                else:
-                    result_links.append(href)
-        return result_links
-    except Exception as e:
-        log_attempt(f"DDG search failed for query '{query}': {e}")
-        return []
-
-def search_ddg_lite(query):
-    url = "https://lite.duckduckgo.com/lite/"
-    data = {'q': query}
-    try:
-        resp = requests.post(url, data=data, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.startswith('http') and "duckduckgo.com" not in href:
-                links.append(href)
-        return list(dict.fromkeys(links))
-    except Exception as e:
-        log_attempt(f"DDG Lite search failed for query '{query}': {e}")
-        return []
-
-def search_web_engines(query):
-    log_attempt(f"Searching Yahoo for: {query}")
-    results = search_yahoo(query)
-    if results:
-        return results
-    
-    log_attempt(f"Searching DDG for: {query}")
-    results = search_ddg(query)
-    if results:
-        return results
-
-    log_attempt(f"Searching DDG Lite for: {query}")
-    return search_ddg_lite(query)
+def search_web_engines(queries):
+    log_attempt(f"Searching web engines concurrently for {len(queries)} queries...")
+    return asyncio.run(run_searches_async(queries))
 
 def get_truncated_candidates(url):
     parsed = urllib.parse.urlparse(url)
@@ -359,24 +372,23 @@ def main():
     queries.append(f'{fund_name} monthly performance report')
     queries.append(f'{fund_name} factsheet')
 
-    for q in queries:
-        search_results = search_web_engines(q)
-        for link in search_results:
-            if link not in candidates:
-                candidates.append(link)
+    search_results_all = search_web_engines(queries)
+    for link in search_results_all:
+        if link not in candidates:
+            candidates.append(link)
 
     log_attempt(f"Found {len(candidates)} search candidates to verify.")
 
     # Step 3: Run verification & path truncation on candidates
     verified_candidates = []
-    
+
     # Filter candidates to only those containing fund name keywords or APIR code in the URL itself
     filtered_candidates = []
     cleaned_name = fund_name.replace('(', '').replace(')', '').replace('-', ' ')
     for stop_word in ["fund", "class", "assisted", "direct", "investor"]:
         cleaned_name = re.sub(r'\b' + stop_word + r'\b', '', cleaned_name, flags=re.IGNORECASE)
     name_keywords = [kw.lower() for kw in cleaned_name.split() if len(kw) > 2]
-    
+
     for candidate in candidates:
         url_lower = candidate.lower()
         has_id = (apir_code.lower() in url_lower) if apir_code else False
@@ -385,27 +397,29 @@ def main():
                 has_id = True
         if has_id:
             filtered_candidates.append(candidate)
-            
+
     log_attempt(f"Filtered to {len(filtered_candidates)} relevant candidates out of {len(candidates)} total candidates.")
 
-    for candidate in filtered_candidates:
-        log_attempt(f"Verifying search candidate: {candidate}")
-        if verify_url(candidate, fund_id, fund_name, apir_code):
-            verified_url = candidate
-            log_attempt(f"SUCCESS: Verified candidate URL: {verified_url}")
-            break
-        else:
-            # Try Path Truncation Protocol
-            log_attempt(f"Candidate failed verification. Trying path truncation protocol...")
-            truncated_urls = get_truncated_candidates(candidate)
-            for t_url in truncated_urls:
-                log_attempt(f"Trying truncated path: {t_url}")
-                if verify_url(t_url, fund_id, fund_name, apir_code):
-                    verified_url = t_url
-                    log_attempt(f"SUCCESS: Verified truncated URL: {verified_url}")
-                    break
-            if verified_url:
-                break
+    # Concurrently verify the filtered candidates
+    log_attempt("Concurrently verifying candidates...")
+    verified_url = asyncio.run(verify_candidates_async(filtered_candidates, fund_id, fund_name, apir_code))
+
+    if verified_url:
+        log_attempt(f"SUCCESS: Verified candidate URL: {verified_url}")
+    else:
+        # Try Path Truncation Protocol concurrently
+        log_attempt(f"Candidate failed verification. Trying path truncation protocol...")
+        all_truncated = []
+        for candidate in filtered_candidates:
+            all_truncated.extend(get_truncated_candidates(candidate))
+
+        # De-duplicate truncated URLs
+        all_truncated = list(dict.fromkeys(all_truncated))
+        log_attempt(f"Concurrently verifying {len(all_truncated)} truncated path candidates...")
+        verified_url = asyncio.run(verify_candidates_async(all_truncated, fund_id, fund_name, apir_code))
+
+        if verified_url:
+            log_attempt(f"SUCCESS: Verified truncated URL: {verified_url}")
 
     # Step 4: Sitemap & Parent Page crawling (if still not found)
     if not verified_url and candidates:
