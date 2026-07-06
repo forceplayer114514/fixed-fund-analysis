@@ -84,7 +84,7 @@ def fetch_historical_cash_rates(current_rate):
         print("No cache found. Falling back to constant current rate.")
         return {}
 
-def calculate_autocorrelation(returns):
+def calculate_autocorrelation(returns: list[float], fund_name: str = "Unknown") -> tuple[float, float]:
     n = len(returns)
     if n < 2:
         return 0.0, 0.0
@@ -97,7 +97,7 @@ def calculate_autocorrelation(returns):
     q_stat = n * (n + 2) * (phi ** 2) / (n - 1)
     return phi, q_stat
 
-def calculate_downside_deviation_excess(excess_returns):
+def calculate_downside_deviation_excess(excess_returns: list[float], fund_name: str = "Unknown") -> float:
     n = len(excess_returns)
     if n == 0:
         return 0.0
@@ -105,7 +105,7 @@ def calculate_downside_deviation_excess(excess_returns):
     mean_squared = sum(squared_negative) / n
     return (mean_squared * 12) ** 0.5
 
-def calculate_max_drawdown(nav_series):
+def calculate_max_drawdown(nav_series: list[float], fund_name: str = "Unknown") -> float:
     if not nav_series:
         return 0.0
     max_dd = 0.0
@@ -113,10 +113,45 @@ def calculate_max_drawdown(nav_series):
     for nav in nav_series:
         if nav > peak:
             peak = nav
+        if peak < 1e-4:
+            raise ValueError(f"[{fund_name}] peak={peak} (低于 1e-4)，无法计算最大回撤，请检查该基金的 NAV 数据是否异常")
         dd = (nav - peak) / peak
         if dd < max_dd:
             max_dd = dd
     return max_dd
+
+def calculate_annualized_return(compounded_return: float, n_months: int, fund_name: str = "Unknown") -> float:
+    if n_months <= 0:
+        raise ValueError(f"[{fund_name}] n_months={n_months}, 无法计算年化收益率，时间序列月份数必须为正数")
+    return (compounded_return ** (12.0 / n_months)) - 1.0
+
+def calculate_annualized_volatility(returns: list[float], fund_name: str = "Unknown") -> float:
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean_r = sum(returns) / n
+    denominator = n - 1
+    if denominator <= 0:
+        raise ValueError(f"[{fund_name}] denominator={denominator} (n_months - 1), 无法计算年化波动率")
+    variance = sum((r - mean_r) ** 2 for r in returns) / denominator
+    return (variance * 12.0) ** 0.5
+
+def calculate_sortino_ratio(annualized_excess_return: float, downside_deviation: float, fund_name: str = "Unknown", field_name: str = "downside_deviation") -> float:
+    if downside_deviation < 1e-6:
+        raise ValueError(f"[{fund_name}] {field_name}={downside_deviation} (低于下限 1e-6)，无法计算Sortino比率，请检查该基金是否存在异常平稳的收益率序列")
+    return annualized_excess_return / downside_deviation
+
+def unsmooth_returns(returns: list[float], phi: float, fund_name: str = "Unknown") -> list[float]:
+    if not returns:
+        return []
+    denom = 1.0 - phi
+    if denom < 0.01:
+        raise ValueError(f"[{fund_name}] phi={phi} 导致分母 1 - phi 为 {denom} (低于下限 0.01)，无法进行 Geltner 去平滑计算")
+    unsmoothed_returns = [returns[0]]
+    for t in range(1, len(returns)):
+        unsmoothed_val = (returns[t] - phi * returns[t-1]) / denom
+        unsmoothed_returns.append(unsmoothed_val)
+    return unsmoothed_returns
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate portfolio comparison metrics for Australian Fixed Income Funds.")
@@ -155,7 +190,7 @@ def main():
 
     # Also extract full NAV series for max drawdown (including index 0)
     nav_series = [dp["nav"] for dp in time_series]
-    max_dd = calculate_max_drawdown(nav_series)
+    max_dd = calculate_max_drawdown(nav_series, fund_name=data.get("fund_name", fund_id))
 
     n_months = len(returns)
     print(f"History length: {n_months} months.")
@@ -170,24 +205,23 @@ def main():
         rate = historical_rates.get(d[:7], current_rba_rate)
         fund_rf_rates.append(rate)
     
+    fund_name = data.get("fund_name", fund_id)
+
     # 1. Unsmoothing (Geltner)
     phi = 0.0
     q_stat = 0.0
     is_geltner_applied = False
     unsmoothed_returns = list(returns)
-    
+
     if n_months >= 36:
-        phi, q_stat = calculate_autocorrelation(returns)
+        phi, q_stat = calculate_autocorrelation(returns, fund_name=fund_name)
         is_significant = q_stat > 3.841
         print(f"Estimated phi: {phi:.4f}, Q-stat: {q_stat:.4f} (Significant: {is_significant})")
-        
+
         if is_significant and (0.0 <= phi <= 0.85):
             print(f"Geltner unsmoothing applied with phi={phi:.4f}")
             is_geltner_applied = True
-            unsmoothed_returns = [returns[0]]
-            for t in range(1, len(returns)):
-                unsmoothed_val = (returns[t] - phi * returns[t-1]) / (1.0 - phi)
-                unsmoothed_returns.append(unsmoothed_val)
+            unsmoothed_returns = unsmooth_returns(returns, phi, fund_name=fund_name)
         else:
             print("Geltner unsmoothing skipped (phi negative, too high, or not significant).")
     else:
@@ -204,51 +238,48 @@ def main():
     comp_orig_abs = 1.0
     for r in returns:
         comp_orig_abs *= (1.0 + r)
-    ann_return_original = (comp_orig_abs ** (12 / n_months)) - 1.0
-    
+    ann_return_original = calculate_annualized_return(comp_orig_abs, n_months, fund_name=fund_name)
+
     # Compound Annualized RBA Benchmark
     comp_rba = 1.0
     for rf in fund_rf_rates:
         comp_rba *= (1.0 + rf / 12.0)
-    ann_rba = (comp_rba ** (12 / n_months)) - 1.0
-    
+    ann_rba = calculate_annualized_return(comp_rba, n_months, fund_name=fund_name)
+
     # Original Excess (Difference between Fund and RBA annualized returns)
     ann_excess_return_original = ann_return_original - ann_rba
-    
+
     # Unsmoothed Absolute
     comp_un_abs = 1.0
     for r in unsmoothed_returns:
         comp_un_abs *= (1.0 + r)
-    ann_return_unsmoothed = (comp_un_abs ** (12 / n_months)) - 1.0
-    
+    ann_return_unsmoothed = calculate_annualized_return(comp_un_abs, n_months, fund_name=fund_name)
+
     # Unsmoothed Excess (Difference between Unsmoothed Fund and RBA annualized returns)
     ann_excess_return_unsmoothed = ann_return_unsmoothed - ann_rba
     
     # 3. Annualized Volatility
-    # Absolute Volatility
-    mean_orig_abs = sum(returns) / n_months
-    vol_orig_abs = (sum((r - mean_orig_abs) ** 2 for r in returns) / (n_months - 1)) ** 0.5
-    ann_vol_original = vol_orig_abs * (12 ** 0.5)
-    
-    mean_un_abs = sum(unsmoothed_returns) / n_months
-    vol_un_abs = (sum((r - mean_un_abs) ** 2 for r in unsmoothed_returns) / (n_months - 1)) ** 0.5
-    ann_vol_unsmoothed = vol_un_abs * (12 ** 0.5)
-    
-    # Excess Volatility
-    mean_orig_ex = sum(excess_returns_original) / n_months
-    vol_orig_ex = (sum((rx - mean_orig_ex) ** 2 for rx in excess_returns_original) / (n_months - 1)) ** 0.5
-    ann_vol_excess_original = vol_orig_ex * (12 ** 0.5)
-    
-    mean_un_ex = sum(excess_returns_unsmoothed) / n_months
-    vol_un_ex = (sum((rx - mean_un_ex) ** 2 for rx in excess_returns_unsmoothed) / (n_months - 1)) ** 0.5
-    ann_vol_excess_unsmoothed = vol_un_ex * (12 ** 0.5)
-    
+    ann_vol_original = calculate_annualized_volatility(returns, fund_name=fund_name)
+    ann_vol_unsmoothed = calculate_annualized_volatility(unsmoothed_returns, fund_name=fund_name)
+    ann_vol_excess_original = calculate_annualized_volatility(excess_returns_original, fund_name=fund_name)
+    ann_vol_excess_unsmoothed = calculate_annualized_volatility(excess_returns_unsmoothed, fund_name=fund_name)
+
     # 4. Sortino Ratio (using excess returns and downside deviation of excess returns relative to 0)
-    downside_original = calculate_downside_deviation_excess(excess_returns_original)
-    sortino_original = ann_excess_return_original / downside_original if downside_original > 0 else 0.0
-    
-    downside_unsmoothed = calculate_downside_deviation_excess(excess_returns_unsmoothed)
-    sortino_unsmoothed = ann_excess_return_unsmoothed / downside_unsmoothed if downside_unsmoothed > 0 else 0.0
+    downside_original = calculate_downside_deviation_excess(excess_returns_original, fund_name=fund_name)
+    sortino_original = calculate_sortino_ratio(
+        ann_excess_return_original,
+        downside_original,
+        fund_name=fund_name,
+        field_name="downside_deviation_original"
+    )
+
+    downside_unsmoothed = calculate_downside_deviation_excess(excess_returns_unsmoothed, fund_name=fund_name)
+    sortino_unsmoothed = calculate_sortino_ratio(
+        ann_excess_return_unsmoothed,
+        downside_unsmoothed,
+        fund_name=fund_name,
+        field_name="downside_deviation_unsmoothed"
+    )
     
     # ponytail: Removed credit spread decomposition and leverage contribution calculations.
     # We no longer calculate credit spread or leverage effects since leverage ratio data cannot be parsed reliably.
