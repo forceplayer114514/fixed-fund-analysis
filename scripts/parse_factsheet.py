@@ -238,24 +238,30 @@ def parse_bentham(fund_dir):
             # Note that sometimes there's a footnote '1' or '2' attached to it without space, or with space
             # We must be careful not to match "Total Return (after fees) is calculated..." or similar boilerplate text.
             # Usually the table format puts numbers right after. We can bound it by Benchmark.
-            ret_match = re.search(r'Total return \(after fees\)\s*1?\s*(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
+            ret_match = re.search(r'Total return \(after fees\)(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
             if ret_match:
                 numbers = ret_match.group(1).split()
                 if numbers:
                     num_str = numbers[0]
-                    # Handle cases where footnote "1" is prepended directly to a positive return, e.g., "11.25" meant to be "1" and "1.25"
-                    # But be careful not to clip legitimate "11.25" if it was meant to be 11.25%.
-                    # We can use a safer approach: look for a stray '1' footnote at the start of the match if it's stuck.
-                    if num_str.startswith('1') and len(num_str) > 1 and num_str[1] in '.-0123456789':
-                        # Check if taking off the 1 still leaves a valid float
-                        try:
-                            test_float = float(num_str[1:])
-                            # In monthly fixed income, a monthly return of >10% is extremely unlikely,
-                            # whereas <10% is normal. We only strip if the original float is suspiciously large (e.g., >= 10).
-                            if float(num_str) >= 10.0:
-                                num_str = num_str[1:]
-                        except ValueError:
-                            pass
+                    # Handle cases where footnote "1" is attached.
+                    # Usually it's "1" followed immediately by the return.
+                    # e.g., "11.25" -> "1" + "1.25"
+                    #       "1-0.19" -> "1" + "-0.19"
+                    #       "10.05" -> "1" + "0.05"
+
+                    if num_str == "1" and len(numbers) > 1:
+                        # The footnote was separated by a space (e.g. "1 -0.40")
+                        num_str = numbers[1]
+                    elif num_str.startswith("1-"):
+                        # Footnote attached to negative return (e.g. "1-0.19")
+                        num_str = num_str[1:]
+                    elif num_str.startswith("1") and len(num_str) >= 3 and num_str[2] == ".":
+                        # Footnote attached to a positive return with leading digit (e.g. "11.32" or "10.95")
+                        # We safely assume monthly returns >= 10% are practically impossible for this fund,
+                        # so "14.09" means footnote 1 + 4.09% return.
+                        # Legitimate returns like "1.18" have the decimal at index 1 and are preserved.
+                        num_str = num_str[1:]
+
                     try:
                         net_return = float(num_str) / 100.0
                     except ValueError:
