@@ -3,22 +3,102 @@ import sys
 import subprocess
 import yaml
 import datetime
-
 import argparse
+import threading
+import re
+from typing import List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REGISTRY_PATH = os.path.join(BASE_DIR, "references", "fund_registry.yaml")
+BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REGISTRY_PATH: str = os.path.join(BASE_DIR, "references", "fund_registry.yaml")
 
-def run_cmd(args):
+print_lock: threading.Lock = threading.Lock()
+
+def run_cmd(args: List[str]) -> None:
     print(f"\nRunning command: {' '.join(args)}")
     res = subprocess.run(args, capture_output=True, text=True, cwd=BASE_DIR)
     if res.returncode != 0:
         print(f"Error executing command: {' '.join(args)}", file=sys.stderr)
         print(res.stderr, file=sys.stderr)
         sys.exit(1)
-    print(res.stdout)
+    if res.stdout:
+        print(res.stdout)
 
-def main():
+def run_cmd_for_fund(args: List[str], log_lines: List[str]) -> None:
+    log_lines.append(f"Running command: {' '.join(args)}")
+    res = subprocess.run(args, capture_output=True, text=True, cwd=BASE_DIR)
+    if res.returncode != 0:
+        log_lines.append(f"Error executing command: {' '.join(args)}")
+        if res.stdout:
+            log_lines.append(res.stdout)
+        if res.stderr:
+            log_lines.append(res.stderr)
+        raise RuntimeError(f"Command failed: {' '.join(args)}\nError: {res.stderr}")
+    if res.stdout:
+        log_lines.append(res.stdout)
+
+def run_single_fund_pipeline(
+    fund_id: str,
+    latest_date: Optional[str],
+    is_stale: bool
+) -> Tuple[str, Optional[str]]:
+    log_lines: List[str] = []
+    log_lines.append(f"\n==================================================================")
+    log_lines.append(f"Starting pipeline for fund: {fund_id} (stale={is_stale}, base_date={latest_date})")
+    log_lines.append(f"==================================================================")
+
+    try:
+        # Step 0: URL Discovery (Active verification)
+        if is_stale:
+            log_lines.append(f"\n--- [{fund_id}] Pipeline Step 0: Running URL Discovery ---")
+            run_cmd_for_fund(["python3", "scripts/discover_source.py", "--fund", fund_id], log_lines)
+
+            # Step 1: Fetch raw assets
+            log_lines.append(f"\n--- [{fund_id}] Pipeline Step 1: Fetching Web Assets ---")
+            run_cmd_for_fund(["python3", "scripts/fetch_web.py", "--fund", fund_id], log_lines)
+
+            # Step 2: Parse raw assets into structured JSON
+            log_lines.append(f"\n--- [{fund_id}] Pipeline Step 2: Parsing Factsheets ---")
+            run_cmd_for_fund(["python3", "scripts/parse_factsheet.py", "--fund", fund_id], log_lines)
+
+            # Check output files to see the generated latest date
+            fund_dir = os.path.join(BASE_DIR, "data", "raw", fund_id)
+            if os.path.exists(fund_dir):
+                json_files = [f for f in os.listdir(fund_dir) if re.match(r"^\d{4}-\d{2}\.json$", f)]
+                if json_files:
+                    json_files.sort()
+                    latest_date = json_files[-1].replace(".json", "")
+                else:
+                    latest_date = None
+            else:
+                latest_date = None
+
+        # Step 3 & 4: Validate and compute metrics
+        if latest_date:
+            log_lines.append(f"\n--- [{fund_id}] Pipeline Step 3 & 4: Data Validation and Metrics Calculation ---")
+            run_cmd_for_fund(["python3", "scripts/validate_data.py", "--fund", fund_id, "--date", latest_date], log_lines)
+            run_cmd_for_fund(["python3", "scripts/metrics.py", "--fund", fund_id, "--date", latest_date], log_lines)
+        else:
+            log_lines.append(f"\n--- [{fund_id}] Warning: No valid parsed data found. Skipping Step 3 & 4. ---")
+
+        log_lines.append(f"\n==================================================================")
+        log_lines.append(f"Successfully completed pipeline for fund: {fund_id}")
+        log_lines.append(f"==================================================================")
+
+        # Print the entire log buffer for this fund atomically
+        with print_lock:
+            print("\n".join(log_lines))
+        return fund_id, latest_date
+    except Exception as e:
+        log_lines.append(f"\n==================================================================")
+        log_lines.append(f"FAILED pipeline for fund: {fund_id}")
+        log_lines.append(f"Error: {e}")
+        log_lines.append(f"==================================================================")
+        with print_lock:
+            print("\n".join(log_lines), file=sys.stderr)
+        raise
+
+def main() -> None:
     print("==================================================================")
     print("Australian Fixed Income Fund Comparison Pipeline (End-to-End Run)")
     print("==================================================================")
@@ -48,31 +128,31 @@ def main():
             funds.append(f_id)
     else:
         funds = list(registry.keys())
-        
+
     print(f"Target funds: {', '.join(funds)}")
-    
+
     # 1.5. Freshness Check
     print("\n--- Pipeline Pre-check: Evaluating Data Freshness ---")
-    stale_funds = []
-    parsed_funds = {}  # Store the latest date for each fund (both fresh and stale)
+    stale_funds: List[str] = []
+    parsed_funds: Dict[str, str] = {}  # Store the latest date for each fund (both fresh and stale)
     current_date = datetime.datetime.now()
-    
+
     for fund in funds:
         fund_dir = os.path.join(BASE_DIR, "data", "raw", fund)
         latest_date = None
-        
+
         if os.path.exists(fund_dir):
-            json_files = [f for f in os.listdir(fund_dir) if f.endswith(".json") and f != "manifest.json"]
+            json_files = [f for f in os.listdir(fund_dir) if re.match(r"^\d{4}-\d{2}\.json$", f)]
             if json_files:
                 json_files.sort()
                 latest_date = json_files[-1].replace(".json", "")
-                
+
         if latest_date:
             try:
                 # Expecting format YYYY-MM
                 data_year, data_month = map(int, latest_date.split("-"))
                 month_diff = (current_date.year - data_year) * 12 + (current_date.month - data_month)
-                
+
                 if month_diff <= 2:
                     print(f"[Skip] Fund '{fund}' has recent data up to {latest_date} (diff: {month_diff} months). Skipping Web Fetch and PDF parsing.")
                     parsed_funds[fund] = latest_date
@@ -86,42 +166,32 @@ def main():
             print(f"[Missing] Fund '{fund}' has no local data. Triggering web fetch...")
             stale_funds.append(fund)
 
-    
-    # 2. Run Pipeline Steps (Only for stale_funds)
-    if stale_funds:
-        print(f"\nExecuting full fetch & parse pipeline for: {', '.join(stale_funds)}")
-        
-        # Step 0: URL Discovery (Active verification)
-        print("\n--- Pipeline Step 0: Running URL Discovery ---")
-        for fund in stale_funds:
-            run_cmd(["python3", "scripts/discover_source.py", "--fund", fund])
-            
-        # Step 1: Fetch raw assets
-        print("\n--- Pipeline Step 1: Fetching Web Assets ---")
-        for fund in stale_funds:
-            run_cmd(["python3", "scripts/fetch_web.py", "--fund", fund])
-            
-        # Step 2: Parse raw assets into structured JSON
-        print("\n--- Pipeline Step 2: Parsing Factsheets ---")
-        for fund in stale_funds:
-            run_cmd(["python3", "scripts/parse_factsheet.py", "--fund", fund])
-            
-            # Check output files to see the generated latest date
-            fund_dir = os.path.join(BASE_DIR, "data", "raw", fund)
-            json_files = [f for f in os.listdir(fund_dir) if f.endswith(".json") and f != "manifest.json"]
-            if json_files:
-                json_files.sort()
-                latest_date = json_files[-1].replace(".json", "")
-                parsed_funds[fund] = latest_date
-    else:
-        print("\nAll target funds are fresh. Skipping Steps 0, 1, and 2.")
-            
-    # Step 3 & 4: Validate and compute metrics (For all funds that have a parsed date)
-    print("\n--- Pipeline Step 3 & 4: Data Validation and Metrics Calculation ---")
-    for fund, date in parsed_funds.items():
-        run_cmd(["python3", "scripts/validate_data.py", "--fund", fund, "--date", date])
-        run_cmd(["python3", "scripts/metrics.py", "--fund", fund, "--date", date])
-        
+    # 2. Run Pipeline Steps Concurrently
+    print("\n--- Running Pipelines Concurrently for All Target Funds ---")
+    futures = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for fund in funds:
+            is_stale = fund in stale_funds
+            fund_latest_date = parsed_funds.get(fund)
+            future = executor.submit(run_single_fund_pipeline, fund, fund_latest_date, is_stale)
+            futures[future] = fund
+
+    # Collect results and check for failures
+    failed_funds: List[str] = []
+    for future in as_completed(futures):
+        fund_id = futures[future]
+        try:
+            res_fund_id, latest_date = future.result()
+            if latest_date:
+                parsed_funds[res_fund_id] = latest_date
+        except Exception as e:
+            print(f"CRITICAL: Fund '{fund_id}' pipeline execution failed: {e}", file=sys.stderr)
+            failed_funds.append(fund_id)
+
+    if failed_funds:
+        print(f"\nCRITICAL: The following funds failed to process: {', '.join(failed_funds)}", file=sys.stderr)
+        sys.exit(1)
+
     # Step 5: Report compilation
     print("\n--- Pipeline Step 5: Compiling Comparison Report ---")
     if parsed_funds:
@@ -131,7 +201,7 @@ def main():
         run_cmd(cmd)
     else:
         print("No valid parsed data found for any fund. Skipping report generation.")
-    
+
     print("\n==================================================================")
     print("Pipeline run completed successfully!")
     print("==================================================================")
