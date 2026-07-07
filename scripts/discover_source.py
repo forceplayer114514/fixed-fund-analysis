@@ -345,16 +345,27 @@ def main():
     # Step 1: Check existing confirmed URL
     confirmed_url = fund_info.get("confirmed_url")
     if confirmed_url:
-        log_attempt(f"Registry has existing URL: {confirmed_url}. Verifying...")
-        if verify_url(confirmed_url, fund_id, fund_name, apir_code):
-            log_attempt(f"SUCCESS: Existing URL is verified and active: {confirmed_url}")
-            # Update verification date
-            fund_info["verified_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
-            fund_info["verification_signal"] = "Verified existing registry URL"
-            save_registry(registry)
-            sys.exit(0)
+        log_attempt(f"Registry has existing URL: {confirmed_url}. Checking with quick HEAD request...")
+        try:
+            # 轻量探测以提高速度
+            resp = requests.head(confirmed_url, headers=HEADERS, timeout=5)
+            is_alive = (resp.status_code == 200)
+        except Exception:
+            is_alive = False
+
+        if is_alive:
+            log_attempt(f"Quick check succeeded. Verifying content rules...")
+            if verify_url(confirmed_url, fund_id, fund_name, apir_code):
+                log_attempt(f"SUCCESS: Existing URL is verified and active: {confirmed_url}")
+                fund_info["verified_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
+                fund_info["verification_signal"] = "Verified existing registry URL via quick probe"
+                save_registry(registry)
+                sys.exit(0)
+            else:
+                log_attempt(f"Warning: Content rules verification failed for {confirmed_url}. Proceeding to active discovery.")
+                fund_info["confirmed_url"] = ""
         else:
-            log_attempt(f"Warning: Existing registry URL is dead/inactive: {confirmed_url}. Proceeding to active discovery.")
+            log_attempt(f"Warning: Existing registry URL is dead/inactive (HEAD failed): {confirmed_url}. Proceeding to active discovery.")
             fund_info["confirmed_url"] = ""
 
     # Active Discovery Process
