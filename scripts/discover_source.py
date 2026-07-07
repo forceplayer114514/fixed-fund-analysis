@@ -10,18 +10,37 @@ import yaml
 import re
 import asyncio
 import aiohttp
+import time
+from typing import List, Dict, Tuple, Optional, Any
 
 # Path setup
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY_PATH = os.path.join(BASE_DIR, "references", "fund_registry.yaml")
 LOG_PATH = os.path.join(BASE_DIR, "references", "discovery_log.md")
 
+# Global Timeout Settings
+GLOBAL_TIMEOUT_SECS: int = 45
+START_TIME: Optional[float] = None
+
+def check_timeout() -> None:
+    if START_TIME is None:
+        return
+    elapsed = time.time() - START_TIME
+    if elapsed >= GLOBAL_TIMEOUT_SECS:
+        raise TimeoutError("Global timeout exceeded (45 seconds budget)")
+
+def get_remaining_timeout() -> float:
+    if START_TIME is None:
+        return float(GLOBAL_TIMEOUT_SECS)
+    elapsed = time.time() - START_TIME
+    return max(0.1, GLOBAL_TIMEOUT_SECS - elapsed)
+
 # Default headers to avoid blocks
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def log_attempt(message):
+def log_attempt(message: str) -> None:
     print(message)
     # Check size of log file and rotate if it exceeds 1MB
     if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 1000000:
@@ -44,9 +63,9 @@ def log_attempt(message):
     except Exception as e:
         print(f"Warning: Failed to write to log file: {e}", file=sys.stderr)
 
-async def verify_url_async(session, url, fund_id, fund_name, apir_code):
+async def verify_url_async(session: aiohttp.ClientSession, url: str, fund_id: str, fund_name: str, apir_code: Optional[str]) -> Tuple[bool, str]:
     try:
-        async with session.get(url, headers=HEADERS, timeout=15) as resp:
+        async with session.get(url, headers=HEADERS, timeout=6) as resp:
             if resp.status != 200:
                 return False, url
 
@@ -133,17 +152,17 @@ async def verify_url_async(session, url, fund_id, fund_name, apir_code):
     except Exception:
         return False, url
 
-def verify_url(url, fund_id, fund_name, apir_code):
+def verify_url(url: str, fund_id: str, fund_name: str, apir_code: Optional[str]) -> bool:
     # This is kept for backward compatibility for single synchronous calls
     # but the async version is preferred for bulk candidates
     return asyncio.run(_single_verify(url, fund_id, fund_name, apir_code))
 
-async def _single_verify(url, fund_id, fund_name, apir_code):
+async def _single_verify(url: str, fund_id: str, fund_name: str, apir_code: Optional[str]) -> bool:
     async with aiohttp.ClientSession() as session:
         success, _ = await verify_url_async(session, url, fund_id, fund_name, apir_code)
         return success
 
-async def verify_candidates_async(candidates, fund_id, fund_name, apir_code):
+async def verify_candidates_async(candidates: List[str], fund_id: str, fund_name: str, apir_code: Optional[str]) -> Optional[str]:
     async with aiohttp.ClientSession() as session:
         tasks = [verify_url_async(session, candidate, fund_id, fund_name, apir_code) for candidate in candidates]
         results = await asyncio.gather(*tasks)
@@ -154,11 +173,11 @@ async def verify_candidates_async(candidates, fund_id, fund_name, apir_code):
                 return url
         return None
 
-async def fetch_yahoo_async(session, query):
+async def fetch_yahoo_async(session: aiohttp.ClientSession, query: str) -> List[str]:
     url = "https://search.yahoo.com/search"
     params = {'p': query}
     try:
-        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
+        async with session.get(url, params=params, headers=HEADERS, timeout=6) as resp:
             if resp.status != 200:
                 return []
             text = await resp.text()
@@ -174,11 +193,11 @@ async def fetch_yahoo_async(session, query):
     except Exception as e:
         return []
 
-async def fetch_ddg_async(session, query):
+async def fetch_ddg_async(session: aiohttp.ClientSession, query: str) -> List[str]:
     url = "https://html.duckduckgo.com/html/"
     params = {'q': query}
     try:
-        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
+        async with session.get(url, params=params, headers=HEADERS, timeout=6) as resp:
             if resp.status != 200:
                 return []
             text = await resp.text()
@@ -197,7 +216,7 @@ async def fetch_ddg_async(session, query):
     except Exception:
         return []
 
-async def run_searches_async(queries):
+async def run_searches_async(queries: List[str]) -> List[str]:
     # Concurrently search both Yahoo and DDG for all queries
     async with aiohttp.ClientSession() as session:
         tasks = []
@@ -213,17 +232,17 @@ async def run_searches_async(queries):
 
         return list(dict.fromkeys(all_links))
 
-def clean_yahoo_link(url):
+def clean_yahoo_link(url: str) -> str:
     match = re.search(r'/RU=([^/]+)', url)
     if match:
         return urllib.parse.unquote(match.group(1))
     return url
 
-def search_web_engines(queries):
+def search_web_engines(queries: List[str]) -> List[str]:
     log_attempt(f"Searching web engines concurrently for {len(queries)} queries...")
     return asyncio.run(run_searches_async(queries))
 
-def get_truncated_candidates(url):
+def get_truncated_candidates(url: str) -> List[str]:
     parsed = urllib.parse.urlparse(url)
     path_parts = [p for p in parsed.path.split('/') if p]
     candidates = []
@@ -239,36 +258,47 @@ def get_truncated_candidates(url):
             candidates.append(urllib.parse.urlunparse((parsed.scheme, parsed.netloc, new_path, '', '', '')))
     return list(dict.fromkeys(candidates))
 
-def parse_sitemap(domain_root, keywords):
+def parse_sitemap(domain_root: str, keywords: List[str]) -> List[str]:
     sitemap_url = urllib.parse.urljoin(domain_root, "/sitemap.xml")
     log_attempt(f"Checking sitemap: {sitemap_url}")
     try:
-        resp = requests.get(sitemap_url, headers=HEADERS, timeout=10)
+        resp = requests.get(sitemap_url, headers=HEADERS, timeout=6)
         if resp.status_code != 200:
             return []
-        
+
         # Parse XML
         root = ET.fromstring(resp.content)
         # Handle namespaces
         namespace = ''
         if root.tag.startswith('{'):
             namespace = root.tag.split('}')[0] + '}'
-            
+
         urls = []
         for url_node in root.findall(f'.//{namespace}loc'):
+            if url_node.text is None:
+                continue
             url = url_node.text.strip()
+
+            # Filter by path depth (<= 5 segments, excluding host)
+            parsed = urllib.parse.urlparse(url)
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if len(path_parts) > 5:
+                continue
+
             # Filter by keywords in URL path
             if any(kw.lower() in url.lower() for kw in keywords):
                 urls.append(url)
+                if len(urls) >= 15:
+                    break
         return urls
     except Exception as e:
         log_attempt(f"Sitemap parsing failed for {domain_root}: {e}")
         return []
 
-def extract_links_from_page(parent_url, keywords):
+def extract_links_from_page(parent_url: str, keywords: List[str]) -> List[str]:
     log_attempt(f"Extracting links from parent page: {parent_url}")
     try:
-        resp = requests.get(parent_url, headers=HEADERS, timeout=10)
+        resp = requests.get(parent_url, headers=HEADERS, timeout=6)
         if resp.status_code != 200:
             return []
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -288,11 +318,11 @@ def extract_links_from_page(parent_url, keywords):
         log_attempt(f"Failed to extract links from {parent_url}: {e}")
         return []
 
-def check_wayback_machine(url):
+def check_wayback_machine(url: str) -> Optional[str]:
     wayback_api = f"http://archive.org/wayback/available?url={url}"
     log_attempt(f"Checking Wayback Machine for: {url}")
     try:
-        resp = requests.get(wayback_api, headers=HEADERS, timeout=10)
+        resp = requests.get(wayback_api, headers=HEADERS, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             snapshots = data.get("archived_snapshots", {})
@@ -304,18 +334,18 @@ def check_wayback_machine(url):
         log_attempt(f"Wayback Machine lookup failed: {e}")
     return None
 
-def load_registry():
+def load_registry() -> Dict[str, Any]:
     if not os.path.exists(REGISTRY_PATH):
         raise FileNotFoundError(f"Fund registry file not found at {REGISTRY_PATH}")
     with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-def save_registry(registry):
+def save_registry(registry: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
     with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(registry, f, default_flow_style=False, allow_unicode=True)
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Discover and verify Australian Fixed Income Fund report URLs.")
     parser.add_argument("--fund", required=True, help="Fund ID to discover sources for (e.g. stake_accumulate)")
     args = parser.parse_args()
@@ -348,7 +378,7 @@ def main():
         log_attempt(f"Registry has existing URL: {confirmed_url}. Checking with quick HEAD request...")
         try:
             # 轻量探测以提高速度
-            resp = requests.head(confirmed_url, headers=HEADERS, timeout=5)
+            resp = requests.head(confirmed_url, headers=HEADERS, timeout=6)
             is_alive = (resp.status_code == 200)
         except Exception:
             is_alive = False
@@ -369,123 +399,186 @@ def main():
             fund_info["confirmed_url"] = ""
 
     # Active Discovery Process
-    verified_url = None
-    log_attempt(f"Starting active discovery steps for {fund_name} (APIR: {apir_code})")
+    global START_TIME
+    START_TIME = time.time()
 
-    # Candidates pool
-    candidates = []
+    try:
+        check_timeout()
+        verified_url = None
+        log_attempt(f"Starting active discovery steps for {fund_name} (APIR: {apir_code})")
 
-    # Step 2: APIR search & Fund Name search on DDG
-    queries = []
-    if apir_code:
-        queries.append(f'{apir_code} monthly performance report')
-        queries.append(f'{apir_code} factsheet')
-    queries.append(f'{fund_name} monthly performance report')
-    queries.append(f'{fund_name} factsheet')
+        # Candidates pool
+        candidates = []
 
-    search_results_all = search_web_engines(queries)
-    for link in search_results_all:
-        if link not in candidates:
-            candidates.append(link)
+        # Step 2: APIR search & Fund Name search on DDG
+        queries = []
+        if apir_code:
+            queries.append(f'{apir_code} monthly performance report')
+            queries.append(f'{apir_code} factsheet')
+        queries.append(f'{fund_name} monthly performance report')
+        queries.append(f'{fund_name} factsheet')
 
-    log_attempt(f"Found {len(candidates)} search candidates to verify.")
+        search_results_all = search_web_engines(queries)
+        check_timeout()
+        for link in search_results_all:
+            if link not in candidates:
+                candidates.append(link)
 
-    # Step 3: Run verification & path truncation on candidates
-    verified_candidates = []
+        log_attempt(f"Found {len(candidates)} search candidates to verify.")
 
-    # Filter candidates to only those containing fund name keywords or APIR code in the URL itself
-    filtered_candidates = []
-    cleaned_name = fund_name.replace('(', '').replace(')', '').replace('-', ' ')
-    for stop_word in ["fund", "class", "assisted", "direct", "investor"]:
-        cleaned_name = re.sub(r'\b' + stop_word + r'\b', '', cleaned_name, flags=re.IGNORECASE)
-    name_keywords = [kw.lower() for kw in cleaned_name.split() if len(kw) > 2]
+        # Step 3: Run verification & path truncation on candidates
+        verified_candidates = []
 
-    for candidate in candidates:
-        url_lower = candidate.lower()
-        has_id = (apir_code.lower() in url_lower) if apir_code else False
-        if not has_id:
-            if any(kw in url_lower for kw in name_keywords):
-                has_id = True
-        if has_id:
-            filtered_candidates.append(candidate)
+        # Filter candidates to only those containing fund name keywords or APIR code in the URL itself
+        filtered_candidates = []
+        cleaned_name = fund_name.replace('(', '').replace(')', '').replace('-', ' ')
+        for stop_word in ["fund", "class", "assisted", "direct", "investor"]:
+            cleaned_name = re.sub(r'\b' + stop_word + r'\b', '', cleaned_name, flags=re.IGNORECASE)
+        name_keywords = [kw.lower() for kw in cleaned_name.split() if len(kw) > 2]
 
-    log_attempt(f"Filtered to {len(filtered_candidates)} relevant candidates out of {len(candidates)} total candidates.")
+        for candidate in candidates:
+            url_lower = candidate.lower()
+            has_id = (apir_code.lower() in url_lower) if apir_code else False
+            if not has_id:
+                if any(kw in url_lower for kw in name_keywords):
+                    has_id = True
+            if has_id:
+                filtered_candidates.append(candidate)
 
-    # Concurrently verify the filtered candidates
-    log_attempt("Concurrently verifying candidates...")
-    verified_url = asyncio.run(verify_candidates_async(filtered_candidates, fund_id, fund_name, apir_code))
+        # Truncate filtered candidates to at most 15
+        filtered_candidates = filtered_candidates[:15]
+        check_timeout()
 
-    if verified_url:
-        log_attempt(f"SUCCESS: Verified candidate URL: {verified_url}")
-    else:
-        # Try Path Truncation Protocol concurrently
-        log_attempt(f"Candidate failed verification. Trying path truncation protocol...")
-        all_truncated = []
-        for candidate in filtered_candidates:
-            all_truncated.extend(get_truncated_candidates(candidate))
+        log_attempt(f"Filtered to {len(filtered_candidates)} relevant candidates out of {len(candidates)} total candidates.")
 
-        # De-duplicate truncated URLs
-        all_truncated = list(dict.fromkeys(all_truncated))
-        log_attempt(f"Concurrently verifying {len(all_truncated)} truncated path candidates...")
-        verified_url = asyncio.run(verify_candidates_async(all_truncated, fund_id, fund_name, apir_code))
+        # Concurrently verify the filtered candidates
+        log_attempt("Concurrently verifying candidates...")
+        remaining = get_remaining_timeout()
+        try:
+            verified_url = asyncio.run(asyncio.wait_for(
+                verify_candidates_async(filtered_candidates, fund_id, fund_name, apir_code),
+                timeout=remaining
+            ))
+        except (asyncio.TimeoutError, TimeoutError):
+            log_attempt("Timeout during candidate verification")
+            verified_url = None
 
         if verified_url:
-            log_attempt(f"SUCCESS: Verified truncated URL: {verified_url}")
+            log_attempt(f"SUCCESS: Verified candidate URL: {verified_url}")
+        else:
+            # Try Path Truncation Protocol concurrently
+            check_timeout()
+            log_attempt("Candidate failed verification. Trying path truncation protocol...")
+            all_truncated = []
+            for candidate in filtered_candidates:
+                all_truncated.extend(get_truncated_candidates(candidate))
 
-    # Step 4: Sitemap & Parent Page crawling (if still not found)
-    if not verified_url and candidates:
-        # Extract unique domains from candidates to run sitemaps and parent pages
-        domains = list(set([urllib.parse.urlunparse((urllib.parse.urlparse(c).scheme, urllib.parse.urlparse(c).netloc, '', '', '', '')) for c in candidates]))
-        for dom in domains:
-            # Try sitemap
-            sitemap_urls = parse_sitemap(dom, ["performance", "monthly", "report", "factsheet"])
-            for s_url in sitemap_urls:
-                log_attempt(f"Verifying sitemap candidate: {s_url}")
-                if verify_url(s_url, fund_id, fund_name, apir_code):
-                    verified_url = s_url
-                    log_attempt(f"SUCCESS: Verified URL from sitemap: {verified_url}")
-                    break
+            # De-duplicate truncated URLs
+            all_truncated = list(dict.fromkeys(all_truncated))
+            all_truncated = all_truncated[:15]
+
+            check_timeout()
+            log_attempt(f"Concurrently verifying {len(all_truncated)} truncated path candidates...")
+            remaining = get_remaining_timeout()
+            try:
+                verified_url = asyncio.run(asyncio.wait_for(
+                    verify_candidates_async(all_truncated, fund_id, fund_name, apir_code),
+                    timeout=remaining
+                ))
+            except (asyncio.TimeoutError, TimeoutError):
+                log_attempt("Timeout during truncated candidates verification")
+                verified_url = None
+
             if verified_url:
-                break
-            
-            # Try parent page crawling (e.g. going up to legal or support roots if found in candidates)
-            parent_roots = [c for c in candidates if c.startswith(dom) and (('/legal' in c) or ('/support' in c) or ('/documents' in c) or ('/performance' in c) or ('/download' in c))]
-            for p_root in parent_roots:
-                # Go up to the section root
-                section_url = p_root
-                if p_root.endswith('.pdf'):
-                    # Get folder
-                    section_url = os.path.dirname(p_root) + '/'
-                
-                sub_links = extract_links_from_page(section_url, ["performance", "monthly", "report", "factsheet", apir_code])
-                for sub_link in sub_links:
-                    log_attempt(f"Verifying parent page link candidate: {sub_link}")
-                    if verify_url(sub_link, fund_id, fund_name, apir_code):
-                        verified_url = sub_link
+                log_attempt(f"SUCCESS: Verified truncated URL: {verified_url}")
+
+        # Step 4: Sitemap & Parent Page crawling (if still not found)
+        if not verified_url and candidates:
+            # Extract unique domains from candidates to run sitemaps and parent pages
+            domains = list(set([urllib.parse.urlunparse((urllib.parse.urlparse(c).scheme, urllib.parse.urlparse(c).netloc, '', '', '', '')) for c in candidates]))
+            for dom in domains:
+                check_timeout()
+                # Try sitemap
+                sitemap_urls = parse_sitemap(dom, ["performance", "monthly", "report", "factsheet"])
+                sitemap_urls = sitemap_urls[:15]
+                if sitemap_urls:
+                    check_timeout()
+                    log_attempt(f"Concurrently verifying {len(sitemap_urls)} sitemap candidates...")
+                    remaining = get_remaining_timeout()
+                    try:
+                        verified_url = asyncio.run(asyncio.wait_for(
+                            verify_candidates_async(sitemap_urls, fund_id, fund_name, apir_code),
+                            timeout=remaining
+                        ))
+                    except (asyncio.TimeoutError, TimeoutError):
+                        log_attempt("Timeout during sitemap verification")
+                        verified_url = None
+                    if verified_url:
+                        log_attempt(f"SUCCESS: Verified URL from sitemap: {verified_url}")
+                        break
+
+                check_timeout()
+                # Try parent page crawling (e.g. going up to legal or support roots if found in candidates)
+                parent_roots = [c for c in candidates if c.startswith(dom) and (('/legal' in c) or ('/support' in c) or ('/documents' in c) or ('/performance' in c) or ('/download' in c))]
+                parent_roots = parent_roots[:5]
+
+                all_sub_links = []
+                for p_root in parent_roots:
+                    check_timeout()
+                    # Go up to the section root
+                    section_url = p_root
+                    if p_root.endswith('.pdf'):
+                        # Get folder
+                        section_url = os.path.dirname(p_root) + '/'
+
+                    sub_links = extract_links_from_page(section_url, ["performance", "monthly", "report", "factsheet", apir_code])
+                    for sub_link in sub_links:
+                        if sub_link not in all_sub_links:
+                            all_sub_links.append(sub_link)
+
+                all_sub_links = all_sub_links[:15]
+                if all_sub_links:
+                    check_timeout()
+                    log_attempt(f"Concurrently verifying {len(all_sub_links)} parent page sub-links...")
+                    remaining = get_remaining_timeout()
+                    try:
+                        verified_url = asyncio.run(asyncio.wait_for(
+                            verify_candidates_async(all_sub_links, fund_id, fund_name, apir_code),
+                            timeout=remaining
+                        ))
+                    except (asyncio.TimeoutError, TimeoutError):
+                        log_attempt("Timeout during parent page sub-links verification")
+                        verified_url = None
+                    if verified_url:
                         log_attempt(f"SUCCESS: Verified URL from parent page: {verified_url}")
                         break
                 if verified_url:
                     break
-            if verified_url:
-                break
 
-    # Step 5: Wayback Machine check
-    if not verified_url and confirmed_url:
-        archive_url = check_wayback_machine(confirmed_url)
-        if archive_url and verify_url(archive_url, fund_id, fund_name, apir_code):
-            verified_url = archive_url
-            log_attempt(f"SUCCESS: Verified URL from Wayback Machine: {verified_url}")
+        # Step 5: Wayback Machine check
+        if not verified_url and confirmed_url:
+            check_timeout()
+            archive_url = check_wayback_machine(confirmed_url)
+            if archive_url:
+                check_timeout()
+                if verify_url(archive_url, fund_id, fund_name, apir_code):
+                    verified_url = archive_url
+                    log_attempt(f"SUCCESS: Verified URL from Wayback Machine: {verified_url}")
 
-    # Finalization
-    if verified_url:
-        log_attempt(f"Discovery SUCCEEDED for {fund_id}. Saving to registry.")
-        fund_info["confirmed_url"] = verified_url
-        fund_info["verified_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
-        fund_info["verification_signal"] = f"Automatically verified via discovery steps"
-        save_registry(registry)
-        sys.exit(0)
-    else:
-        log_attempt(f"CRITICAL: Discovery FAILED for {fund_id}. No verified URL could be found after trying all steps.")
+        # Finalization
+        if verified_url:
+            log_attempt(f"Discovery SUCCEEDED for {fund_id}. Saving to registry.")
+            fund_info["confirmed_url"] = verified_url
+            fund_info["verified_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
+            fund_info["verification_signal"] = "Automatically verified via discovery steps"
+            save_registry(registry)
+            sys.exit(0)
+        else:
+            log_attempt(f"CRITICAL: Discovery FAILED for {fund_id}. No verified URL could be found after trying all steps.")
+            sys.exit(1)
+
+    except (TimeoutError, asyncio.TimeoutError) as e:
+        log_attempt(f"CRITICAL: Active discovery aborted due to timeout: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
