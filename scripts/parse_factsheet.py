@@ -5,7 +5,14 @@ import datetime
 import re
 import json
 from bs4 import BeautifulSoup
-from pypdf import PdfReader
+try:
+    import fitz
+except ImportError:
+    import sys
+    print('CRITICAL: PyMuPDF is not installed.', file=sys.stderr)
+    sys.exit(1)
+import concurrent.futures
+import multiprocessing
 import yaml
 
 # Path setup
@@ -47,9 +54,14 @@ def parse_stake(fund_dir):
         print(f"Parsing Stake PDF: {local_path}")
         
         try:
-            reader = PdfReader(pdf_path)
-            p1_text = reader.pages[0].extract_text()
-            p2_text = reader.pages[1].extract_text() if len(reader.pages) > 1 else ""
+            with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+                registry = yaml.safe_load(f)
+            max_pages = registry.get("stake_accumulate", {}).get("max_pdf_pages", None)
+
+            with fitz.open(pdf_path) as doc:
+                pages_to_read = min(max_pages, len(doc)) if max_pages else len(doc)
+                p1_text = doc[0].get_text() if pages_to_read > 0 else ""
+                p2_text = doc[1].get_text() if pages_to_read > 1 else ""
             
             p1_clean = clean_spacing(p1_text)
             p2_clean = clean_spacing(p2_text)
@@ -166,7 +178,82 @@ def parse_stake(fund_dir):
     
     return latest_month, output_data
 
+def _process_single_bentham_pdf(pdf_path, local_path, max_pages):
+    print(f"Parsing Bentham PDF: {local_path}")
+    try:
+        text = ""
+        with fitz.open(pdf_path) as doc:
+            pages_to_read = min(max_pages, len(doc)) if max_pages else len(doc)
+            for i in range(pages_to_read):
+                text += doc[i].get_text()
+        text = clean_spacing(text)
+        
+        # Regex extraction rules
+        date_match = re.search(r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', text, re.IGNORECASE)
+        if not date_match:
+            date_match = re.search(r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})', text, re.IGNORECASE)
+        if not date_match:
+            date_match = re.search(r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', text, re.IGNORECASE)
+        if not date_match:
+            date_match = re.search(r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})', text, re.IGNORECASE)
+
+        if not date_match:
+            print(f"Warning: Could not parse date from PDF {local_path}. Skipping.")
+            return None
+
+        month_name = date_match.group(1).lower()
+        year = int(date_match.group(2))
+        if month_name == 'sept': month_name = 'sep'
+        month_num = MONTH_MAP[month_name]
+        
+        report_date = get_last_day_of_month(year, month_num)
+        date_str = report_date.strftime("%Y-%m-%d")
+
+        net_return = None
+        ret_match = re.search(r'Total return \(after fees\)(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
+        if ret_match:
+            numbers = ret_match.group(1).split()
+            if numbers:
+                num_str = numbers[0]
+                if num_str == "1" and len(numbers) > 1:
+                    num_str = numbers[1]
+                elif num_str.startswith("1-"):
+                    num_str = num_str[1:]
+                elif num_str.startswith("1") and len(num_str) >= 3 and num_str[2] == ".":
+                    num_str = num_str[1:]
+                try:
+                    net_return = float(num_str) / 100.0
+                except ValueError:
+                    pass
+
+        if net_return is None:
+            ret_match = re.search(r'total return\s*\(after fees\*?\)\s*of\s*(-?[0-9.]+)\s*(?:%|percent)', text, re.IGNORECASE)
+            if ret_match:
+                net_return = float(ret_match.group(1)) / 100.0
+
+        if net_return is None:
+            match = re.search(r'As at \d+\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+([-\d.]+)', text, re.IGNORECASE)
+            if match:
+                net_return = float(match.group(1)) / 100.0
+
+        if net_return is None:
+            raise ValueError(f"CRITICAL DATA GAP: Could not parse net return from PDF {local_path}.")
+
+        return {
+            "date": date_str,
+            "net_return": net_return,
+            "nav": 1.0,
+            "leverage_ratio": 1.0
+        }
+    except Exception as e:
+        print(f"Error parsing Bentham PDF {local_path}: {e}", file=sys.stderr)
+        return None
+
 def parse_bentham(fund_dir):
+    with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+        registry = yaml.safe_load(f)
+    max_pages = registry.get("bentham_global_income_fund", {}).get("max_pdf_pages", None)
+
     manifest_path = os.path.join(fund_dir, "manifest.json")
     if not os.path.exists(manifest_path):
         raise FileNotFoundError(f"Manifest not found for Bentham Global Income Fund: {manifest_path}")
@@ -175,154 +262,41 @@ def parse_bentham(fund_dir):
         manifest = json.load(f)
 
     raw_data_points = []
-
+    max_workers = max(1, multiprocessing.cpu_count() - 1)
+    tasks = []
     for file_info in manifest.get("files", []):
         local_path = file_info.get("local_path")
         if not local_path or not local_path.endswith(".pdf"):
             continue
-
         pdf_path = os.path.join(fund_dir, local_path)
-        print(f"Parsing Bentham PDF: {local_path}")
-
-        try:
-            reader = PdfReader(pdf_path)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text()
-
-            text = clean_spacing(text)
-
-            # Find the report date
-            date_match = re.search(
-                r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
-                text,
-                re.IGNORECASE
-            )
-            if not date_match:
-                date_match = re.search(
-                    r'(?:Fund Performance as at \d+|fact sheet\s*–)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
-                    text,
-                    re.IGNORECASE
-                )
-            if not date_match:
-                date_match = re.search(
-                    r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
-                    text,
-                    re.IGNORECASE
-                )
-            if not date_match:
-                date_match = re.search(
-                    r'Bentham(?: Wholesale)? Global Income Fund(?: Monthly)?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
-                    text,
-                    re.IGNORECASE
-                )
-
-            if not date_match:
-                print(f"Warning: Could not parse date from PDF {local_path}. Skipping.")
-                continue
-
-            month_name = date_match.group(1).lower()
-            year = int(date_match.group(2))
-            # handle 'sept' abbreviation fallback if needed, map matches mostly exactly
-            if month_name == 'sept': month_name = 'sep'
-
-            month_num = MONTH_MAP[month_name]
-
-            report_date = get_last_day_of_month(year, month_num)
-            date_str = report_date.strftime("%Y-%m-%d")
-
-            # Extract 1 Month net return
-            net_return = None
-
-            # Format 1 (table): "Total return (after fees)1 1.32 -0.78 ..."
-            # Note that sometimes there's a footnote '1' or '2' attached to it without space, or with space
-            # We must be careful not to match "Total Return (after fees) is calculated..." or similar boilerplate text.
-            # Usually the table format puts numbers right after. We can bound it by Benchmark.
-            ret_match = re.search(r'Total return \(after fees\)(.*?)(?:Benchmark|$)', text, re.IGNORECASE)
-            if ret_match:
-                numbers = ret_match.group(1).split()
-                if numbers:
-                    num_str = numbers[0]
-                    # Handle cases where footnote "1" is attached.
-                    # Usually it's "1" followed immediately by the return.
-                    # e.g., "11.25" -> "1" + "1.25"
-                    #       "1-0.19" -> "1" + "-0.19"
-                    #       "10.05" -> "1" + "0.05"
-
-                    if num_str == "1" and len(numbers) > 1:
-                        # The footnote was separated by a space (e.g. "1 -0.40")
-                        num_str = numbers[1]
-                    elif num_str.startswith("1-"):
-                        # Footnote attached to negative return (e.g. "1-0.19")
-                        num_str = num_str[1:]
-                    elif num_str.startswith("1") and len(num_str) >= 3 and num_str[2] == ".":
-                        # Footnote attached to a positive return with leading digit (e.g. "11.32" or "10.95")
-                        # We safely assume monthly returns >= 10% are practically impossible for this fund,
-                        # so "14.09" means footnote 1 + 4.09% return.
-                        # Legitimate returns like "1.18" have the decimal at index 1 and are preserved.
-                        num_str = num_str[1:]
-
-                    try:
-                        net_return = float(num_str) / 100.0
-                    except ValueError:
-                        pass
-
-            # Format 2 (sentence, mostly older reports): "had a total return (after fees*) of 1.18 percent" or "of 1.18%"
-            if net_return is None:
-                ret_match = re.search(r'total return\s*\(after fees\*?\)\s*of\s*(-?[0-9.]+)\s*(?:%|percent)', text, re.IGNORECASE)
-                if ret_match:
-                    net_return = float(ret_match.group(1)) / 100.0
-
-            # Format 3: specific table snippet used around 2018
-            if net_return is None:
-                match = re.search(r'As at \d+\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+([-\d.]+)', text, re.IGNORECASE)
-                if match:
-                    net_return = float(match.group(1)) / 100.0
-
-            if net_return is not None:
+        tasks.append((pdf_path, local_path, max_pages))
+        
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_process_single_bentham_pdf, *task) for task in tasks]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    raw_data_points.append(res)
+            except Exception as e:
                 pass
-            else:
-                raise ValueError(f"CRITICAL DATA GAP: Could not parse net return from PDF {local_path}. Three regex rules all failed. Aborting to prevent data corruption.")
-
-            raw_data_points.append({
-                "date": date_str,
-                "net_return": net_return,
-                "nav": 1.0,  # Placeholder, will be computed cumulatively
-                "leverage_ratio": 1.0
-            })
-
-        except Exception as e:
-            print(f"Error parsing Bentham PDF {local_path}: {e}", file=sys.stderr)
 
     if not raw_data_points:
         raise ValueError("No data points parsed for Bentham Global Income Fund.")
 
-    # Remove duplicates if any (due to multiple fetches or overlapping reports)
-    unique_points = {}
-    for p in raw_data_points:
-        unique_points[p["date"]] = p
+    unique_points = {p["date"]: p for p in raw_data_points}
     raw_data_points = list(unique_points.values())
-
-    # Sort chronologically
     raw_data_points.sort(key=lambda x: x["date"])
 
-    # Compute cumulative NAV
-    # Start base month at NAV = 1.0 (one month before first data point)
     first_date_parts = [int(p) for p in raw_data_points[0]["date"].split("-")]
     first_date = datetime.date(first_date_parts[0], first_date_parts[1], first_date_parts[2])
-    # Base date is one month before first_date
     if first_date.month == 1:
         base_date = get_last_day_of_month(first_date.year - 1, 12)
     else:
         base_date = get_last_day_of_month(first_date.year, first_date.month - 1)
 
     time_series = [
-        {
-            "date": base_date.strftime("%Y-%m-%d"),
-            "net_return": 0.0,
-            "nav": 1.0,
-            "leverage_ratio": 1.0
-        }
+        {"date": base_date.strftime("%Y-%m-%d"), "net_return": 0.0, "nav": 1.0, "leverage_ratio": 1.0}
     ]
 
     current_nav = 1.0
@@ -335,9 +309,7 @@ def parse_bentham(fund_dir):
             "leverage_ratio": dp["leverage_ratio"]
         })
 
-    # Latest month
-    latest_month = time_series[-1]["date"][:7] # YYYY-MM
-
+    latest_month = time_series[-1]["date"][:7]
     output_data = {
         "fund_id": "bentham_global_income_fund",
         "fund_name": "Bentham Global Income Fund",
@@ -347,7 +319,6 @@ def parse_bentham(fund_dir):
         "data_period": latest_month,
         "time_series": time_series
     }
-
     return latest_month, output_data
 
 def parse_coolabah(fund_id, fund_dir):

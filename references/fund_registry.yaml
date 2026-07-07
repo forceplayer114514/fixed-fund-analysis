@@ -6,6 +6,7 @@ bentham_global_income_fund:
   url_type: factsheet
   verification_signal: Verified existing registry URL
   verified_at: '2026-07-06'
+  max_pdf_pages: 2
 coolabah_floating_rate_high_yield:
   apir_code: ETL5010AU
   borrowing_spread: 0.0

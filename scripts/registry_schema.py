@@ -27,6 +27,7 @@ class FundEntrySchema(BaseModel):
     # 其他可能存在的选填字段
     verification_signal: Optional[str] = Field(None, description="Verification signal details if available.")
     verified_at: Optional[str] = Field(None, description="Date when the registry URL was verified (YYYY-MM-DD).")
+    max_pdf_pages: Optional[int] = Field(None, description="Maximum number of PDF pages to parse for performance optimization.")
 
     @field_validator('apir_code')
     @classmethod

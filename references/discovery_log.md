@@ -14,3 +14,83 @@
 [2026-07-05T17:03:23] === Starting URL discovery for fund: sample_fund_leveraged ===
 [2026-07-05T17:03:23] Registry has existing URL: https://www.template.net/business/report-templates/monthly-report-sample/. Verifying...
 [2026-07-05T17:03:25] SUCCESS: Existing URL is verified and active: https://www.template.net/business/report-templates/monthly-report-sample/
+[2026-07-06T16:45:47] === Starting URL discovery for fund: sample_fund_1 ===
+[2026-07-06T16:45:47] Registry has existing URL: https://example.com/performance-report. Verifying...
+[2026-07-06T16:45:48] Warning: Existing registry URL is dead/inactive: https://example.com/performance-report. Proceeding to active discovery.
+[2026-07-06T16:45:48] Starting active discovery steps for Sample Ungeared Fixed Income Fund (APIR: APIR1234AU)
+[2026-07-06T16:45:48] Searching Yahoo for: APIR1234AU monthly performance report
+[2026-07-06T16:45:52] Searching Yahoo for: APIR1234AU factsheet
+[2026-07-06T16:45:57] Searching Yahoo for: Sample Ungeared Fixed Income Fund monthly performance report
+[2026-07-06T16:46:00] Searching Yahoo for: Sample Ungeared Fixed Income Fund factsheet
+[2026-07-06T16:46:02] Found 45 search candidates to verify.
+[2026-07-06T16:46:02] Filtered to 7 relevant candidates out of 45 total candidates.
+[2026-07-06T16:46:02] Verifying search candidate: https://www.slideteam.net/blog/top-10-fund-performance-report-templates-with-samples-and-examples
+[2026-07-06T16:46:05] SUCCESS: Verified candidate URL: https://www.slideteam.net/blog/top-10-fund-performance-report-templates-with-samples-and-examples
+[2026-07-06T16:46:05] Discovery SUCCEEDED for sample_fund_1. Saving to registry.
+[2026-07-06T16:46:05] === Starting URL discovery for fund: sample_fund_leveraged ===
+[2026-07-06T16:46:05] Registry has existing URL: https://www.template.net/business/report-templates/monthly-report-sample/. Verifying...
+[2026-07-06T16:46:07] SUCCESS: Existing URL is verified and active: https://www.template.net/business/report-templates/monthly-report-sample/
+[2026-07-06T19:16:45] === Starting URL discovery for fund: stake_accumulate ===
+[2026-07-06T19:16:45] Registry has existing URL: https://hellostake.com/au/accumulate. Verifying...
+[2026-07-06T19:16:48] SUCCESS: Existing URL is verified and active: https://hellostake.com/au/accumulate
+[2026-07-06T19:34:49] === Starting URL discovery for fund: coolabah_floating_rate_high_yield ===
+[2026-07-06T19:34:49] Starting active discovery steps for Coolabah Floating-Rate High Yield Fund (APIR: ETL5010AU)
+[2026-07-06T19:34:49] Searching Yahoo for: ETL5010AU monthly performance report
+[2026-07-06T19:34:52] Searching Yahoo for: ETL5010AU factsheet
+[2026-07-06T19:34:55] Searching Yahoo for: Coolabah Floating-Rate High Yield Fund monthly performance report
+[2026-07-06T19:35:00] Searching Yahoo for: Coolabah Floating-Rate High Yield Fund factsheet
+[2026-07-06T19:35:04] Found 21 search candidates to verify.
+[2026-07-06T19:35:04] Filtered to 12 relevant candidates out of 21 total candidates.
+[2026-07-06T19:35:04] Verifying search candidate: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-pdf-coolabah-floating-rate-high-yield-fund-ai.pdf
+[2026-07-06T19:35:10] Candidate failed verification. Trying path truncation protocol...
+[2026-07-06T19:35:10] Trying truncated path: https://coolabahcapital.com/uploads/2023/01/performance-pdf-coolabah-floating-rate-high-yield-fund-ai.pdf
+[2026-07-06T19:35:12] Trying truncated path: https://coolabahcapital.com/wp-content/2023/01/performance-pdf-coolabah-floating-rate-high-yield-fund-ai.pdf
+[2026-07-06T19:35:14] Trying truncated path: https://coolabahcapital.com/wp-content/uploads/01/performance-pdf-coolabah-floating-rate-high-yield-fund-ai.pdf
+[2026-07-06T19:35:18] Trying truncated path: https://coolabahcapital.com/wp-content/uploads/2023/performance-pdf-coolabah-floating-rate-high-yield-fund-ai.pdf
+[2026-07-06T19:35:21] Trying truncated path: https://coolabahcapital.com/wp-content/uploads/2023/01/
+[2026-07-06T19:35:25] Trying truncated path: https://coolabahcapital.com/wp-content/uploads/2023/
+[2026-07-06T19:35:27] Trying truncated path: https://coolabahcapital.com/wp-content/uploads/
+[2026-07-06T19:35:31] Trying truncated path: https://coolabahcapital.com/wp-content/
+[2026-07-06T19:35:34] Verifying search candidate: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-report-coolabah-floating-rate-high-yield-fund-ai.html
+[2026-07-06T19:35:38] SUCCESS: Verified candidate URL: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-report-coolabah-floating-rate-high-yield-fund-ai.html
+[2026-07-06T19:35:38] Discovery SUCCEEDED for coolabah_floating_rate_high_yield. Saving to registry.
+[2026-07-06T19:36:18] === Starting URL discovery for fund: coolabah_floating_rate_high_yield ===
+[2026-07-06T19:36:18] Registry has existing URL: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-report-coolabah-floating-rate-high-yield-fund-ai.html. Verifying...
+[2026-07-06T19:36:23] SUCCESS: Existing URL is verified and active: https://coolabahcapital.com/wp-content/uploads/2023/01/performance-report-coolabah-floating-rate-high-yield-fund-ai.html
+[2026-07-06T22:03:11] === Starting URL discovery for fund: sample_fund_1 ===
+[2026-07-06T22:03:11] Registry has existing URL: https://example.com/performance-report. Verifying...
+[2026-07-06T22:03:12] Warning: Existing registry URL is dead/inactive: https://example.com/performance-report. Proceeding to active discovery.
+[2026-07-06T22:03:12] Starting active discovery steps for Sample Ungeared Fixed Income Fund (APIR: APIR1234AU)
+[2026-07-06T22:03:12] Searching Yahoo for: APIR1234AU monthly performance report
+[2026-07-06T22:03:15] Searching Yahoo for: APIR1234AU factsheet
+[2026-07-06T22:03:18] Searching Yahoo for: Sample Ungeared Fixed Income Fund monthly performance report
+[2026-07-06T22:03:23] Searching Yahoo for: Sample Ungeared Fixed Income Fund factsheet
+[2026-07-06T22:03:27] Found 45 search candidates to verify.
+[2026-07-06T22:03:27] Filtered to 6 relevant candidates out of 45 total candidates.
+[2026-07-06T22:03:27] Verifying search candidate: https://www.fidelity.lu/page/fixed-income-monthly
+[2026-07-06T22:03:31] SUCCESS: Verified candidate URL: https://www.fidelity.lu/page/fixed-income-monthly
+[2026-07-06T22:03:31] Discovery SUCCEEDED for sample_fund_1. Saving to registry.
+[2026-07-06T22:03:31] === Starting URL discovery for fund: sample_fund_leveraged ===
+[2026-07-06T22:03:31] Registry has existing URL: https://www.template.net/business/report-templates/monthly-report-sample/. Verifying...
+[2026-07-06T22:03:35] SUCCESS: Existing URL is verified and active: https://www.template.net/business/report-templates/monthly-report-sample/
+[2026-07-06T22:46:04] === Starting URL discovery for fund: stake_accumulate ===
+[2026-07-06T22:46:04] Registry has existing URL: https://hellostake.com/au/legal/product-disclosure-statement-pds-stake-accumulate. Verifying...
+[2026-07-06T22:46:06] Warning: Existing registry URL is dead/inactive: https://hellostake.com/au/legal/product-disclosure-statement-pds-stake-accumulate. Proceeding to active discovery.
+[2026-07-06T22:46:06] Starting active discovery steps for Stake Accumulate Fund (APIR: NO_APIR)
+[2026-07-06T22:46:06] Searching Yahoo for: NO_APIR monthly performance report
+[2026-07-06T22:46:11] Searching Yahoo for: NO_APIR factsheet
+[2026-07-06T22:46:17] Searching Yahoo for: Stake Accumulate Fund monthly performance report
+[2026-07-06T22:46:20] Searching Yahoo for: Stake Accumulate Fund factsheet
+[2026-07-06T22:46:26] Found 27 search candidates to verify.
+[2026-07-06T22:46:26] Filtered to 10 relevant candidates out of 27 total candidates.
+[2026-07-06T22:46:26] Verifying search candidate: https://hellostake.com/au/legal/monthly-performance-report
+[2026-07-06T22:46:41] Candidate failed verification. Trying path truncation protocol...
+[2026-07-06T22:46:41] Trying truncated path: https://hellostake.com/legal/monthly-performance-report
+[2026-07-06T22:46:44] SUCCESS: Verified truncated URL: https://hellostake.com/legal/monthly-performance-report
+[2026-07-06T22:46:44] Discovery SUCCEEDED for stake_accumulate. Saving to registry.
+[2026-07-06T22:51:23] === Starting URL discovery for fund: stake_accumulate ===
+[2026-07-06T22:51:23] Registry has existing URL: https://hellostake.com/legal/monthly-performance-report. Verifying...
+[2026-07-06T22:51:26] SUCCESS: Existing URL is verified and active: https://hellostake.com/legal/monthly-performance-report
+[2026-07-06T23:32:55] === Starting URL discovery for fund: bentham_global_income_fund ===
+[2026-07-06T23:32:55] Registry has existing URL: https://www.benthamam.com/funds/bentham-global-income-fund/. Verifying...
+[2026-07-06T23:33:02] SUCCESS: Existing URL is verified and active: https://www.benthamam.com/funds/bentham-global-income-fund/
