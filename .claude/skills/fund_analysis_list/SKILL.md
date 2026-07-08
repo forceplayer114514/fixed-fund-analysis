@@ -1,0 +1,1 @@
+../../../skill/fund_analysis_list.md

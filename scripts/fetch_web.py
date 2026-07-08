@@ -96,6 +96,13 @@ def load_registry():
     with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
+def download_file(url: str, filepath: str) -> None:
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    with open(filepath, "wb") as f:
+        f.write(resp.content)
+
 async def download_file_async(session, url, filepath):
     print(f"Downloading {url} to {filepath}...")
     os.makedirs(os.path.dirname(filepath), exist_ok=True)

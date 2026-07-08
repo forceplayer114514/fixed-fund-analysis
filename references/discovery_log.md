@@ -94,3 +94,57 @@
 [2026-07-06T23:32:55] === Starting URL discovery for fund: bentham_global_income_fund ===
 [2026-07-06T23:32:55] Registry has existing URL: https://www.benthamam.com/funds/bentham-global-income-fund/. Verifying...
 [2026-07-06T23:33:02] SUCCESS: Existing URL is verified and active: https://www.benthamam.com/funds/bentham-global-income-fund/
+[2026-07-08T04:46:57] === Starting URL discovery for fund: bentham_global_income_fund ===
+[2026-07-08T04:46:57] === Starting URL discovery for fund: metrics_master_income_trust ===
+[2026-07-08T04:46:57] Registry has existing URL: https://www.benthamam.com/funds/bentham-global-income-fund/. Checking with quick HEAD request...
+[2026-07-08T04:46:57] Registry has existing URL: https://www.metrics.com.au/mxt/. Checking with quick HEAD request...
+[2026-07-08T04:46:58] Warning: Existing registry URL is dead/inactive (HEAD failed): https://www.metrics.com.au/mxt/. Proceeding to active discovery.
+[2026-07-08T04:46:58] Starting active discovery steps for Metrics Master Income Trust (APIR: NO_APIR_MXT)
+[2026-07-08T04:46:58] Searching web engines concurrently for 4 queries...
+[2026-07-08T04:46:58] Warning: Existing registry URL is dead/inactive (HEAD failed): https://www.benthamam.com/funds/bentham-global-income-fund/. Proceeding to active discovery.
+[2026-07-08T04:46:58] Starting active discovery steps for Bentham Global Income Fund (APIR: CSA0038AU)
+[2026-07-08T04:46:58] Searching web engines concurrently for 4 queries...
+[2026-07-08T04:47:01] Found 26 search candidates to verify.
+[2026-07-08T04:47:01] Filtered to 9 relevant candidates out of 26 total candidates.
+[2026-07-08T04:47:01] Concurrently verifying candidates...
+[2026-07-08T04:47:01] Found 19 search candidates to verify.
+[2026-07-08T04:47:01] Filtered to 12 relevant candidates out of 19 total candidates.
+[2026-07-08T04:47:01] Concurrently verifying candidates...
+[2026-07-08T04:47:04] SUCCESS: Verified candidate URL: https://www.metrics.com.au/listed-funds/metrics-master-income-trust
+[2026-07-08T04:47:04] Discovery SUCCEEDED for metrics_master_income_trust. Saving to registry.
+[2026-07-08T04:47:10] SUCCESS: Verified candidate URL: https://www.benthamam.com.au/funds/global-income-fund/
+[2026-07-08T04:47:10] Discovery SUCCEEDED for bentham_global_income_fund. Saving to registry.
+[2026-07-08T05:57:12] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T05:57:48] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T05:58:26] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:02:03] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:02:40] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:03:11] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:25:00] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:32:49] === Starting URL discovery for fund: coolabah_long_short_credit ===
+[2026-07-08T06:32:49] Registry has existing URL: https://coolabahcapital.com. Checking with quick HEAD request...
+[2026-07-08T06:32:51] Quick check succeeded. Verifying content rules...
+[2026-07-08T06:32:54] Warning: Content rules verification failed for https://coolabahcapital.com. Proceeding to active discovery.
+[2026-07-08T06:32:54] Starting active discovery steps for Smarter Money Long - Short Credit Fund (APIR: SLT2562AU)
+[2026-07-08T06:32:54] Searching web engines concurrently for 4 queries...
+[2026-07-08T06:32:57] Found 16 search candidates to verify.
+[2026-07-08T06:32:57] Filtered to 9 relevant candidates out of 16 total candidates.
+[2026-07-08T06:32:57] Concurrently verifying candidates...
+[2026-07-08T06:33:00] Candidate failed verification. Trying path truncation protocol...
+[2026-07-08T06:33:00] Concurrently verifying 15 truncated path candidates...
+[2026-07-08T06:33:03] Checking sitemap: https://www.smsfmate.com.au/sitemap.xml
+[2026-07-08T06:33:06] Checking sitemap: https://investmentcentre.moneymanagement.com.au/sitemap.xml
+[2026-07-08T06:33:08] Sitemap parsing failed for https://investmentcentre.moneymanagement.com.au: mismatched tag: line 44, column 49
+[2026-07-08T06:33:08] Checking sitemap: https://announcements.asx.com.au/sitemap.xml
+[2026-07-08T06:33:10] Checking sitemap: https://coolabahcapital.com/sitemap.xml
+[2026-07-08T06:33:13] Extracting links from parent page: https://coolabahcapital.com/download-centre/
+[2026-07-08T06:33:16] Extracting links from parent page: https://coolabahcapital.com/performance/
+[2026-07-08T06:33:18] Concurrently verifying 15 parent page sub-links...
+[2026-07-08T06:33:23] SUCCESS: Verified URL from parent page: https://coolabahcapital.com/performance-report-smarter-money-long-short-credit-fund-d
+[2026-07-08T06:33:23] Discovery SUCCEEDED for coolabah_long_short_credit. Saving to registry.
+[2026-07-08T06:35:00] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T06:35:04] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T07:04:53] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T07:07:40] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T07:16:32] Checking sitemap: https://example.com/sitemap.xml
+[2026-07-08T07:17:07] Checking sitemap: https://example.com/sitemap.xml

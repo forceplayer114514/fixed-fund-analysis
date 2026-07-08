@@ -1,0 +1,20 @@
+sample_fund_1:
+  apir_code: APIR1234AU
+  borrowing_spread: 0.0
+  confirmed_url: https://www.fidelity.lu/page/fixed-income-monthly
+  fetch_method: requests+BeautifulSoup
+  fund_name: Sample Ungeared Fixed Income Fund
+  target_leverage: 1.0
+  url_type: compliance_docs_monthly_reports
+  verification_signal: Automatically verified via discovery steps
+  verified_at: '2026-07-06'
+sample_fund_leveraged:
+  apir_code: APIR9999AU
+  borrowing_spread: 0.002
+  confirmed_url: https://www.template.net/business/report-templates/monthly-report-sample/
+  fetch_method: requests+BeautifulSoup
+  fund_name: Sample Leveraged High Yield Fund
+  target_leverage: 2.0
+  url_type: compliance_docs_monthly_reports
+  verification_signal: Verified existing registry URL
+  verified_at: '2026-07-06'

@@ -266,20 +266,28 @@ def main():
 
     # 4. Sortino Ratio (using excess returns and downside deviation of excess returns relative to 0)
     downside_original = calculate_downside_deviation_excess(excess_returns_original, fund_name=fund_name)
-    sortino_original = calculate_sortino_ratio(
-        ann_excess_return_original,
-        downside_original,
-        fund_name=fund_name,
-        field_name="downside_deviation_original"
-    )
+    try:
+        sortino_original = calculate_sortino_ratio(
+            ann_excess_return_original,
+            downside_original,
+            fund_name=fund_name,
+            field_name="downside_deviation_original"
+        )
+    except ValueError as e:
+        print(f"Warning: {e}. Setting Sortino ratio to float('inf').")
+        sortino_original = float('inf')
 
     downside_unsmoothed = calculate_downside_deviation_excess(excess_returns_unsmoothed, fund_name=fund_name)
-    sortino_unsmoothed = calculate_sortino_ratio(
-        ann_excess_return_unsmoothed,
-        downside_unsmoothed,
-        fund_name=fund_name,
-        field_name="downside_deviation_unsmoothed"
-    )
+    try:
+        sortino_unsmoothed = calculate_sortino_ratio(
+            ann_excess_return_unsmoothed,
+            downside_unsmoothed,
+            fund_name=fund_name,
+            field_name="downside_deviation_unsmoothed"
+        )
+    except ValueError as e:
+        print(f"Warning: {e}. Setting Sortino ratio to float('inf').")
+        sortino_unsmoothed = float('inf')
     
     # ponytail: Removed credit spread decomposition and leverage contribution calculations.
     # We no longer calculate credit spread or leverage effects since leverage ratio data cannot be parsed reliably.

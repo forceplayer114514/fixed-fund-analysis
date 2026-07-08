@@ -1,12 +1,12 @@
 bentham_global_income_fund:
   apir_code: CSA0038AU
-  confirmed_url: https://www.benthamam.com/funds/bentham-global-income-fund/
+  confirmed_url: https://www.benthamam.com.au/funds/global-income-fund/
   fetch_method: requests+BeautifulSoup
   fund_name: Bentham Global Income Fund
-  url_type: factsheet
-  verification_signal: Verified existing registry URL
-  verified_at: '2026-07-06'
   max_pdf_pages: 2
+  url_type: factsheet
+  verification_signal: Automatically verified via discovery steps
+  verified_at: '2026-07-08'
 coolabah_floating_rate_high_yield:
   apir_code: ETL5010AU
   borrowing_spread: 0.0
@@ -17,6 +17,22 @@ coolabah_floating_rate_high_yield:
   url_type: compliance_docs_monthly_reports
   verification_signal: Verified existing registry URL
   verified_at: '2026-07-06'
+coolabah_long_short_credit:
+  apir_code: SLT2562AU
+  confirmed_url: https://coolabahcapital.com/performance-report-smarter-money-long-short-credit-fund-d
+  fetch_method: requests+BeautifulSoup
+  fund_name: Smarter Money Long - Short Credit Fund
+  url_type: compliance_docs_monthly_reports
+  verification_signal: Automatically verified via discovery steps
+  verified_at: '2026-07-08'
+metrics_master_income_trust:
+  apir_code: NO_APIR_MXT
+  confirmed_url: https://www.metrics.com.au/mxt/
+  fetch_method: requests+BeautifulSoup
+  fund_name: Metrics Master Income Trust
+  url_type: factsheet
+  verification_signal: Manually verified URL for Metrics Master Income Trust
+  verified_at: '2026-07-07'
 stake_accumulate:
   apir_code: NO_APIR
   borrowing_spread: 0.0

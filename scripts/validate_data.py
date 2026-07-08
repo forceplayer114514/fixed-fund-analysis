@@ -45,13 +45,43 @@ def validate_time_series(time_series, fund_id):
             raise ValueError(f"GAP DETECTED: Gap found in time-series between {time_series[i-1]['date']} and {time_series[i]['date']}.")
             
     print("Time series validation passed. No gaps found.")
+    # ---------------------------------------------------------
+    # ANTI-FABRICATION GUARD (代码级防造假约束)
+    # 检查是否存在连续3个月及以上填入完全相同小数点精度的数值
+    # （真实金融市场中，精确到万分之一的收益率连续3个月一模一样的概率极低）
+    # 这专门拦截由 LLM 强行为了凑年化而生成的插值/平滑数据。
+    # ---------------------------------------------------------
+    if len(time_series) >= 3:
+        consecutive_identical = 1
+        last_val = time_series[0]["net_return"]
+        for i in range(1, len(time_series)):
+            curr_val = time_series[i]["net_return"]
+            
+            # 判断是否有"非自然精度" (即超出了真实的 0.00% / 0.0000 精度)
+            # 例如大模型生成的 0.00657 无法被完美 round 到 4 位小数
+            is_unnatural_precision = abs(curr_val - round(curr_val, 4)) > 1e-7
+            
+            if curr_val != 0.0 and abs(curr_val - last_val) < 1e-7:
+                consecutive_identical += 1
+                # 只有当连续3次相同，且【存在非自然精度】时，才判定为大模型造假
+                if consecutive_identical >= 3 and is_unnatural_precision:
+                    raise ValueError(
+                        f"CRITICAL DATA INTEGRITY VIOLATION: Detected {consecutive_identical} consecutive identical returns "
+                        f"with unnatural precision ({curr_val*100.0:.5f}%). "
+                        f"Real factsheets report as X.XX% (4 decimal places). "
+                        f"This strongly indicates artificial data backfilling/fabrication by LLM. Pipeline stopped."
+                    )
+            else:
+                consecutive_identical = 1
+                last_val = curr_val
+
 
     # Run anomaly detection
     anomalies = detect_anomalies(time_series, threshold_sigma=3.0)
     if anomalies:
         print(f"WARNING: {len(anomalies)} statistical anomalies detected in returns.")
         for a in anomalies:
-            print(f"  -> Anomaly on {a['date']}: Return {a['value']*100:.2f}% (Z-score: {a['z_score']:.2f})")
+            print(f"  -> Anomaly on {a['date']}: Return {a['value']*100:.2f}% (MAD-score: {a.get('mad_score', 0):.2f})")
 
     return {"time_series": time_series, "anomalies": anomalies}
 
