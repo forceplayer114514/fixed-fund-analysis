@@ -9,6 +9,9 @@ from app.calculations import (
     calculate_omega_ratio,
     calculate_excess_win_rate,
     calculate_max_consecutive_underperform,
+    calculate_autocorrelation,
+    unsmooth_returns,
+    should_apply_geltner,
 )
 
 
@@ -66,3 +69,36 @@ def test_calculate_max_consecutive_underperform():
     assert calculate_max_consecutive_underperform([0.02, 0.03]) == 0
     # 空列表 -> 0
     assert calculate_max_consecutive_underperform([]) == 0
+
+
+@pytest.mark.unit
+def test_calculate_autocorrelation():
+    # 完全正自相关序列：phi 接近 1（50 点单调平滑序列，避免重复锯齿破坏自相关）
+    phi, q_stat = calculate_autocorrelation([0.01 * i for i in range(1, 51)], "TestFund")
+    assert phi > 0.9
+    assert q_stat > 0
+    # 短序列 -> (0.0, 0.0)
+    assert calculate_autocorrelation([0.01], "TestFund") == (0.0, 0.0)
+
+
+@pytest.mark.unit
+def test_unsmooth_returns():
+    assert unsmooth_returns([0.01, 0.015, 0.02], 0.5, "TestFund") == pytest.approx([0.01, 0.02, 0.025])
+    with pytest.raises(ValueError) as excinfo:
+        unsmooth_returns([0.01, 0.02], 0.999, "TestFund")
+    assert "phi=0.999" in str(excinfo.value)
+    assert unsmooth_returns([], 0.5, "TestFund") == []
+
+
+@pytest.mark.unit
+def test_should_apply_geltner_three_firewalls():
+    # 全部通过：n>=36, Q>3.841, 0<=phi<=0.85
+    assert should_apply_geltner(36, 0.5, 10.0) is True
+    # 防火墙1：n < 36
+    assert should_apply_geltner(35, 0.5, 10.0) is False
+    # 防火墙2：Q <= 3.841
+    assert should_apply_geltner(36, 0.5, 2.0) is False
+    # 防火墙3：phi < 0
+    assert should_apply_geltner(36, -0.1, 10.0) is False
+    # 防火墙3：phi > 0.85
+    assert should_apply_geltner(36, 0.9, 10.0) is False

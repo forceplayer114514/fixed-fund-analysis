@@ -80,3 +80,55 @@ def calculate_max_consecutive_underperform(excess_returns: list[float]) -> int:
         else:
             current = 0
     return max_run
+
+
+def calculate_autocorrelation(returns: list[float],
+                              fund_name: str = "Unknown") -> tuple[float, float]:
+    """一阶自相关系数 phi 与 Ljung-Box Q 统计量。"""
+    n = len(returns)
+    if n < 2:
+        return 0.0, 0.0
+    mean_r = sum(returns) / n
+    numerator = sum((returns[t] - mean_r) * (returns[t - 1] - mean_r) for t in range(1, n))
+    denominator = sum((r - mean_r) ** 2 for r in returns)
+    if denominator == 0:
+        return 0.0, 0.0
+    phi = numerator / denominator
+    q_stat = n * (n + 2) * (phi ** 2) / (n - 1)
+    return phi, q_stat
+
+
+def unsmooth_returns(returns: list[float], phi: float,
+                     fund_name: str = "Unknown") -> list[float]:
+    """Geltner 去平滑：r'_t = (r_t - phi * r_{t-1}) / (1 - phi)。"""
+    if not returns:
+        return []
+    denom = 1.0 - phi
+    if denom < 0.01:
+        raise ValueError(f"[{fund_name}] phi={phi} 导致分母 1 - phi 为 {denom} (低于 0.01)，无法进行 Geltner 去平滑计算")
+    unsmoothed = [returns[0]]
+    for t in range(1, len(returns)):
+        unsmoothed_val = (returns[t] - phi * returns[t - 1]) / denom
+        unsmoothed.append(unsmoothed_val)
+    return unsmoothed
+
+
+# Ljung-Box 检验 95% 置信度临界值（自由度1）
+LJUNG_BOX_CRITICAL_VALUE = 3.841
+
+
+def should_apply_geltner(n_months: int, phi: float, q_stat: float) -> bool:
+    """Geltner 去平滑三重防火墙判定。
+
+    防火墙1：历史月数 >= 36
+    防火墙2：Ljung-Box Q > 3.841（统计显著）
+    防火墙3：0 <= phi <= 0.85（合理非负区间）
+    三者全满足才返回 True。
+    """
+    if n_months < 36:
+        return False
+    if q_stat <= LJUNG_BOX_CRITICAL_VALUE:
+        return False
+    if phi < 0.0 or phi > 0.85:
+        return False
+    return True
