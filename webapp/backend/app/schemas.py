@@ -1,6 +1,7 @@
 """Pydantic v2 请求/响应模型。APIR 正则校验在此。"""
 from __future__ import annotations
 
+import math
 import re
 from typing import Optional
 
@@ -61,3 +62,18 @@ class AnomalyResponse(BaseModel):
     fund_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
+
+
+def sanitize_for_json(obj):
+    """递归把 inf/NaN float 转为 None（JSON 标准不支持无穷大/NaN）。
+
+    Omega 比率在无跑输月时为 inf，需转 None 供前端显示为"极佳/无跑输"。
+    compare/time-series/recompute 等返回 metrics 的端点统一使用。
+    """
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
+        return None
+    return obj

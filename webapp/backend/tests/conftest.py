@@ -2,6 +2,7 @@
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app import models  # noqa: F401 注册所有模型
@@ -10,7 +11,11 @@ from app import models  # noqa: F401 注册所有模型
 @pytest.fixture
 def db_session():
     """提供一个隔离的内存数据库会话，测试结束自动销毁。"""
-    engine = create_engine("sqlite:///:memory:")
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     TestSession = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     session = TestSession()
