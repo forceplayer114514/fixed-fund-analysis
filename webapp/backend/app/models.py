@@ -65,7 +65,7 @@ class RbaCashRate(Base):
     date_period: Mapped[str] = mapped_column(String, primary_key=True)  # YYYY-MM
     rate: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[Optional[str]] = mapped_column(
-        String, server_default="(datetime('now'))", onupdate=text("(datetime('now'))")
+        String, server_default=text("(datetime('now'))"), onupdate=text("(datetime('now'))")
     )
 
 
@@ -98,7 +98,7 @@ class FundMetric(Base):
     ljung_box_q: Mapped[float] = mapped_column(Float, nullable=False)
     is_q_significant: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[Optional[str]] = mapped_column(
-        String, server_default="(datetime('now'))", onupdate=text("(datetime('now'))")
+        String, server_default=text("(datetime('now'))"), onupdate=text("(datetime('now'))")
     )
 
     fund: Mapped["Fund"] = relationship(back_populates="metrics")

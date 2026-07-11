@@ -99,3 +99,20 @@ def test_rba_cash_rate_upsert_style(db_session):
     db_session.add(RbaCashRate(date_period="2026-05", rate=0.0435))
     db_session.commit()
     assert db_session.query(RbaCashRate).count() == 1
+
+
+@pytest.mark.unit
+def test_updated_at_real_timestamp_on_insert(db_session):
+    """INSERT 时 updated_at 应为真实时间戳，而非字面字符串 '(datetime('now'))'。"""
+    from datetime import datetime
+
+    db_session.add(RbaCashRate(date_period="2026-05", rate=0.0435))
+    db_session.commit()
+    row = db_session.get(RbaCashRate, "2026-05")
+    # 不应等于字面字符串
+    assert row.updated_at != "(datetime('now'))"
+    # 应为合法的日期时间字符串（YYYY-MM-DD HH:MM:SS 格式）
+    assert row.updated_at is not None
+    assert len(row.updated_at) >= 10  # 至少包含日期部分
+    # 验证能解析为日期
+    datetime.strptime(row.updated_at[:19], "%Y-%m-%d %H:%M:%S")
