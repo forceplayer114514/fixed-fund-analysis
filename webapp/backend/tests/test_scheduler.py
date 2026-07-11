@@ -39,8 +39,10 @@ def test_start_scheduler_returns_running_scheduler():
 @pytest.mark.unit
 def test_rba_refresh_api(client, db_session, monkeypatch):
     """POST /api/rba/refresh 手动触发 RBA 更新。"""
-    monkeypatch.setattr("app.rba.fetch_current_rba_rate", lambda: 0.0435)
-    monkeypatch.setattr("app.rba.fetch_historical_rba_rates",
+    # patch 目标必须是 routers.rba 模块命名空间（from import 已绑定引用），
+    # patch app.rba 不影响 routers.rba 的引用，会导致真实网络请求
+    monkeypatch.setattr("app.routers.rba.fetch_current_rba_rate", lambda: 0.0435)
+    monkeypatch.setattr("app.routers.rba.fetch_historical_rba_rates",
                         lambda: {"2026-03": 0.0435})
     resp = client.post("/api/rba/refresh")
     assert resp.status_code == 200

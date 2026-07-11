@@ -114,6 +114,10 @@ def time_series(fund_ids: str = Query(...),
     sliced = {}
     for fid, info in per_fund.items():
         d, r = slice_by_period(info["dates"], info["returns"], period, common_months)
+        # 数据缺口零容忍（CLAUDE.md 第一条）：切片后序列有缺口则拒绝
+        gaps = _find_month_gaps(d)
+        if gaps:
+            raise HTTPException(status_code=422, detail=f"基金 {fid} 时序切片后月份存在缺口: {gaps}")
         sliced[fid] = {"name": info["name"], "dates": d, "returns": r}
 
     all_months = sorted({d[:7] for info in sliced.values() for d in info["dates"]})
@@ -134,6 +138,7 @@ def time_series(fund_ids: str = Query(...),
         series.append({
             "fund_id": fid,
             "fund_name": info["name"],
+            "dates": info["dates"],
             "orig_nav": orig_nav,
             "unsm_nav": unsm_nav,
             "is_geltner_applied": is_geltner,
