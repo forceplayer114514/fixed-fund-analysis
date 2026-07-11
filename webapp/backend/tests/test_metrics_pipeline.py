@@ -3,7 +3,7 @@ import pytest
 
 from app.models import Fund, FundMetric, Anomaly, RbaCashRate
 from app.crud import create_fund, upsert_monthly_return
-from app.metrics_pipeline import compute_and_store_metrics
+from app.metrics_pipeline import compute_and_store_metrics, _find_month_gaps
 
 
 @pytest.mark.unit
@@ -73,3 +73,37 @@ def test_compute_and_store_metrics_idempotent(db_session):
     compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
 
     assert db_session.query(FundMetric).filter_by(fund_id="f1").count() == 1
+
+
+@pytest.mark.unit
+def test_find_month_gaps_unit():
+    """_find_month_gaps 正确识别缺失月份。"""
+    # 连续序列无缺口
+    assert _find_month_gaps(["2025-01-31", "2025-02-28", "2025-03-31"]) == []
+    # 缺 2025-03
+    assert _find_month_gaps(["2025-01-31", "2025-02-28", "2025-04-30"]) == ["2025-03"]
+    # 跨年缺口：2025-12 -> 2026-02，缺 2026-01
+    assert _find_month_gaps(["2025-12-31", "2026-02-28"]) == ["2026-01"]
+    # 单点 / 空列表无缺口
+    assert _find_month_gaps(["2025-01-31"]) == []
+    assert _find_month_gaps([]) == []
+
+
+@pytest.mark.unit
+def test_compute_and_store_metrics_gap_detection(db_session):
+    """月度数据存在缺口时，管道必须报错并列出缺失月份（CLAUDE.md 数据缺口零容忍）。"""
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    # 2025-01、2025-02、2025-04 —— 跳过 2025-03
+    upsert_monthly_return(db_session, "f1", "2025-01-31", 0.01)
+    upsert_monthly_return(db_session, "f1", "2025-02-28", 0.02)
+    upsert_monthly_return(db_session, "f1", "2025-04-30", 0.03)
+
+    with pytest.raises(ValueError) as excinfo:
+        compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
+    msg = str(excinfo.value)
+    assert "f1" in msg
+    assert "2025-03" in msg
+    assert "缺口" in msg
+    # 报错后不应写入任何指标记录
+    assert db_session.get(FundMetric, "f1") is None

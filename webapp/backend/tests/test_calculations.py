@@ -147,18 +147,26 @@ def test_compute_all_metrics_win_rate_and_underperform():
 
 @pytest.mark.unit
 def test_compute_all_metrics_with_geltner():
-    """足够长且自相关显著的序列应触发去平滑。"""
-    # 构造60个月强自相关序列
+    """60个月、phi 落在合理区间且 Q 显著的序列应真正触发 Geltner 去平滑。
+
+    构造确定性 AR(1) 序列 r_t = c * r_{t-1} + eps_t，其中 eps 采用低自相关的
+    确定性伪噪声（mod13 散列），使样本 phi 由 AR 系数主导而非被平滑的 eps 抬高。
+    实测 phi≈0.43（落在防火墙3的 [0, 0.85] 区间）、Q≈11.6（> 3.841 临界值），
+    故 should_apply_geltner 返回 True，去平滑路径被真正执行。
+    """
+    # AR(1): r_t = 0.75 * r_{t-1} + eps_t，eps 为确定性伪噪声（无随机性、可复现）
     returns = []
-    val = 0.005
+    r = 0.0
     for i in range(60):
-        returns.append(val)
-        val = val * 0.9 + 0.005 * 0.1  # 平滑漂移，产生强自相关
+        eps = 0.004 * ((i * 7) % 13) / 13.0 - 0.002
+        r = 0.75 * r + eps
+        returns.append(r)
     rf_rates = [0.0435] * 60
     m = compute_all_metrics(returns, rf_rates, "SmoothFund")
     assert m["history_months"] == 60
     assert m["is_short_history_warning"] == 0
-    assert m["is_q_significant"] in (0, 1)
-    # 去平滑后波动率应 >= 原始波动率（去平滑放大真实波动）
-    if m["is_geltner_applied"] == 1:
-        assert m["un_annualized_volatility"] >= m["orig_annualized_volatility"]
+    # Q 统计显著且 phi 在合理区间 -> 真正触发了去平滑
+    assert m["is_q_significant"] == 1
+    assert m["is_geltner_applied"] == 1
+    # 去平滑放大真实波动：un 波动率必须严格大于 orig 波动率
+    assert m["un_annualized_volatility"] > m["orig_annualized_volatility"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import String, Float, Integer, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Float, Integer, Text, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -64,7 +64,9 @@ class RbaCashRate(Base):
 
     date_period: Mapped[str] = mapped_column(String, primary_key=True)  # YYYY-MM
     rate: Mapped[float] = mapped_column(Float, nullable=False)
-    updated_at: Mapped[Optional[str]] = mapped_column(String, server_default="(datetime('now'))")
+    updated_at: Mapped[Optional[str]] = mapped_column(
+        String, server_default="(datetime('now'))", onupdate=text("(datetime('now'))")
+    )
 
 
 class FundMetric(Base):
@@ -95,7 +97,9 @@ class FundMetric(Base):
     un_annualized_volatility: Mapped[float] = mapped_column(Float, nullable=False)
     ljung_box_q: Mapped[float] = mapped_column(Float, nullable=False)
     is_q_significant: Mapped[int] = mapped_column(Integer, nullable=False)
-    updated_at: Mapped[Optional[str]] = mapped_column(String, server_default="(datetime('now'))")
+    updated_at: Mapped[Optional[str]] = mapped_column(
+        String, server_default="(datetime('now'))", onupdate=text("(datetime('now'))")
+    )
 
     fund: Mapped["Fund"] = relationship(back_populates="metrics")
 

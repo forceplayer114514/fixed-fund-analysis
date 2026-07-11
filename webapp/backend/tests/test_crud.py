@@ -1,10 +1,14 @@
 """CRUD 与 NAV 重计算测试。"""
-import pytest
+import time
 
-from app.models import Fund, MonthlyReturn, RbaCashRate
+import pytest
+from sqlalchemy import inspect
+
+from app.models import Fund, MonthlyReturn, RbaCashRate, FundMetric
 from app.crud import (
     create_fund, get_fund, get_all_funds, delete_fund,
     upsert_monthly_return, get_returns, recompute_nav, resolve_rf_rates,
+    upsert_metrics,
 )
 
 
@@ -83,3 +87,55 @@ def test_resolve_rf_rates(db_session):
     assert rates[0] == pytest.approx(0.0435)
     assert rates[1] == pytest.approx(0.0410)
     assert rates[2] == pytest.approx(0.0425)  # fallback
+
+
+def _minimal_metrics(**overrides) -> dict:
+    """构造一份最小合法的 FundMetric 指标 dict（用于 upsert_metrics 测试）。"""
+    base = dict(
+        date_period="2026-01", history_months=1, is_short_history_warning=1,
+        unsmoothing_coefficient_phi=0.0, is_geltner_applied=0,
+        orig_annualized_excess_return=0.0, un_annualized_excess_return=0.0,
+        orig_max_drawdown=0.0, un_max_drawdown=0.0,
+        orig_omega_ratio=1.0, un_omega_ratio=1.0,
+        orig_excess_win_rate=0.5, un_excess_win_rate=0.5,
+        orig_max_underperform_months=1, un_max_underperform_months=1,
+        orig_annualized_volatility=0.01, un_annualized_volatility=0.01,
+        ljung_box_q=0.0, is_q_significant=0,
+    )
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.unit
+def test_upsert_metrics_refreshes_updated_at(db_session):
+    """upsert_metrics 更新已有记录时，updated_at 应被 onupdate 刷新（Fix 2）。
+
+    FundMetric.updated_at 配置了 onupdate=text("(datetime('now'))")，当
+    upsert_metrics 走 setattr 更新分支时，SQLAlchemy 会把 updated_at 加入
+    UPDATE 的 SET 子句，从而刷新时间戳。
+    """
+    # 结构性断言：列上确实配置了 onupdate
+    col = inspect(FundMetric).columns["updated_at"]
+    assert col.onupdate is not None, "FundMetric.updated_at 未配置 onupdate"
+
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    # 第一次：插入
+    upsert_metrics(db_session, "f1", _minimal_metrics())
+    t1 = db_session.get(FundMetric, "f1").updated_at
+
+    # SQLite datetime('now') 精度为秒，sleep 1.1s 确保时间戳发生变化
+    time.sleep(1.1)
+
+    # 第二次：更新（走 setattr 分支，触发 onupdate）
+    upsert_metrics(db_session, "f1", _minimal_metrics(orig_omega_ratio=2.0))
+    t2 = db_session.get(FundMetric, "f1").updated_at
+
+    assert t2 != t1, f"updated_at 在 UPDATE 后未刷新: t1={t1!r} t2={t2!r}"
+
+
+@pytest.mark.unit
+def test_rba_cash_rate_updated_at_has_onupdate():
+    """RbaCashRate.updated_at 同样配置了 onupdate（Fix 2）。"""
+    col = inspect(RbaCashRate).columns["updated_at"]
+    assert col.onupdate is not None, "RbaCashRate.updated_at 未配置 onupdate"
