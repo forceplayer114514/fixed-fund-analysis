@@ -116,3 +116,18 @@ def test_updated_at_real_timestamp_on_insert(db_session):
     assert len(row.updated_at) >= 10  # 至少包含日期部分
     # 验证能解析为日期
     datetime.strptime(row.updated_at[:19], "%Y-%m-%d %H:%M:%S")
+
+
+@pytest.mark.unit
+def test_fund_created_at_real_timestamp_on_insert(db_session):
+    """Fund.created_at INSERT 时应为真实时间戳，而非字面字符串。"""
+    from app.models import Fund
+    from datetime import datetime
+    fund = Fund(fund_id="f_ct", fund_name="Created Test Fund",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund)
+    db_session.commit()
+    db_session.refresh(fund)
+    assert fund.created_at != "(datetime('now'))"
+    assert fund.created_at is not None
+    datetime.strptime(fund.created_at[:19], "%Y-%m-%d %H:%M:%S")

@@ -20,7 +20,7 @@ class Fund(Base):
     url_type: Mapped[str] = mapped_column(String, nullable=False)
     max_pdf_pages: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     verified_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    created_at: Mapped[Optional[str]] = mapped_column(String, server_default="(datetime('now'))")
+    created_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))
 
     monthly_returns: Mapped[list["MonthlyReturn"]] = relationship(
         back_populates="fund", cascade="all, delete-orphan")
@@ -112,4 +112,4 @@ class AiReport(Base):
     date_period: Mapped[str] = mapped_column(String, nullable=False)
     report_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[Optional[str]] = mapped_column(String, server_default="(datetime('now'))")
+    created_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))
