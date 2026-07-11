@@ -57,3 +57,56 @@ def test_compare_common_aligns_multiple_funds(client, db_session):
 def test_compare_unknown_fund_returns_404(client):
     resp = client.get("/api/metrics/compare", params={"fund_ids": "ghost", "period": "full"})
     assert resp.status_code == 404
+
+
+@pytest.mark.unit
+def test_time_series_returns_aligned_nav(client, db_session):
+    _seed_fund_with_data(client, db_session, "f1", "Fund One",
+                         [("2026-01-31", 0.01), ("2026-02-28", 0.02), ("2026-03-31", 0.03)])
+    resp = client.get("/api/metrics/time-series", params={"fund_ids": "f1", "period": "full"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["months"] == ["2026-01", "2026-02", "2026-03"]
+    s = body["series"][0]
+    assert s["fund_id"] == "f1"
+    # 原始 NAV: 1.01, 1.0302, 1.061206
+    assert s["orig_nav"] == pytest.approx([1.01, 1.01 * 1.02, 1.01 * 1.02 * 1.03], rel=1e-5)
+    # 3 个月 < 36，不应去平滑
+    assert s["is_geltner_applied"] is False
+    assert s["unsm_nav"] is None
+
+
+@pytest.mark.unit
+def test_time_series_common_aligns_two_funds(client, db_session):
+    _seed_fund_with_data(client, db_session, "f1", "Fund One",
+                         [("2026-01-31", 0.01), ("2026-02-28", 0.02), ("2026-03-31", 0.03)])
+    _seed_fund_with_data(client, db_session, "f2", "Fund Two",
+                         [("2026-02-28", 0.02), ("2026-03-31", 0.03), ("2026-04-30", 0.04)])
+    resp = client.get("/api/metrics/time-series", params={"fund_ids": "f1,f2", "period": "common"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["months"] == ["2026-02", "2026-03"]
+    assert len(body["series"]) == 2
+    # f1 在共同区间的 orig_nav: 从 2026-02 起重新基数为 1.0 -> [1.02, 1.02*1.03]
+    assert body["series"][0]["orig_nav"] == pytest.approx([1.02, 1.02 * 1.03], rel=1e-5)
+
+
+@pytest.mark.unit
+def test_time_series_geltner_nav_when_applied(client, db_session):
+    """足够长且自相关显著的序列，去平滑 NAV 应返回（非 null）。"""
+    # 平滑收敛序列 phi≈0.7，触发 Geltner（n=60, Q≈30>3.841, 0<=phi<=0.85）
+    data = []
+    val = 0.0
+    for i in range(60):
+        year = 2021 + i // 12
+        month = (i % 12) + 1
+        ym = f"{year}-{month:02d}-28"
+        val = val + (0.01 - val) * 0.3  # 平滑收敛到 0.01
+        data.append((ym, val))
+    _seed_fund_with_data(client, db_session, "f1", "SmoothFund", data)
+    resp = client.get("/api/metrics/time-series", params={"fund_ids": "f1", "period": "full"})
+    assert resp.status_code == 200
+    s = resp.json()["series"][0]
+    assert s["is_geltner_applied"] is True
+    assert s["unsm_nav"] is not None
+    assert len(s["unsm_nav"]) == len(s["orig_nav"])

@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.crud import get_returns, get_fund, resolve_rf_rates
 from app.models import FundMetric
-from app.calculations import compute_all_metrics
+from app.calculations import (
+    compute_all_metrics,
+    calculate_autocorrelation,
+    unsmooth_returns,
+    should_apply_geltner,
+    _build_nav_series,
+)
 from app.metrics_pipeline import _find_month_gaps
 from app.period import get_common_months, slice_by_period, VALID_PERIODS
 from app.schemas import sanitize_for_json
@@ -73,3 +79,63 @@ def compare(fund_ids: str = Query(...),
             m_dict = _recompute_for_slice(session, fid, period, common_months)
         results.append(m_dict)
     return {"period": period, "funds": sanitize_for_json(results)}
+
+
+@router.get("/time-series")
+def time_series(fund_ids: str = Query(...),
+                period: str = Query("full"),
+                session: Session = Depends(get_db)):
+    """对齐累计 NAV 时序（原始 + 去平滑）。
+
+    去平滑 NAV 仅当切片后序列通过 Geltner 三重防火墙才返回，否则为 null。
+    """
+    if period not in VALID_PERIODS:
+        raise HTTPException(status_code=422, detail=f"period 须为 {VALID_PERIODS}")
+    ids = [s.strip() for s in fund_ids.split(",") if s.strip()]
+    if not ids:
+        raise HTTPException(status_code=422, detail="fund_ids 不能为空")
+
+    per_fund = {}
+    for fid in ids:
+        fund = get_fund(session, fid)
+        if fund is None:
+            raise HTTPException(status_code=404, detail=f"基金 {fid} 不存在")
+        ts = get_returns(session, fid)
+        per_fund[fid] = {
+            "name": fund.fund_name,
+            "dates": [d["date"] for d in ts],
+            "returns": [d["net_return"] for d in ts],
+        }
+
+    common_months = None
+    if period == "common":
+        common_months = get_common_months([v["dates"] for v in per_fund.values()])
+
+    sliced = {}
+    for fid, info in per_fund.items():
+        d, r = slice_by_period(info["dates"], info["returns"], period, common_months)
+        sliced[fid] = {"name": info["name"], "dates": d, "returns": r}
+
+    all_months = sorted({d[:7] for info in sliced.values() for d in info["dates"]})
+
+    series = []
+    for fid in ids:
+        info = sliced[fid]
+        r_slice = info["returns"]
+        orig_nav = _build_nav_series(r_slice)[1:]  # 去掉起点 1.0
+        unsm_nav = None
+        is_geltner = False
+        if len(r_slice) >= 2:
+            phi, q = calculate_autocorrelation(r_slice, fund_name=fid)
+            is_geltner = should_apply_geltner(len(r_slice), phi, q)
+            if is_geltner:
+                unsm = unsmooth_returns(r_slice, phi, fund_name=fid)
+                unsm_nav = _build_nav_series(unsm)[1:]
+        series.append({
+            "fund_id": fid,
+            "fund_name": info["name"],
+            "orig_nav": orig_nav,
+            "unsm_nav": unsm_nav,
+            "is_geltner_applied": is_geltner,
+        })
+    return {"period": period, "months": all_months, "series": sanitize_for_json(series)}
