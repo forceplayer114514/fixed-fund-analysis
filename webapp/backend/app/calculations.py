@@ -43,3 +43,40 @@ def calculate_max_drawdown(nav_series: list[float],
         if dd < max_dd:
             max_dd = dd
     return max_dd
+
+
+def calculate_omega_ratio(excess_returns: list[float]) -> float:
+    """Omega 比率（Target = RBA）：超额收益为正的累积面积 / 为负的累积绝对值面积。
+
+    分母为0（无跑输月份）返回 inf；空列表返回 0.0。
+    """
+    if not excess_returns:
+        return 0.0
+    gains = sum(r for r in excess_returns if r > 0)
+    losses = sum(-r for r in excess_returns if r < 0)
+    if losses == 0.0:
+        return float("inf")
+    return gains / losses
+
+
+def calculate_excess_win_rate(excess_returns: list[float]) -> float:
+    """超额收益胜率：跑赢 RBA（excess > 0）的月数占比。"""
+    n = len(excess_returns)
+    if n == 0:
+        return 0.0
+    wins = sum(1 for r in excess_returns if r > 0)
+    return wins / n
+
+
+def calculate_max_consecutive_underperform(excess_returns: list[float]) -> int:
+    """跑输 RBA 的最长连续月数（excess <= 0 视为跑输，含持平）。"""
+    max_run = 0
+    current = 0
+    for r in excess_returns:
+        if r <= 0:
+            current += 1
+            if current > max_run:
+                max_run = current
+        else:
+            current = 0
+    return max_run
