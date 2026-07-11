@@ -12,6 +12,7 @@ from app.calculations import (
     calculate_autocorrelation,
     unsmooth_returns,
     should_apply_geltner,
+    compute_all_metrics,
 )
 
 
@@ -102,3 +103,62 @@ def test_should_apply_geltner_three_firewalls():
     assert should_apply_geltner(36, -0.1, 10.0) is False
     # 防火墙3：phi > 0.85
     assert should_apply_geltner(36, 0.9, 10.0) is False
+
+
+@pytest.mark.unit
+def test_compute_all_metrics_short_history():
+    """不足36个月：跳过去平滑，un 指标 == orig 指标，is_geltner_applied=0。"""
+    returns = [0.005, 0.006, 0.004, 0.007, 0.005, 0.006]
+    rf_rates = [0.0435] * 6  # 6个月，恒定 RBA 4.35%
+    m = compute_all_metrics(returns, rf_rates, "ShortFund")
+    assert m["history_months"] == 6
+    assert m["is_short_history_warning"] == 1
+    assert m["is_geltner_applied"] == 0
+    # un 指标应等于 orig 指标
+    assert m["un_annualized_excess_return"] == pytest.approx(m["orig_annualized_excess_return"])
+    assert m["un_omega_ratio"] == pytest.approx(m["orig_omega_ratio"])
+    assert m["un_max_drawdown"] == pytest.approx(m["orig_max_drawdown"])
+
+
+@pytest.mark.unit
+def test_compute_all_metrics_excess_return_formula():
+    """验证超额收益采用逐月扣减复利法（spec 4.1）。"""
+    # 单月：r=0.01, RBA=0.0435 -> r_e = 0.01 - 0.0435/12 = 0.01 - 0.003625 = 0.006375
+    # 年化(1月)：(1.006375)^12 - 1
+    returns = [0.01]
+    rf_rates = [0.0435]
+    m = compute_all_metrics(returns, rf_rates, "TestFund")
+    expected = (1.006375) ** 12 - 1
+    assert m["orig_annualized_excess_return"] == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.unit
+def test_compute_all_metrics_win_rate_and_underperform():
+    """验证胜率与最长连续跑输。"""
+    # 4个月，全部跑赢RBA
+    returns = [0.02, 0.03, 0.025, 0.015]
+    rf_rates = [0.0435] * 4
+    m = compute_all_metrics(returns, rf_rates, "TestFund")
+    assert m["orig_excess_win_rate"] == pytest.approx(1.0)
+    assert m["orig_max_underperform_months"] == 0
+    # Omega 应为 inf（无跑输月）
+    assert math.isinf(m["orig_omega_ratio"])
+
+
+@pytest.mark.unit
+def test_compute_all_metrics_with_geltner():
+    """足够长且自相关显著的序列应触发去平滑。"""
+    # 构造60个月强自相关序列
+    returns = []
+    val = 0.005
+    for i in range(60):
+        returns.append(val)
+        val = val * 0.9 + 0.005 * 0.1  # 平滑漂移，产生强自相关
+    rf_rates = [0.0435] * 60
+    m = compute_all_metrics(returns, rf_rates, "SmoothFund")
+    assert m["history_months"] == 60
+    assert m["is_short_history_warning"] == 0
+    assert m["is_q_significant"] in (0, 1)
+    # 去平滑后波动率应 >= 原始波动率（去平滑放大真实波动）
+    if m["is_geltner_applied"] == 1:
+        assert m["un_annualized_volatility"] >= m["orig_annualized_volatility"]
