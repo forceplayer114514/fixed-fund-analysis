@@ -35,3 +35,17 @@
 
 ## Visual/Browser Findings
 - 无
+
+## 阶段 3（skills 模块）发现（2026-07-11）
+- **skills 文件夹独立**：`skills/.claude/skills/`（项目级，用户在 `skills/` 运行 cc 才能用 slash 命令），`sqlite3` 原生 SQL，**不 import webapp**。MCP ScraplingServer 在全局 `~/.claude.json`（用户级），skills/ 工作区可用。
+- **db.py**：11 测试通过，schema 与 webapp models 完全对齐（funds+monthly_returns），`upsert ... ON CONFLICT DO UPDATE` + `COALESCE` 保留旧 commentary_truth，`recompute_nav` 按 date 升序复利（nav=1.0 起点），`PRAGMA foreign_keys=ON`。默认 DB 路径 `<仓库根>/data/fund_analysis.db`（环境变量 FUND_DB_PATH 覆盖）。
+- **extract.py**：11 测试，复用 parse_factsheet 通用函数（MONTH_MAP/clean_spacing/get_last_day_of_month/extract_month_prefix）+ 新增 parse_date_string（任意日期->月末 YYYY-MM-DD）+ check_gaps（纯日期列表，只检测不抛错）+ download_file（复制自 fetch_web）+ parse_pdf_text（PyMuPDF，fitz 可选导入）。去除所有项目特定依赖。
+- **Stake 是 PDF 基金**（非 HTML）：列表页 `hellostake.com/au/legal/monthly-performance-report` 列出每月 PDF 链接（assets.contentstack.io），15 个月（2025-03~2026-05）。
+- **Stake PDF 下载要点**：需 `Referer: https://hellostake.com/` header（否则 422）；May 2026 PDF 需 `?branch=odyssey` 参数。
+- **Stake PDF 提取逻辑**：每个 PDF 的 "Fund performance" 表中 `Stake Accumulate Class A return (after fees and expenses)` 后第一个百分数 = 该月 1-month return（net_return）。前 8 个月（基金不足 12 月）只有 3 列（1m/3m/6m），后 7 个月有 5 列。正则用 `r'fees and expenses\)\s*\n\s*([\d.]+)%'`（容忍 "after" 后换行）。
+- **基金 inception 2024-11-29，第一份 PDF 2025-03**：序列起点设为 2025-03（CLAUDE.md 第六条：不反推捏造成立初期无披露月份）。
+- **端到端验证通过**：Stake 15 个月入库真实 `data/fund_analysis.db`，NAV 复利手算与 DB 一致（末月 1.1825），无缺口，可追溯（verified_at=2026-07-11）。
+- **子代理 MCP 图片问题**：子代理模型不支持图片输入，用 MCP screenshot/fetch 返回图片会崩（API Error 400 "Model only support text input"）。解决：主对话接管 MCP 抓取，或子代理只用 Bash Python（requests+PyMuPDF）纯文本流程。
+- **skills 职责边界**（spec 2.1）：只写 funds + monthly_returns，**不算指标/不检测异常/不更新 RBA**；webapp `POST /api/funds/{id}/recompute` 负责指标+异常，`POST /api/rba/refresh`+定时调度负责 RBA。技能 .md 入库后提示用户触发 webapp recompute。
+- **旧技能删除**（spec 6.5）：`skill/`（3 个 .md）+ `.claude/skills/{fund_analysis,fund_analysis_history,fund_analysis_list}/SKILL.md`（3 个 cc 识别文件）。`.claude/skills/` 现为空目录。
+- **已知问题**：Stake 端到端用主对话执行（子代理 MCP 图片失败）；未来 add/update 技能在 skills/ 工作区运行时，由 cc（opus）执行 MCP 抓取，不会有图片问题。

@@ -10,3 +10,5 @@ __pycache__/
 *.pyc
 .env
 .archive_scripts/
+data/*.db
+.pytest_cache/

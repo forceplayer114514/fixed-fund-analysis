@@ -1,0 +1,7 @@
+# skills 模块依赖（数据抓取/清洗/入库）
+# 不含 SQLAlchemy：用 Python 标准库 sqlite3 直接操作共享 SQLite DB
+# 不含 fastapi/httpx：skills 不调用 webapp API、不算指标
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+PyMuPDF>=1.23.0

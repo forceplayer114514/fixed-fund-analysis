@@ -1,1 +1,0 @@
-../../../skill/fund_analysis_history.md
