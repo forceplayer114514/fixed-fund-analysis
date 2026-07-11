@@ -1,12 +1,12 @@
-# FastAPI API 层实现计划 (阶段 2/5)：REST 端点 + RBA 定时调度 + LLM 报告集成
+# FastAPI API 层实现计划 (阶段 2/5)：REST 端点 + RBA 定时调度
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在阶段 1 后端地基之上构建 FastAPI 路由层，提供基金 CRUD、5 维指标对比、NAV 时序、异常审计纠错、RBA 定时调度与 LLM 投研报告 6 类 API 端点，全部通过 pytest 单元测试。
+**Goal:** 在阶段 1 后端地基之上构建 FastAPI 路由层，提供基金 CRUD、5 维指标对比、NAV 时序、异常审计纠错、RBA 定时调度 5 类 API 端点，全部通过 pytest 单元测试。
 
-**Architecture:** FastAPI 应用通过 `create_app()` 工厂创建，lifespan 内启动 APScheduler 定时抓取 RBA 利率。路由按领域拆分到 `routers/` 子包（funds/metrics/anomalies/rba/reports）。period 切片（full/3y/1y/common）抽取为纯函数 `period.py`。LLM 集成通过 openai SDK 调用用户的中转站（OpenAI 兼容），报告缓存到 `ai_reports` 表。所有端点复用阶段 1 的 `crud.py` / `calculations.py` / `metrics_pipeline.py` / `rba.py`，不重写计算逻辑。
+**Architecture:** FastAPI 应用通过 `create_app()` 工厂创建，lifespan 内启动 APScheduler 定时抓取 RBA 利率。路由按领域拆分到 `routers/` 子包（funds/metrics/anomalies/rba）。period 切片（full/3y/1y/common）抽取为纯函数 `period.py`。所有端点复用阶段 1 的 `crud.py` / `calculations.py` / `metrics_pipeline.py` / `rba.py`，不重写计算逻辑。**本阶段不做 LLM 报告**：Web 后端不集成任何 LLM API 调用（LLM 能力属于 skills/Claude Code 侧）。`ai_reports` 表保留备用，后续若做 LLM 报告倾向于由 skills 侧生成写入、Web 后端仅读取展示。
 
-**Tech Stack:** Python 3.9.6, FastAPI, Uvicorn, Pydantic v2, APScheduler 3.x, openai SDK 1.x, SQLAlchemy 2.0, SQLite, pytest, httpx (TestClient)
+**Tech Stack:** Python 3.9.6, FastAPI, Uvicorn, Pydantic v2, APScheduler 3.x, SQLAlchemy 2.0, SQLite, pytest, httpx (TestClient)
 
 ## Global Constraints
 
@@ -17,8 +17,7 @@
 - **基金防重**：基于 `fund_name` UNIQUE 约束（阶段 1 已实现），POST 重复 fund_name 返回 409。
 - **period 语义**：`full`=全部历史；`3y`=最近 36 个月；`1y`=最近 12 个月；`common`=所有选中基金的共同月份交集。`full` 读 `fund_metrics` 预计算缓存；`3y/1y/common` 从 `monthly_returns` 切片后即时重算（复用 `compute_all_metrics` + `resolve_rf_rates`）。
 - **去平滑判定基于切片后序列**：time-series 端点对切片后的 returns 重新计算 phi/Q 并判定 `should_apply_geltner`。若切片后 n<36，则不返回去平滑 NAV（即使全量历史通过了 Geltner）。
-- **LLM 中转站假设 OpenAI 兼容**：用 openai SDK + `base_url` 配置。若用户中转站非 OpenAI 格式，需在 `llm.py` 调整（审批时确认）。第一版**非流式**（返回完整 Markdown），流式预留。
-- **ai_reports 缓存键**：`(fund_ids 字母升序逗号拼接, date_period, report_type=period)` 唯一。命中缓存直接返回；`force=true` 跳过缓存重新生成。
+- **LLM 报告本阶段不做**：Web 后端不集成任何 LLM API 调用（LLM 能力属于 skills/Claude Code 侧，Web 后端应保持纯粹的"计算+数据+API"职责）。`ai_reports` 表保留（阶段 1 已建）备用。后续若做 LLM 报告，倾向于由 skills 侧生成写入 `ai_reports`，Web 后端仅提供 GET 读取展示。
 - **测试隔离**：API 测试用 `TestClient` + 依赖注入覆盖（`get_db` 指向内存 SQLite），且 `create_app(enable_scheduler=False)` 避免测试启动调度器。
 - **语言**：代码注释与中文输出用中文（遵循 CLAUDE.md）。
 
@@ -28,11 +27,11 @@
 
 ```
 webapp/backend/
-├── requirements.txt                  # 更新：追加 fastapi/uvicorn/apscheduler/openai/httpx
+├── requirements.txt                  # 更新：追加 fastapi/uvicorn/apscheduler/httpx
 ├── README.md                         # 新：启动说明与环境变量
 ├── app/
 │   ├── __init__.py                   # 已存在
-│   ├── config.py                     # 改：追加 LLM_*/CORS/SCHEDULER 配置
+│   ├── config.py                     # 改：追加 CORS/SCHEDULER 配置
 │   ├── database.py                   # 已存在（get_db 供依赖注入）
 │   ├── models.py                     # 已存在（6 张表）
 │   ├── calculations.py               # 已存在（5 维纯计算）
@@ -44,14 +43,12 @@ webapp/backend/
 │   ├── schemas.py                    # 新：Pydantic 请求/响应模型
 │   ├── period.py                     # 新：period 切片纯函数（full/3y/1y/common）
 │   ├── scheduler.py                  # 新：APScheduler RBA 定时任务
-│   ├── llm.py                        # 新：LLM prompt 构建 + 中转站调用 + 缓存
 │   └── routers/
 │       ├── __init__.py               # 新：空
 │       ├── funds.py                  # 新：GET/POST/DELETE /api/funds, POST /recompute
 │       ├── metrics.py                # 新：GET /api/metrics/compare, /time-series
 │       ├── anomalies.py              # 新：GET /api/anomalies, PATCH /api/monthly-returns/{id}
-│       ├── rba.py                    # 新：POST /api/rba/refresh
-│       └── reports.py                # 新：POST /api/reports/ai-summary
+│       └── rba.py                    # 新：POST /api/rba/refresh
 └── tests/
     ├── __init__.py                   # 已存在
     ├── conftest.py                   # 改：追加 client(TestClient) fixture
@@ -61,8 +58,6 @@ webapp/backend/
     ├── test_api_metrics.py           # 新
     ├── test_api_anomalies.py         # 新
     ├── test_scheduler.py             # 新
-    ├── test_llm.py                   # 新
-    ├── test_api_reports.py           # 新
     └── test_integration.py           # 新：端到端
 ```
 
@@ -70,9 +65,8 @@ webapp/backend/
 - `main.py`：仅组装 app（CORS、lifespan、挂载路由），不含业务逻辑。`create_app(enable_scheduler)` 工厂便于测试关闭调度器。
 - `schemas.py`：所有 Pydantic v2 模型，含 APIR 正则校验。
 - `period.py`：纯函数，输入 (dates, returns, period) 输出切片，无 IO，最易测试。
-- `routers/*.py`：薄路由层，参数解析 -> 调 crud/calculations/period/llm -> 返回 schema。不含新计算逻辑。
+- `routers/*.py`：薄路由层，参数解析 -> 调 crud/calculations/period -> 返回 schema。不含新计算逻辑。
 - `scheduler.py`：APScheduler 封装，定时调用 `rba.fetch_current_rba_rate` + `fetch_historical_rba_rates` + `upsert_rba_rates`。
-- `llm.py`：prompt 构建 + openai SDK 调用 + ai_reports 缓存读写。
 
 ---
 
@@ -87,7 +81,7 @@ webapp/backend/
 
 **Interfaces:**
 - Consumes: 阶段 1 的 `database.get_db`、`database.init_db`。
-- Produces: `create_app(enable_scheduler: bool = True) -> FastAPI`（工厂）；`app` 模块级实例（uvicorn 入口）；`settings` 追加字段 `LLM_API_BASE`、`LLM_API_KEY`、`LLM_MODEL`、`CORS_ORIGINS`、`SCHEDULER_ENABLED`、`RBA_CRON_HOUR`；Pydantic 模型 `FundCreate`、`FundResponse`、`MonthlyReturnPatch`、`AnomalyResponse` 等；测试 `client` fixture（TestClient + 内存 DB 依赖覆盖）。
+- Produces: `create_app(enable_scheduler: bool = True) -> FastAPI`（工厂）；`app` 模块级实例（uvicorn 入口）；`settings` 追加字段 `CORS_ORIGINS`、`SCHEDULER_ENABLED`、`RBA_CRON_HOUR`；Pydantic 模型 `FundCreate`、`FundResponse`、`MonthlyReturnPatch`、`AnomalyResponse`；测试 `client` fixture（TestClient + 内存 DB 依赖覆盖）。
 
 - [ ] **Step 1: 更新 requirements.txt**
 
@@ -99,7 +93,6 @@ pytest>=8.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 apscheduler>=3.10.0,<4.0.0
-openai>=1.12.0
 httpx>=0.27.0
 ```
 
@@ -118,10 +111,6 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{_DEFAULT_DB_PATH}")
     RBA_BASE_URL: str = "https://www.rba.gov.au/"
     RBA_HISTORY_API: str = "https://api.db.nomics.world/v22/series/RBA/F1/FIRMMCRTD?observations=1"
-    # LLM 中转站（OpenAI 兼容）
-    LLM_API_BASE: str = os.getenv("LLM_API_BASE", "")  # 空=未配置，AI 报告功能禁用
-    LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-3-5-sonnet")
     # Web
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
     # 调度
@@ -198,17 +187,6 @@ class AnomalyResponse(BaseModel):
     fund_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
-
-
-class AiReportRequest(BaseModel):
-    fund_ids: list[str]
-    period: str = "full"  # full/3y/1y/common
-    force: bool = False
-
-
-class AiReportResponse(BaseModel):
-    content: str
-    cached: bool = False
 ```
 
 - [ ] **Step 4: 创建 app/main.py（create_app 工厂 + lifespan）**
@@ -259,12 +237,11 @@ def create_app(enable_scheduler: bool = True) -> FastAPI:
         allow_headers=["*"],
     )
 
-    from app.routers import funds, metrics, anomalies, rba, reports
+    from app.routers import funds, metrics, anomalies, rba
     app.include_router(funds.router)
     app.include_router(metrics.router)
     app.include_router(anomalies.router)
     app.include_router(rba.router)
-    app.include_router(reports.router)
 
     @app.get("/health")
     def health() -> dict:
@@ -343,7 +320,7 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'app.routers'` 或 `app.s
 
 - [ ] **Step 8: 创建 app/routers/__init__.py（空）与占位 router 文件**
 
-为让 main.py 能 import，创建 5 个占位 router 文件，每个含一个空的 `router = APIRouter()`。后续任务填充端点。
+为让 main.py 能 import，创建 4 个占位 router 文件，每个含一个空的 `router = APIRouter()`。后续任务填充端点。
 
 ```python
 # app/routers/__init__.py（空）
@@ -355,7 +332,7 @@ from fastapi import APIRouter
 router = APIRouter(prefix="/api/funds", tags=["funds"])
 ```
 
-（metrics.py prefix `/api/metrics`；anomalies.py prefix `/api`；rba.py prefix `/api/rba`；reports.py prefix `/api/reports`，各自同样占位。）
+（metrics.py prefix `/api/metrics`；anomalies.py prefix `/api`；rba.py prefix `/api/rba`，各自同样占位。）
 
 同时创建 `app/scheduler.py` 占位：
 
@@ -373,7 +350,7 @@ def shutdown_scheduler(scheduler):
 - [ ] **Step 9: 安装新依赖**
 
 Run: `cd webapp/backend && pip3 install -r requirements.txt`
-Expected: 成功安装 fastapi, uvicorn, apscheduler, openai, httpx
+Expected: 成功安装 fastapi, uvicorn, apscheduler, httpx
 
 - [ ] **Step 10: 运行测试验证通过**
 
@@ -1407,362 +1384,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 7: LLM 报告生成 API（中转站集成 + 缓存）
-
-**Files:**
-- Create: `webapp/backend/app/llm.py`
-- Modify: `webapp/backend/app/routers/reports.py`
-- Create: `webapp/backend/tests/test_llm.py`
-- Create: `webapp/backend/tests/test_api_reports.py`
-
-**Interfaces:**
-- Consumes: `config.settings`（LLM_API_BASE/KEY/MODEL）、`crud.get_returns`、`FundMetric`、`AiReport` 模型、`routers.metrics._recompute_for_slice` 思路（复用 compare 取指标）。
-- Produces:
-  - `llm.build_prompt(fund_metrics_list: list[dict], period: str) -> str`：构建中文金融投研 prompt（含 5 维指标表 + 去平滑状态）。
-  - `llm.call_llm(prompt: str) -> str`：调用中转站（openai SDK，base_url），返回 Markdown。LLM 未配置时抛 `RuntimeError`。
-  - `llm.get_cached_report(session, fund_ids, date_period, report_type) -> Optional[str]`：查 ai_reports 缓存。
-  - `llm.save_report(session, fund_ids, date_period, report_type, content)`：写缓存。
-  - `POST /api/reports/ai-summary`：`AiReportRequest` -> `AiReportResponse`。命中缓存返回 cached=true；`force=true` 强制重生成。LLM 未配置 -> 503。
-
-- [ ] **Step 1: 写失败测试 tests/test_llm.py**
-
-```python
-"""LLM prompt 构建与缓存逻辑测试。不实际调用 LLM。"""
-import pytest
-from unittest.mock import patch
-
-from app.llm import build_prompt, get_cached_report, save_report, cache_key
-from app.models import AiReport
-
-
-@pytest.mark.unit
-def test_build_prompt_contains_5d_metrics():
-    metrics_list = [{
-        "fund_id": "f1", "fund_name": "Fund One", "date_period": "2026-05",
-        "history_months": 48, "is_short_history_warning": 0,
-        "unsmoothing_coefficient_phi": 0.42, "is_geltner_applied": 1,
-        "orig_annualized_excess_return": 0.025, "un_annualized_excess_return": 0.031,
-        "orig_max_drawdown": -0.08, "un_max_drawdown": -0.12,
-        "orig_omega_ratio": 1.8, "un_omega_ratio": 1.5,
-        "orig_excess_win_rate": 0.65, "un_excess_win_rate": 0.60,
-        "orig_max_underperform_months": 4, "un_max_underperform_months": 5,
-        "orig_annualized_volatility": 0.04, "un_annualized_volatility": 0.06,
-        "ljung_box_q": 11.6, "is_q_significant": 1,
-    }]
-    prompt = build_prompt(metrics_list, period="full")
-    assert "Fund One" in prompt
-    assert "0.42" in prompt  # phi
-    assert "Omega" in prompt or "omega" in prompt.lower()
-    assert "去平滑" in prompt or "Geltner" in prompt
-
-
-@pytest.mark.unit
-def test_cache_key_sorted_and_joined():
-    assert cache_key(["f2", "f1"]) == "f1,f2"
-
-
-@pytest.mark.unit
-def test_cached_report_hit_and_miss(db_session):
-    save_report(db_session, ["f1", "f2"], "2026-05", "full", "# 报告内容")
-    hit = get_cached_report(db_session, ["f2", "f1"], "2026-05", "full")
-    assert hit == "# 报告内容"
-    miss = get_cached_report(db_session, ["f1", "f2"], "2026-06", "full")
-    assert miss is None
-
-
-@pytest.mark.unit
-def test_call_llm_uses_openai_client(monkeypatch):
-    """call_llm 通过 openai SDK 调用，mock 验证 base_url 与 model。"""
-    from app import llm
-    captured = {}
-
-    class FakeResp:
-        choices = [type("C", (), {"message": type("M", (), {"content": "# AI 报告"})()})()]
-
-    class FakeClient:
-        def __init__(self, api_key=None, base_url=None):
-            captured["base_url"] = base_url
-            captured["api_key"] = api_key
-        def chat(self):
-            return self
-        def completions(self):
-            return self
-        def create(self, **kwargs):
-            captured["model"] = kwargs.get("model")
-            captured["messages"] = kwargs.get("messages")
-            return FakeResp()
-
-    monkeypatch.setattr(llm.settings, "LLM_API_BASE", "https://relay.example.com/v1")
-    monkeypatch.setattr(llm.settings, "LLM_API_KEY", "sk-test")
-    monkeypatch.setattr(llm.settings, "LLM_MODEL", "claude-3-5-sonnet")
-    monkeypatch.setattr(llm, "OpenAI", lambda **kw: FakeClient(**kw))
-
-    result = llm.call_llm("测试 prompt")
-    assert result == "# AI 报告"
-    assert captured["base_url"] == "https://relay.example.com/v1"
-    assert captured["model"] == "claude-3-5-sonnet"
-
-
-@pytest.mark.unit
-def test_call_llm_raises_when_not_configured(monkeypatch):
-    from app import llm
-    monkeypatch.setattr(llm.settings, "LLM_API_BASE", "")
-    monkeypatch.setattr(llm.settings, "LLM_API_KEY", "")
-    with pytest.raises(RuntimeError, match="未配置"):
-        llm.call_llm("prompt")
-```
-
-- [ ] **Step 2: 运行测试验证失败**
-
-Run: `cd webapp/backend && python3 -m pytest tests/test_llm.py -v`
-Expected: FAIL（`ModuleNotFoundError: No module named 'app.llm'`）
-
-- [ ] **Step 3: 实现 app/llm.py**
-
-```python
-"""LLM 投研报告：prompt 构建 + 中转站调用（OpenAI 兼容）+ ai_reports 缓存。"""
-from __future__ import annotations
-
-from typing import Optional
-
-from sqlalchemy.orm import Session
-
-from app.config import settings
-from app.models import AiReport
-
-try:
-    from openai import OpenAI
-except ImportError:  # openai 未安装时降级
-    OpenAI = None  # type: ignore
-
-
-def cache_key(fund_ids: list[str]) -> str:
-    """基金 ID 列表 -> 字母升序逗号拼接（ai_reports.fund_ids 缓存键）。"""
-    return ",".join(sorted(fund_ids))
-
-
-def build_prompt(fund_metrics_list: list[dict], period: str) -> str:
-    """构建中文金融投研对比 prompt，含 5 维指标表。"""
-    lines = [
-        "你是一位资深的澳大利亚固定收益基金分析师。请基于以下5维业绩指标，",
-        f"对 {len(fund_metrics_list)} 只基金在【{period}】区间内的表现进行深度对比分析，",
-        "输出 Markdown 格式的投研报告。要求：",
-        "1. 进攻（年化超额收益 Alpha）、防守（最大回撤）、性价比（Omega 比率）、",
-        "体感（超额胜率+最长连续跑输月数）、真实性（去平滑前后波动率对比）五维逐一对比；",
-        "2. 指出每只基金的核心优劣与适用投资者画像；",
-        "3. 若某基金应用了 Geltner 去平滑，说明其平滑程度（phi）对真实风险的揭示；",
-        "4. 不得捏造未提供的数据；指标不足 36 个月的基金应提示数据不足，不做去平滑推断。",
-        "",
-        "## 基金5维指标数据（数据截止见 date_period）：",
-    ]
-    for m in fund_metrics_list:
-        lines.append(f"""
-### {m.get('fund_name', m.get('fund_id'))} (fund_id={m['fund_id']})
-- 数据截止: {m.get('date_period')}，历史月数: {m['history_months']}
-- 数据不足预警: {'是（<36月，未去平滑）' if m['is_short_history_warning'] else '否'}
-- 自相关 phi={m['unsmoothing_coefficient_phi']:.4f}，Ljung-Box Q={m['ljung_box_q']:.2f}（{'显著' if m['is_q_significant'] else '不显著'}）
-- 去平滑: {'已应用' if m['is_geltner_applied'] else '未应用'}
-- 进攻(年化超额): 原始 {m['orig_annualized_excess_return']:.4%} / 去平滑 {m['un_annualized_excess_return']:.4%}
-- 防守(最大回撤): 原始 {m['orig_max_drawdown']:.4%} / 去平滑 {m['un_max_drawdown']:.4%}
-- 性价比(Omega): 原始 {m['orig_omega_ratio']:.4f} / 去平滑 {m['un_omega_ratio']:.4f}
-- 体感(超额胜率): 原始 {m['orig_excess_win_rate']:.2%} / 去平滑 {m['un_excess_win_rate']:.2%}
-- 体感(最长连续跑输月数): 原始 {m['orig_max_underperform_months']} / 去平滑 {m['un_max_underperform_months']}
-- 真实性(年化波动率): 原始 {m['orig_annualized_volatility']:.4%} / 去平滑 {m['un_annualized_volatility']:.4%}
-""")
-    return "\n".join(lines)
-
-
-def call_llm(prompt: str) -> str:
-    """调用中转站 LLM（OpenAI 兼容），返回 Markdown 文本。未配置时抛 RuntimeError。"""
-    if not settings.LLM_API_BASE or not settings.LLM_API_KEY:
-        raise RuntimeError("LLM 未配置：请设置 LLM_API_BASE 与 LLM_API_KEY 环境变量")
-    if OpenAI is None:
-        raise RuntimeError("openai 包未安装，无法调用 LLM")
-    client = OpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_API_BASE)
-    resp = client.chat.completions.create(
-        model=settings.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": "你是专业的澳洲固收基金投研分析师，输出严谨的中文 Markdown 报告。"},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    return resp.choices[0].message.content
-
-
-def get_cached_report(session: Session, fund_ids: list[str], date_period: str,
-                      report_type: str) -> Optional[str]:
-    """查 ai_reports 缓存。"""
-    row = session.query(AiReport).filter_by(
-        fund_ids=cache_key(fund_ids), date_period=date_period, report_type=report_type
-    ).order_by(AiReport.created_at.desc()).first()
-    return row.content if row else None
-
-
-def save_report(session: Session, fund_ids: list[str], date_period: str,
-                report_type: str, content: str) -> None:
-    """写入 ai_reports 缓存。"""
-    session.add(AiReport(
-        fund_ids=cache_key(fund_ids), date_period=date_period,
-        report_type=report_type, content=content,
-    ))
-    session.commit()
-```
-
-- [ ] **Step 4: 运行测试验证通过**
-
-Run: `cd webapp/backend && python3 -m pytest tests/test_llm.py -v`
-Expected: 5 passed
-
-- [ ] **Step 5: 写失败测试 tests/test_api_reports.py**
-
-```python
-"""AI 报告 API 测试。"""
-import pytest
-from unittest.mock import patch
-from app.models import MonthlyReturn, RbaCashRate, AiReport
-
-
-def _seed_and_recompute(client, db_session):
-    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
-                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
-    for m in range(1, 13):
-        db_session.add(MonthlyReturn(fund_id="f1", date=f"2025-{m:02d}-28",
-                                     net_return=0.005, nav=1.0))
-        db_session.add(RbaCashRate(date_period=f"2025-{m:02d}", rate=0.0435))
-    db_session.commit()
-    client.post("/api/funds/f1/recompute")
-
-
-@pytest.mark.unit
-def test_ai_summary_returns_cached_on_second_call(client, db_session, monkeypatch):
-    _seed_and_recompute(client, db_session)
-    monkeypatch.setattr("app.llm.settings.LLM_API_BASE", "https://relay/v1")
-    monkeypatch.setattr("app.llm.settings.LLM_API_KEY", "sk-test")
-    monkeypatch.setattr("app.llm.call_llm", lambda prompt: "# 首次生成的报告")
-
-    resp1 = client.post("/api/reports/ai-summary",
-                        json={"fund_ids": ["f1"], "period": "full"})
-    assert resp1.status_code == 200
-    assert resp1.json()["cached"] is False
-    assert resp1.json()["content"] == "# 首次生成的报告"
-
-    # 第二次应命中缓存（call_llm 不应再被调用）
-    monkeypatch.setattr("app.llm.call_llm", lambda prompt: "# 不应出现")
-    resp2 = client.post("/api/reports/ai-summary",
-                        json={"fund_ids": ["f1"], "period": "full"})
-    assert resp2.status_code == 200
-    assert resp2.json()["cached"] is True
-    assert resp2.json()["content"] == "# 首次生成的报告"
-
-
-@pytest.mark.unit
-def test_ai_summary_force_bypasses_cache(client, db_session, monkeypatch):
-    _seed_and_recompute(client, db_session)
-    monkeypatch.setattr("app.llm.settings.LLM_API_BASE", "https://relay/v1")
-    monkeypatch.setattr("app.llm.settings.LLM_API_KEY", "sk-test")
-    monkeypatch.setattr("app.llm.call_llm", lambda prompt: "# 第一版")
-    client.post("/api/reports/ai-summary", json={"fund_ids": ["f1"], "period": "full"})
-
-    monkeypatch.setattr("app.llm.call_llm", lambda prompt: "# 强制新版")
-    resp = client.post("/api/reports/ai-summary",
-                       json={"fund_ids": ["f1"], "period": "full", "force": True})
-    assert resp.status_code == 200
-    assert resp.json()["content"] == "# 强制新版"
-
-
-@pytest.mark.unit
-def test_ai_summary_503_when_llm_not_configured(client, db_session, monkeypatch):
-    _seed_and_recompute(client, db_session)
-    monkeypatch.setattr("app.llm.settings.LLM_API_BASE", "")
-    monkeypatch.setattr("app.llm.settings.LLM_API_KEY", "")
-    resp = client.post("/api/reports/ai-summary",
-                       json={"fund_ids": ["f1"], "period": "full"})
-    assert resp.status_code == 503
-```
-
-- [ ] **Step 6: 运行测试验证失败**
-
-Run: `cd webapp/backend && python3 -m pytest tests/test_api_reports.py -v`
-Expected: FAIL（端点不存在）
-
-- [ ] **Step 7: 实现 app/routers/reports.py**
-
-```python
-"""AI 投研报告路由。"""
-from __future__ import annotations
-
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-
-from app.database import get_db
-from app.crud import get_fund
-from app.models import FundMetric
-from app.schemas import AiReportRequest, AiReportResponse
-from app.llm import build_prompt, call_llm, get_cached_report, save_report
-from app.period import VALID_PERIODS
-
-router = APIRouter(prefix="/api/reports", tags=["reports"])
-
-
-@router.post("/ai-summary", response_model=AiReportResponse)
-def ai_summary(payload: AiReportRequest, session: Session = Depends(get_db)):
-    if payload.period not in VALID_PERIODS:
-        raise HTTPException(status_code=422, detail=f"period 须为 {VALID_PERIODS}")
-    if not payload.fund_ids:
-        raise HTTPException(status_code=422, detail="fund_ids 不能为空")
-
-    # 校验基金存在并收集指标
-    metrics_list = []
-    for fid in payload.fund_ids:
-        if get_fund(session, fid) is None:
-            raise HTTPException(status_code=404, detail=f"基金 {fid} 不存在")
-        m = session.get(FundMetric, fid)
-        if m is None:
-            raise HTTPException(status_code=400, detail=f"基金 {fid} 无预计算指标，请先 recompute")
-        fund = get_fund(session, fid)
-        d = {c.name: getattr(m, c.name) for c in m.__table__.columns}
-        d["fund_name"] = fund.fund_name
-        metrics_list.append(d)
-
-    date_period = max(m["date_period"] for m in metrics_list)
-
-    # 缓存命中
-    if not payload.force:
-        cached = get_cached_report(session, payload.fund_ids, date_period, payload.period)
-        if cached is not None:
-            return AiReportResponse(content=cached, cached=True)
-
-    # 调用 LLM
-    prompt = build_prompt(metrics_list, payload.period)
-    try:
-        content = call_llm(prompt)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM 调用失败: {e}")
-
-    save_report(session, payload.fund_ids, date_period, payload.period, content)
-    return AiReportResponse(content=content, cached=False)
-```
-
-- [ ] **Step 8: 运行测试验证通过**
-
-Run: `cd webapp/backend && python3 -m pytest tests/test_llm.py tests/test_api_reports.py -v`
-Expected: 8 passed
-
-- [ ] **Step 9: 提交**
-
-```bash
-git add webapp/backend/app/llm.py webapp/backend/app/routers/reports.py \
-        webapp/backend/tests/test_llm.py webapp/backend/tests/test_api_reports.py
-git commit -m "feat(backend): add LLM report generation with relay integration and caching
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-### Task 8: 端到端集成测试 + 启动说明
+### Task 7: 端到端集成测试 + 启动说明
 
 **Files:**
 - Create: `webapp/backend/tests/test_integration.py`
@@ -1770,7 +1392,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Create: `webapp/backend/pytest.ini`（注册 unit 标记，阶段 1 最终审核的遗留项）
 
 **Interfaces:**
-- 串联 Task 1-7 的全部端点，验证完整工作流：注册基金 -> 写入月度数据（模拟 skill）-> 重算指标 -> 对比 -> 时序 -> 异常纠错 -> AI 报告。
+- 串联 Task 1-6 的全部端点，验证完整工作流：注册基金 -> 写入月度数据（模拟 skill）-> 重算指标 -> 对比 -> 时序 -> 异常纠错 -> 删除同步。
 
 - [ ] **Step 1: 创建 pytest.ini（注册标记，消除阶段 1 遗留警告）**
 
@@ -1784,9 +1406,8 @@ testpaths = tests
 - [ ] **Step 2: 写端到端集成测试 tests/test_integration.py**
 
 ```python
-"""端到端集成：注册->数据->重算->对比->时序->纠错->AI报告。"""
+"""端到端集成：注册->数据->重算->对比->时序->纠错->删除同步。"""
 import pytest
-from unittest.mock import patch
 from app.models import MonthlyReturn, RbaCashRate
 
 
@@ -1825,16 +1446,7 @@ def test_full_workflow(client, db_session, monkeypatch):
     anomalies = client.get("/api/anomalies").json()
     assert len(anomalies) == 0
 
-    # 7. AI 报告（mock LLM）
-    monkeypatch.setattr("app.llm.settings.LLM_API_BASE", "https://relay/v1")
-    monkeypatch.setattr("app.llm.settings.LLM_API_KEY", "sk-test")
-    monkeypatch.setattr("app.llm.call_llm", lambda prompt: "# 集成测试报告")
-    resp = client.post("/api/reports/ai-summary",
-                       json={"fund_ids": ["f1", "f2"], "period": "full"})
-    assert resp.status_code == 200
-    assert "集成测试报告" in resp.json()["content"]
-
-    # 8. 删除一只基金，确认列表更新（模拟"网页删除"同步）
+    # 7. 删除一只基金，确认列表更新（模拟"网页删除"同步）
     assert client.delete("/api/funds/f2").status_code == 204
     funds = client.get("/api/funds").json()
     assert len(funds) == 1
@@ -1863,7 +1475,7 @@ Expected: 阶段 1 的 43 + 阶段 2 新增约 35+，全绿
 ````markdown
 # 固定收益基金分析 - 后端 API
 
-基于 FastAPI 的后端，提供基金业绩分析 REST API、RBA 利率定时调度与 LLM 投研报告。
+基于 FastAPI 的后端，提供基金业绩分析 REST API 与 RBA 利率定时调度。
 
 ## 启动
 
@@ -1879,9 +1491,6 @@ uvicorn app.main:app --reload --port 8000
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | DATABASE_URL | sqlite:///data/fund_analysis.db | SQLite 连接串 |
-| LLM_API_BASE | （空） | LLM 中转站端点（OpenAI 兼容），空则禁用 AI 报告 |
-| LLM_API_KEY | （空） | LLM API Key |
-| LLM_MODEL | claude-3-5-sonnet | 模型名 |
 | CORS_ORIGINS | http://localhost:5173 | 允许的前端来源（逗号分隔） |
 | SCHEDULER_ENABLED | true | 是否启用 RBA 定时调度 |
 | RBA_CRON_HOUR | 9 | 每日抓取 RBA 的小时 |
@@ -1898,7 +1507,6 @@ uvicorn app.main:app --reload --port 8000
 - `GET /api/anomalies` 异常列表
 - `PATCH /api/monthly-returns/{id}` 人工纠错（触发重算）
 - `POST /api/rba/refresh` 手动刷新 RBA 利率
-- `POST /api/reports/ai-summary` LLM 投研报告（带缓存）
 
 ## 测试
 
@@ -1921,17 +1529,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## 阶段 2 完成标准
 
 全部以下条件满足：
-1. `cd webapp/backend && python3 -m pytest tests/ -v` 全绿（阶段 1 的 43 + 阶段 2 新增约 35+，共约 78+ 用例）。
-2. `webapp/backend/app/` 下新增 5 个模块：`main, schemas, period, scheduler, llm` + `routers/` 子包（funds/metrics/anomalies/rba/reports）。
-3. 11 个 API 端点可用，`/openapi.json` 可生成（前端代码生成的依据）。
+1. `cd webapp/backend && python3 -m pytest tests/ -v` 全绿（阶段 1 的 43 + 阶段 2 新增约 27+，共约 70+ 用例）。
+2. `webapp/backend/app/` 下新增 4 个模块：`main, schemas, period, scheduler` + `routers/` 子包（funds/metrics/anomalies/rba）。
+3. 10 个 API 端点可用，`/openapi.json` 可生成（前端代码生成的依据）。
 4. `create_app(enable_scheduler=False)` 工厂可在测试中关闭调度器；生产 `uvicorn app.main:app` 启动时调度器随 lifespan 自动启停。
 5. period 切片（full/3y/1y/common）通过纯函数测试；compare 对 full 读缓存、其他切片重算。
 6. RBA 调度可 mock 测试，`run_rba_update` 独立可调用。
-7. LLM 集成：未配置返回 503；已配置调用中转站；ai_reports 缓存命中返回 cached=true，force 可绕过。
-8. Python 3.9.6 兼容：全程 `Optional[X]`，无 PEP 604 运行时语法。
+7. Python 3.9.6 兼容：全程 `Optional[X]`，无 PEP 604 运行时语法。
 
 ## 后续阶段预告（不在本计划内）
 
 - **阶段 3**：自定义技能重构（`add_fixed_fund`, `update_fixed_fund`），读取 `funds` 表配置执行抓取，写入 `monthly_returns`，调用 `compute_and_store_metrics`。
-- **阶段 4**：React 前端（Vite + Tailwind + Recharts），消费本阶段 11 个端点。
+- **阶段 4**：React 前端（Vite + Tailwind + Recharts），消费本阶段 10 个端点。
 - **阶段 5**：JSON -> SQLite 数据迁移与旧代码清理（spec 第 6 节）。
