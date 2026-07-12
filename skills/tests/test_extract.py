@@ -353,6 +353,32 @@ def test_extract_pdf_links_from_archive_dedup():
     assert len(links) == 1
 
 
+def test_extract_pdf_links_from_archive_link_text_priority():
+    """链接文本优先于 URL 文件名（Stake 格式：文件名 2 位年份，文本 4 位年份）。
+
+    端到端验收发现：URL 文件名 April25/Aug25 等 2 位年份不匹配 extract_month_prefix
+    的 4 位年份正则，且 URL hash 可能误匹配。链接文本 "April 2025" 更可靠。
+    """
+    md = (
+        "* [April 2025](https://assets.contentstack.io/AccumulateMonthly_April25.pdf)\n"
+        "* [Aug 2025](https://assets.contentstack.io/Accumulate_Report_Aug25.pdf)\n"
+        "* [Sept 2025](https://assets.contentstack.io/blt7e585600966a7a12/AccumulateReport_Sept_2025.pdf)\n"
+    )
+    links = extract_pdf_links_from_archive(md)
+    assert len(links) == 3
+    yms = [ym for ym, _ in links]
+    assert "2025-04" in yms  # 从链接文本提，非 URL 的 April25
+    assert "2025-08" in yms
+    assert "2025-09" in yms  # URL 含 hash blt7e585... 不应误匹配
+
+
+def test_extract_pdf_links_from_archive_link_text_no_month_fallback_url():
+    """链接文本无月份（如 'Report'）时回退到 URL 提取。"""
+    md = "- [Report](https://example.com/apr-2025.pdf)"
+    links = extract_pdf_links_from_archive(md)
+    assert ("2025-04", "https://example.com/apr-2025.pdf") in links
+
+
 from lib.extract import (
     download_and_extract_parallel,
     verify_monthly_vs_rolling,

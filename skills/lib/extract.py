@@ -365,18 +365,49 @@ def extract_pdf_one(
     return (extract_commentary_return(text), extract_perf_rolling(text))
 
 
+def _text_to_ym(text: str) -> Optional[str]:
+    """从链接文本（如 'March 2025'/'Aug 2025'）提 YYYY-MM。
+
+    用 parse_date_string 解析日期文本（支持空格/短横/下划线分隔），取
+    YYYY-MM 前 7 位。无法解析返回 None。
+    """
+    date_str = parse_date_string(text)
+    return date_str[:7] if date_str else None
+
+
 def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
     """从归档页 markdown 提取 [(YYYY-MM, pdf_url), ...]。
 
-    匹配所有 .pdf URL，用 extract_month_prefix 从 URL 识别月份。去重保持顺序。
-    无法识别月份的 URL 跳过（不猜测）。
+    优先从 markdown 链接文本 [text](url.pdf) 提取月份（链接文本通常是
+    "March 2025" 等规范月份名+年份，比 URL 文件名可靠--文件名命名常不统一
+    如 April25/March2025 混用，且 URL hash 如 blt93dd2d 可能被误匹配为日期）。
+    链接文本无月份时回退到 URL 用 extract_month_prefix。裸 url.pdf 从 URL 提取。
+    去重保持顺序。无法识别月份的跳过（不猜测）。
     """
     if not markdown:
         return []
-    urls = re.findall(r"https?://[^\s\)]+\.pdf", markdown, re.IGNORECASE)
     results: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for url in urls:
+
+    # 1. markdown 链接 [text](url.pdf)：优先从 text 提月份，回退 url
+    link_pattern = re.compile(
+        r"\[([^\]]+)\]\((https?://[^\s\)]+\.pdf[^\s\)]*)\)", re.IGNORECASE
+    )
+    for m in link_pattern.finditer(markdown):
+        text, url = m.group(1), m.group(2)
+        ym = _text_to_ym(text) or extract_month_prefix(url)
+        if ym is None:
+            continue
+        key = (ym, url)
+        if key not in seen:
+            seen.add(key)
+            results.append(key)
+
+    # 2. 裸 url.pdf（无链接文本）：从 url 提月份
+    linked_urls = {url for _, url in results}
+    for url in re.findall(r"https?://[^\s\)]+\.pdf[^\s\)]*", markdown, re.IGNORECASE):
+        if url in linked_urls:
+            continue
         ym = extract_month_prefix(url)
         if ym is None:
             continue
