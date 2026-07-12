@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.ingest import add_fund
+from lib.ingest import add_fund, add_fund_from_html_table
 from lib.db import ensure_tables, get_connection, get_monthly_returns, get_fund
 
 
@@ -149,5 +149,117 @@ def test_add_fund_extraction_failure_isolation(monkeypatch, tmp_path):
     try:
         ensure_tables(conn)  # gate fail 时 add_fund 未建表
         assert get_fund(conn, "test_fund4") is None
+    finally:
+        conn.close()
+
+
+# --- add_fund_from_html_table（HTML 表格源流水线）---
+
+# 连续 18 月（2025 全年 + 2026 Jan-Jun），无缺口，YTD 复利可通过 gate。
+_FUNDMONITORS_CONTINUOUS_MD = """\
+# Smarter Money Long Short Credit Fund (LSCF)
+
+Historical Performance  (all figures shown here are net of fees unless otherwise stated)
+
+| Year | Jan % | Feb % | Mar % | Apr % | May % | Jun % | Jul % | Aug % | Sep % | Oct % | Nov % | Dec % | YTD % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **2026** | 0.83 | 0.07 | -0.19 | 0.99 | 0.56 | 0.61 | N/R | N/R | N/R | N/R | N/R | N/R | 2.90 |
+| **2025** | 0.61 | 0.62 | -0.15 | -0.62 | 1.66 | 0.66 | 1.02 | 0.64 | 0.69 | 0.37 | 0.14 | 0.56 | 6.36 |
+
+Historical Financial Year Performance  (all figures shown here are are percentage per month net of fees unless otherwise stated)
+
+| Year | Jul % | Aug % | Sep % | Oct % | Nov % | Dec % | Jan % | Feb % | Mar % | Apr % | May % | Jun % | FYTD % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **2025/2026** | 1.02 | 0.64 | 0.69 | 0.37 | 0.14 | 0.56 | 0.83 | 0.07 | -0.19 | 0.99 | 0.56 | 0.61 | 6.47 |
+"""
+
+
+@pytest.mark.unit
+def test_add_fund_from_html_table_success(tmp_path):
+    """HTML 表格源流水线成功：2025+2026 部分 18 月，YTD 复利通过，入库。"""
+    db_path = str(tmp_path / "test.db")
+    table_md = tmp_path / "profile.md"
+    table_md.write_text(_FUNDMONITORS_CONTINUOUS_MD)
+
+    result = add_fund_from_html_table(
+        "test_html_fund", "Test HTML Fund", str(table_md),
+        confirmed_url="https://fundmonitors.com/fund-profile.php?FundID=X",
+        apir="SLT2562AU", verified_at="2026-07-13", db_path=db_path,
+    )
+    assert result["gate_pass"] is True
+    assert result["months"] == 18
+    assert result["start"] == "2025-01-31"
+    assert result["end"] == "2026-06-30"
+    assert result["short_history_warning"] is True  # 18 < 36
+
+    conn = get_connection(db_path)
+    try:
+        rows = get_monthly_returns(conn, "test_html_fund")
+        assert len(rows) == 18
+        # NAV 复利：起点 1.0 * (1+首月收益)
+        assert rows[0]["nav"] == pytest.approx(1.0 * (1 + 0.0061))
+        # commentary_truth == net_return（表格源无独立 commentary）
+        assert rows[0]["commentary_truth"] == rows[0]["net_return"]
+        # 末月 NAV = 全 18 月复利
+        expected_last = 1.0
+        for r in rows:
+            expected_last *= (1 + r["net_return"])
+        assert rows[-1]["nav"] == pytest.approx(expected_last)
+        # fund 记录字段
+        fund = get_fund(conn, "test_html_fund")
+        assert fund["fetch_method"] == "html"
+        assert fund["url_type"] == "fact_sheet_profile"
+        assert fund["apir_code"] == "SLT2562AU"
+        assert fund["verified_at"] == "2026-07-13"
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_add_fund_from_html_table_no_table(tmp_path):
+    """无 Historical Performance 表 -> gate_pass=False，不入库。"""
+    db_path = str(tmp_path / "test.db")
+    table_md = tmp_path / "profile.md"
+    table_md.write_text("# Some fund\nno table here")
+
+    result = add_fund_from_html_table(
+        "test_html_fund2", "Test HTML Fund 2", str(table_md),
+        confirmed_url="https://example.com/x", db_path=db_path,
+    )
+    assert result["gate_pass"] is False
+    assert result["months"] == 0
+    assert "表格无有效月度数据" in result["errors"]
+
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        assert get_fund(conn, "test_html_fund2") is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_add_fund_from_html_table_gap_fail(tmp_path):
+    """有缺口（删 2025 某月）-> gate_pass=False，不入库。"""
+    db_path = str(tmp_path / "test.db")
+    # 构造带缺口的 markdown：2025 缺 Jun（用空字符串制造缺口）
+    md = _FUNDMONITORS_CONTINUOUS_MD.replace(
+        "| **2025** | 0.61 | 0.62 | -0.15 | -0.62 | 1.66 | 0.66 | 1.02",
+        "| **2025** | 0.61 | 0.62 | -0.15 | -0.62 | 1.66 | N/R | 1.02",
+    )
+    table_md = tmp_path / "profile.md"
+    table_md.write_text(md)
+
+    result = add_fund_from_html_table(
+        "test_html_fund3", "Test HTML Fund 3", str(table_md),
+        confirmed_url="https://example.com/x", db_path=db_path,
+    )
+    assert result["gate_pass"] is False
+    assert any("缺口" in e for e in result["errors"])
+
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        assert get_fund(conn, "test_html_fund3") is None
     finally:
         conn.close()

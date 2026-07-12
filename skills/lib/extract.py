@@ -558,3 +558,140 @@ def gate_check(
                 errors.append(f"复利验证失败（{latest_ym}）: {verify}")
 
     return (len(errors) == 0, errors)
+
+
+# ---------------------------------------------------------------------------
+# HTML 表格源解析（fundmonitors Full Fund Profile 等）
+# 聚合站逐月收益表（Year×Month grid + YTD 列），无 PDF 归档基金的数据源。
+# 数据完整性：N/R=未报告跳过（pre-inception/future，非缺口）；提取层纯文本
+# ->数字映射（_pct_to_decimal Decimal 移位），无 backfill/forward-fill。
+# ---------------------------------------------------------------------------
+
+
+def parse_html_monthly_table(
+    markdown: str,
+) -> tuple[list[tuple[str, float]], dict[str, float]]:
+    """从 fundmonitors Full Fund Profile markdown 解析 Historical Performance 逐月表。
+
+    定位 "Historical Performance" 区块（calendar year，Jan-Dec），**排除**其后的
+    "Historical Financial Year Performance"（FY Jul-Jun）表，避免误解析 FY 表。
+    表格结构：| Year | Jan % | ... | Dec % | YTD % |，每行一个年份。
+
+    N/R / N/A / "-" / 空 -> 跳过（pre-inception 或未来月，非缺口）。数值（含负号
+    -0.19）经 _pct_to_decimal 转小数。返回 (records, ytd_map)：
+      records: [(YYYY-MM-月末, net_return), ...] 升序
+      ytd_map: {year_str: ytd_decimal} 供 gate_check_table 复利交叉验证
+
+    无法定位表或无有效数据 -> ([], {})。绝不猜测。
+    """
+    if not markdown:
+        return [], {}
+
+    # 定位 "Historical Performance" 区块，排除 "Historical Financial Year Performance"
+    start_marker = "Historical Performance"
+    fy_marker = "Historical Financial Year Performance"
+    start = markdown.find(start_marker)
+    if start < 0:
+        return [], {}
+    fy_start = markdown.find(fy_marker, start)
+    section = markdown[start : fy_start if fy_start > 0 else len(markdown)]
+
+    records: list[tuple[str, float]] = []
+    ytd_map: dict[str, float] = {}
+
+    for line in section.split("\n"):
+        if "|" not in line:
+            continue
+        # markdown 表格行：| cell | cell | ... | -> 去首尾管道后 split
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # 数据行需 >= 14 cell（年 + 12 月 + YTD）
+        if len(cells) < 14:
+            continue
+        year_str = cells[0].replace("**", "").strip()
+        if not re.fullmatch(r"\d{4}", year_str):
+            continue  # 跳过表头/分隔行
+        year = int(year_str)
+        # cells[1..12] = Jan..Dec
+        for m_idx in range(12):
+            val = cells[1 + m_idx].strip().replace("**", "")
+            if val in ("", "N/R", "N/A", "-"):
+                continue
+            # 仅接受 [+-]?\d+\.\d+ 格式，其他跳过（不猜测）
+            if not re.fullmatch(r"[+-]?\d+\.\d+", val):
+                continue
+            month = m_idx + 1
+            date = get_last_day_of_month(year, month).strftime("%Y-%m-%d")
+            records.append((date, _pct_to_decimal(val)))
+        # cells[13] = YTD
+        ytd_val = cells[13].strip().replace("**", "")
+        if re.fullmatch(r"[+-]?\d+\.\d+", ytd_val):
+            ytd_map[year_str] = _pct_to_decimal(ytd_val)
+
+    records.sort(key=lambda x: x[0])
+    return records, ytd_map
+
+
+def gate_check_table(
+    records: list[tuple[str, float]],
+    ytd_map: dict[str, float],
+) -> tuple[bool, list[str]]:
+    """HTML 表格源的入库前硬 gate（gate_check 的表格版变体）。
+
+    组合校验：
+    1. check_gaps（缺口零容忍；N/R 仅出现在首尾外，不影响首尾间连续性）
+    2. ANTI-FABRICATION（连续 >= 3 个相同非零浮点数，参考教训 213bdd）
+    3. 字段类型校验（|net_return| < 0.5 即 50%）
+    4. YTD 复利验证（替代 rolling 交叉验证）：对每年 >= 3 月 reported 的，
+       compound 月度复利 vs ytd_map[year]，绝对误差 < 0.5%
+
+    与 gate_check 的差异：表格源无 per-month rolling，但有独立 YTD 列可交叉
+    验证。ytd_map 为空时跳过 YTD 验证（不因此 fail）。
+
+    Returns:
+        (pass, errors)。pass=False 时 errors 列出具体问题，调用方必须停止入库。
+    """
+    errors: list[str] = []
+    if not records:
+        return (False, ["无数据"])
+
+    # 1. 缺口检查（缺口零容忍）
+    dates = [d for d, _ in records]
+    gaps = check_gaps(dates)
+    if gaps:
+        errors.append(f"缺口: {gaps}")
+
+    # 2. ANTI-FABRICATION：连续 >= 3 个相同非零值
+    returns = [r for _, r in records]
+    for i in range(len(returns) - 2):
+        if returns[i] != 0.0 and returns[i] == returns[i + 1] == returns[i + 2]:
+            errors.append(
+                f"ANTI-FABRICATION: 连续3月相同值 {returns[i]} 起于第 {i} 月"
+            )
+            break
+
+    # 3. 字段类型校验：|r| < 0.5（月度收益 50% 上限）
+    for d, r in records:
+        if abs(r) >= 0.5:
+            errors.append(f"字段异常: {d} 收益 {r} 超出月度合理范围 |r|<0.5")
+
+    # 4. YTD 复利验证：按年分组，compound 该年所有 reported 月 vs YTD
+    if ytd_map:
+        by_year: dict[str, list[float]] = {}
+        for d, r in records:
+            by_year.setdefault(d[:4], []).append(r)
+        for year, ytd_expected in ytd_map.items():
+            month_rets = by_year.get(year, [])
+            if len(month_rets) < 3:
+                continue  # 太少不验证
+            actual = 1.0
+            for r in month_rets:
+                actual *= (1.0 + r)
+            actual = actual - 1.0
+            error = abs(actual - ytd_expected)
+            if error >= 0.005:  # 0.5%
+                errors.append(
+                    f"YTD 复利验证失败（{year}）: 月度复利 {actual:.4f} "
+                    f"vs YTD {ytd_expected:.4f}，误差 {error:.4f}"
+                )
+
+    return (len(errors) == 0, errors)

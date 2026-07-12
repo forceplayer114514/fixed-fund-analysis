@@ -27,6 +27,14 @@ description: "添加澳洲固定收益基金：探测事实单 URL、MCP 抓取�
 - 生成 fund_id：基金英文名小写下划线（如 `Stake Accumulate Fund` → `stake_accumulate`）
 - 记录 confirmed_url、fetch_method（`html` 或 `pdf`）、url_type、verified_at（今日 YYYY-MM-DD）
 
+**数据源探测决策树**（避免走死路，2026-07 经验固化）：
+1. **先查官方月度 PDF 归档**（Stake 模式：归档页含逐月 PDF 链接）-> 走 `add`（PDF 流水线）
+2. **官方仅有单一实时报告/无 PDF 归档**（如 Coolabah/Smarter Money 系列）-> 直接查聚合站逐月表：
+   - fundmonitors **Full Fund Profile AJAX**：`fund-profile.php?FundID=XXX&AccCode=YYY&IsAjax=1`（**非** `fund-factsheet.php` 摘要页，摘要页无逐月表）。FundID 搜 `site:fundmonitors.com <基金名>` 获取。含 "Historical Performance" Year×Month 逐月表 + YTD 列。-> 走 `add-table`（HTML 表格流水线）
+   - 详见 memory `fundmonitors-full-profile-monthly-table`
+3. **仍无逐月历史** -> Wayback Machine 快照（最后手段，通常稀疏不可用）
+- **份额类口径**：聚合站常跟踪特定份额类（如 Direct Investor），与官方机构类有费用差，须注明 apir_code 口径，全程一致不混用。
+
 ### 2. 检查是否已注册
 用 Bash 查 `funds` 表：
 ```bash
@@ -42,9 +50,11 @@ print(get_fund(conn, '<fund_id>'))
 - **JS 渲染归档页**（如 hellostake.com）：用 MCP `stealthy_fetch(url, network_idle=true, wait=3000)`。**禁止用 `fetch`**（只返回 footer，不等 JS 渲染）。
 - 存 markdown 到 `/tmp/<fund_id>_archive.md`
 - **PDF 基金**（Bentham/Metrics）：MCP 抓基金页面找 PDF 归档链接，同样存归档页 markdown
-- 子 agent 抓取返回后，主对话核对归档页是否含 PDF 链接（数值/格式异常则重新委派）
+- **HTML 表格基金**（Coolabah/Smarter Money 等无 PDF 归档）：`stealthy_fetch` 抓 fundmonitors Full Fund Profile AJAX 页，存 markdown 到 `/tmp/<fund_id>_profile.md`
+- 子 agent 抓取返回后，主对话核对：PDF 源核对归档页含 PDF 链接；HTML 表格源核对含 "Historical Performance" 逐月表（数值/格式异常则重新委派）
 
 ### 4. 全自动入库
+**PDF 归档源**（Stake 模式）：
 ```bash
 cd skills && python3 -m lib.ingest add \
   --fund-id <id> --name "<name>" \
@@ -53,6 +63,16 @@ cd skills && python3 -m lib.ingest add \
   [--apir <apir>] [--max-workers <int>]
 ```
 `ingest.py` 自动完成：解析归档页 PDF 链接 -> 并发下载+提取（Commentary 当月收益 + performance 表滚动收益）-> `gate_check` 硬 gate（复利交叉验证 + 缺口 + ANTI-FABRICATION + 字段类型）-> 入库。
+
+**HTML 表格源**（fundmonitors 等聚合站逐月表）：
+```bash
+cd skills && python3 -m lib.ingest add-table \
+  --fund-id <id> --name "<name>" \
+  --table-html /tmp/<fund_id>_profile.md \
+  --confirmed-url <url> --verified-at <YYYY-MM-DD> \
+  [--apir <apir>]
+```
+`add_fund_from_html_table` 自动完成：`parse_html_monthly_table`（Year×Month 逐月表，N/R 跳过，负号捕获，排除 FY 表）-> `gate_check_table` 硬 gate（**YTD 复利交叉验证** + 缺口 + ANTI-FABRICATION + 字段类型）-> 入库。
 - `gate_pass=True`：入库成功，打印 months/start/end（NAV 由 `upsert_monthly_return` 自动重算）
 - `gate_pass=False`：报错列出 errors，**不入库**，退出码 1
 - `short_history_warning=True`（月数<36）：提示数据不足，webapp 将标记不参与 Sortino/去平滑

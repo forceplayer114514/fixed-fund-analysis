@@ -25,7 +25,9 @@ from lib.extract import (
     download_and_extract_parallel,
     extract_pdf_links_from_archive,
     gate_check,
+    gate_check_table,
     get_last_day_of_month,
+    parse_html_monthly_table,
 )
 
 
@@ -134,6 +136,80 @@ def add_fund(
     }
 
 
+def add_fund_from_html_table(
+    fund_id: str,
+    name: str,
+    table_html_path: str,
+    *,
+    confirmed_url: str,
+    apir: Optional[str] = None,
+    url_type: str = "fact_sheet_profile",
+    fetch_method: str = "html",
+    verified_at: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> dict:
+    """HTML 表格源全自动流水线（fundmonitors 等聚合站逐月收益表）。
+
+    读 markdown -> parse_html_monthly_table -> gate_check_table -> 入库。
+    用于官方无 PDF 归档、聚合站提供 Year×Month 逐月表的基金。NAV 由
+    upsert_monthly_return 自动重算。序列起点=第一份有数据月，不反推捏造。
+
+    Returns:
+        {'months','start','end','gaps','gate_pass','errors',
+         'failed_months','short_history_warning'}
+    gate_pass=False 时未入库，errors 列出问题。
+    """
+    # 1. 读 HTML/markdown
+    with open(table_html_path, "r", encoding="utf-8") as f:
+        markdown = f.read()
+
+    # 2. 解析逐月表
+    records, ytd_map = parse_html_monthly_table(markdown)
+    if not records:
+        return {"months": 0, "start": None, "end": None, "gaps": [],
+                "gate_pass": False, "errors": ["表格无有效月度数据"],
+                "failed_months": [], "short_history_warning": True}
+
+    # 3. gate_check_table（硬 gate）
+    pass_ok, errors = gate_check_table(records, ytd_map)
+    records_sorted = sorted(records, key=lambda x: x[0])
+    if not pass_ok:
+        return {"months": len(records_sorted),
+                "start": records_sorted[0][0] if records_sorted else None,
+                "end": records_sorted[-1][0] if records_sorted else None,
+                "gaps": [], "gate_pass": False, "errors": errors,
+                "failed_months": [], "short_history_warning": len(records_sorted) < 36}
+
+    # 4. 入库（gate 通过后才碰 DB）
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        create_fund(
+            conn, fund_id=fund_id, fund_name=name,
+            confirmed_url=confirmed_url, fetch_method=fetch_method,
+            url_type=url_type, apir_code=apir, verified_at=verified_at,
+        )
+        for date, net_return in records_sorted:
+            upsert_monthly_return(
+                conn, fund_id=fund_id, date=date,
+                net_return=net_return, commentary_truth=net_return,
+            )
+    finally:
+        conn.close()
+
+    # 5. 报告
+    return {
+        "months": len(records_sorted),
+        "start": records_sorted[0][0],
+        "end": records_sorted[-1][0],
+        "gaps": [],
+        "gate_pass": True,
+        "errors": [],
+        "failed_months": [],
+        "short_history_warning": len(records_sorted) < 36,
+    }
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description="skills 全自动入库流水线")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -145,6 +221,13 @@ def _cli() -> int:
     add_p.add_argument("--apir", default=None)
     add_p.add_argument("--verified-at", default=None)
     add_p.add_argument("--max-workers", type=int, default=None)
+    tbl_p = sub.add_parser("add-table", help="新增基金入库（HTML 表格源，如 fundmonitors）")
+    tbl_p.add_argument("--fund-id", required=True)
+    tbl_p.add_argument("--name", required=True)
+    tbl_p.add_argument("--table-html", required=True, help="含逐月收益表的 markdown 路径")
+    tbl_p.add_argument("--confirmed-url", required=True, help="数据源 URL")
+    tbl_p.add_argument("--apir", default=None)
+    tbl_p.add_argument("--verified-at", default=None)
     args = parser.parse_args()
 
     if args.command == "add":
@@ -152,6 +235,14 @@ def _cli() -> int:
             args.fund_id, args.name, args.archive_html,
             confirmed_url=args.confirmed_url, apir=args.apir,
             verified_at=args.verified_at, max_workers=args.max_workers,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0 if result["gate_pass"] else 1
+    if args.command == "add-table":
+        result = add_fund_from_html_table(
+            args.fund_id, args.name, args.table_html,
+            confirmed_url=args.confirmed_url, apir=args.apir,
+            verified_at=args.verified_at,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["gate_pass"] else 1
