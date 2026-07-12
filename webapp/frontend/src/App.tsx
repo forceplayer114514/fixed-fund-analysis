@@ -1,4 +1,20 @@
-function App() {
-  return <div className="p-4 text-lg">固定收益基金分析</div>
+import { Routes, Route } from 'react-router-dom'
+import ErrorBoundary from './components/ErrorBoundary'
+import Layout from './components/Layout'
+import Dashboard from './pages/Dashboard'
+import Anomalies from './pages/Anomalies'
+import FundManagement from './pages/FundManagement'
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/anomalies" element={<Anomalies />} />
+          <Route path="/funds" element={<FundManagement />} />
+        </Route>
+      </Routes>
+    </ErrorBoundary>
+  )
 }
-export default App
