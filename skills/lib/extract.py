@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+from decimal import Decimal
 from typing import Optional
 
 import requests
@@ -223,3 +224,163 @@ def parse_pdf_text(pdf_path: str, max_pages: Optional[int] = None) -> str:
         for i in range(pages_to_read):
             text += doc[i].get_text()
     return text
+
+
+# ---------------------------------------------------------------------------
+# PDF 提取：Commentary 当月收益 + performance 表滚动收益
+# 数据完整性：Commentary 正文优先（复利验证已证明 performance 表 1mo 口径
+# 错误）；负号强制捕获；按列标题对应值不靠位置；不捏造不插值。
+# ---------------------------------------------------------------------------
+
+
+def _pct_to_decimal(num_str: str) -> float:
+    """把百分比数值串（无 % 号，如 '5.89'/'-0.26'）除以 100 转为小数 float。
+
+    用 Decimal 精确十进制除法（移位）再转 float，避免 float()/100.0 的二进制
+    浮点表示误差（如 5.89/100.0 = 0.058899999... != 字面量 0.0589）。这是对
+    原始提取值的最忠实十进制映射，非"合理性纠正"：输入 "5.89%" 在十进制下必然
+    对应 0.0589，Decimal 移位无损还原，而 float/100.0 引入额外二进制舍入。
+    """
+    return float(Decimal(num_str) / Decimal(100))
+
+
+def extract_commentary_return(text: str) -> Optional[float]:
+    """从 PDF 文本提取 Commentary 当月收益（after fees，返回小数）。
+
+    正则 r'returned\\s+([+-]?\\d+\\.\\d+)%'，捕获符号。正数省略正号正常
+    （"0.53%"），负号必须捕获（"-0.26%"）。取第一个匹配（当月声明，非后续
+    滚动收益数字）。无匹配返回 None（绝不猜测）。
+
+    Commentary 正文优先于 performance 表 1mo：复利交叉验证已证明 performance
+    表 1mo 口径错误（列错位/合并），Commentary 正文值才是当月真实收益。
+    """
+    if not text:
+        return None
+    m = re.search(r"returned\s+([+-]?\d+\.\d+)%", text)
+    if not m:
+        return None
+    return _pct_to_decimal(m.group(1))
+
+
+# performance 表列标题 -> 结果 key 映射（按 Stake 月报固定顺序）
+_PERF_COL_KEYS = [
+    ("1 month", "1mo"),
+    ("3 months", "3mo"),
+    ("6 months", "6mo"),
+    ("12 months", "12mo"),
+    ("since inception", "inception"),
+]
+
+
+def extract_perf_rolling(text: str) -> dict:
+    """提取 performance 表 Class A 滚动收益。
+
+    按列标题对应值（不靠位置，解决"5 列 4 值"错位根因）；显式处理 '-' 空列
+    -> None。返回 {'1mo':..,'3mo':..,'6mo':..,'12mo':..,'inception':..,
+    'parse_error':bool}。
+
+    parse_error=True 表示表结构异常（如 Nov 2025 的 12mo=inception 合并致
+    值数!=列数），此时仍按顺序部分填充已知值。parse_error 不致命：Commentary
+    正文才是当月收益来源，performance 表仅用于复利交叉验证。
+    """
+    result = {
+        "1mo": None, "3mo": None, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    if not text:
+        result["parse_error"] = True
+        return result
+
+    # 按行处理，每行压缩空白（保留行结构以分离列标题行与数据行）
+    lines = [clean_spacing(ln).strip() for ln in text.split("\n")]
+
+    # 找列标题行（同时含 "1 month" 与 "since inception"）
+    header_idx = -1
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if "1 month" in low and "since inception" in low:
+            header_idx = i
+            break
+    if header_idx < 0:
+        result["parse_error"] = True
+        return result
+
+    # 解析列标题在行中的出现顺序
+    header_low = lines[header_idx].lower()
+    col_specs = []
+    for label, key in _PERF_COL_KEYS:
+        pos = header_low.find(label)
+        if pos >= 0:
+            col_specs.append((pos, key))
+    col_specs.sort()
+    keys_in_order = [s[1] for s in col_specs]
+    if not keys_in_order:
+        result["parse_error"] = True
+        return result
+
+    # 找 Class A 数据行（标题行及之后首个含 "class a" 的行：PDF 文本提取
+    # 常把表头与数据行合并到同一行，故从 header_idx 起搜索）
+    data_line = None
+    for ln in lines[header_idx:]:
+        if re.search(r"class\s*a", ln, re.IGNORECASE):
+            data_line = ln
+            break
+    if not data_line:
+        result["parse_error"] = True
+        return result
+
+    # 从 "Class A" 标记之后提取值 token：[+-]?\d+\.\d+% 或 "-"。只取标记
+    # 之后的部分，避免误捕获行首 Commentary 的 "returned X%" 或表头百分比。
+    ca_match = re.search(r"class\s*a", data_line, re.IGNORECASE)
+    data_after = data_line[ca_match.end():] if ca_match else data_line
+    tokens = re.findall(r"[+-]?\d+\.\d+%|-", data_after)
+
+    if len(tokens) != len(keys_in_order):
+        result["parse_error"] = True
+
+    # 按顺序对应（多余 token 忽略，不足留 None）
+    for i, key in enumerate(keys_in_order):
+        if i < len(tokens):
+            tok = tokens[i]
+            result[key] = None if tok == "-" else _pct_to_decimal(tok.rstrip("%"))
+    return result
+
+
+def extract_pdf_one(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[float], dict]:
+    """单 PDF 提取纯函数（顶层，可被 ThreadPool/ProcessPool 调用）。
+
+    parse_pdf_text -> extract_commentary_return + extract_perf_rolling。
+    返回 (commentary_return, rolling)。失败返回 (None, {'parse_error':True})。
+
+    顶层纯函数设计：未来可一行切 ProcessPoolExecutor 应对大批量（100+ PDF）。
+    """
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_commentary_return(text), extract_perf_rolling(text))
+
+
+def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
+    """从归档页 markdown 提取 [(YYYY-MM, pdf_url), ...]。
+
+    匹配所有 .pdf URL，用 extract_month_prefix 从 URL 识别月份。去重保持顺序。
+    无法识别月份的 URL 跳过（不猜测）。
+    """
+    if not markdown:
+        return []
+    urls = re.findall(r"https?://[^\s\)]+\.pdf", markdown, re.IGNORECASE)
+    results: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for url in urls:
+        ym = extract_month_prefix(url)
+        if ym is None:
+            continue
+        key = (ym, url)
+        if key not in seen:
+            seen.add(key)
+            results.append(key)
+    return results

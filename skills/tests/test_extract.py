@@ -183,3 +183,171 @@ def test_parse_pdf_text_max_pages(tmp_path):
     assert "PAGE_0_MARKER" in all_pages
     assert "PAGE_1_MARKER" in all_pages
     assert "PAGE_2_MARKER" in all_pages
+
+
+from lib.extract import (
+    extract_commentary_return,
+    extract_perf_rolling,
+    extract_pdf_one,
+    extract_pdf_links_from_archive,
+)
+
+
+# --- 11. extract_commentary_return ---
+def test_extract_commentary_return_positive():
+    """正数（省略正号）。"""
+    text = "The Fund returned 0.53% in April 2025."
+    assert extract_commentary_return(text) == 0.0053
+
+
+def test_extract_commentary_return_negative():
+    """负数（捕获符号）。"""
+    text = "The Fund returned -0.26% in March 2026."
+    assert extract_commentary_return(text) == -0.0026
+
+
+def test_extract_commentary_return_with_plus():
+    """显式正号。"""
+    text = "returned +1.05% for the month"
+    assert extract_commentary_return(text) == 0.0105
+
+
+def test_extract_commentary_return_no_match():
+    """无匹配返回 None。"""
+    assert extract_commentary_return("No percentage here.") is None
+
+
+def test_extract_commentary_return_first_match():
+    """取第一个 returned 匹配（当月声明，非后续滚动收益）。"""
+    text = "returned 0.53% in April. Over 3 months returned 1.50%."
+    assert extract_commentary_return(text) == 0.0053
+
+
+# --- 12. extract_perf_rolling ---
+def test_extract_perf_rolling_normal():
+    """正常 5 列 5 值。"""
+    text = (
+        "Performance (after fees) 1 month 3 months 6 months "
+        "12 months Since inception\n"
+        "Class A 0.53% 1.50% 3.00% 5.89% 6.91%"
+    )
+    r = extract_perf_rolling(text)
+    assert r["1mo"] == 0.0053
+    assert r["3mo"] == 0.0150
+    assert r["6mo"] == 0.0300
+    assert r["12mo"] == 0.0589
+    assert r["inception"] == 0.0691
+    assert r["parse_error"] is False
+
+
+def test_extract_perf_rolling_with_dash():
+    """含 '-' 空列（基金未满 12 个月）。"""
+    text = (
+        "Performance 1 month 3 months 6 months 12 months Since inception\n"
+        "Class A 0.53% 1.50% - - 2.00%"
+    )
+    r = extract_perf_rolling(text)
+    assert r["1mo"] == 0.0053
+    assert r["3mo"] == 0.0150
+    assert r["6mo"] is None
+    assert r["12mo"] is None
+    assert r["inception"] == 0.0200
+    assert r["parse_error"] is False
+
+
+def test_extract_perf_rolling_misaligned():
+    """Nov 2025 特例：4 值 5 列（12mo=inception 合并）-> parse_error 但部分填充。"""
+    text = (
+        "Performance 1 month 3 months 6 months 12 months Since inception\n"
+        "Class A 0.42% 1.20% 2.50% 5.89%"
+    )
+    r = extract_perf_rolling(text)
+    assert r["parse_error"] is True
+    assert r["1mo"] == 0.0042
+    assert r["12mo"] == 0.0589
+    assert r["inception"] is None
+
+
+def test_extract_perf_rolling_no_table():
+    """无 performance 表 -> parse_error。"""
+    r = extract_perf_rolling("No table here.")
+    assert r["parse_error"] is True
+
+
+def test_extract_perf_rolling_negative_value():
+    """滚动收益含负值。"""
+    text = (
+        "Performance 1 month 3 months 6 months 12 months Since inception\n"
+        "Class A -0.26% -0.50% 1.00% 2.00% 3.00%"
+    )
+    r = extract_perf_rolling(text)
+    assert r["1mo"] == -0.0026
+    assert r["3mo"] == -0.0050
+    assert r["parse_error"] is False
+
+
+# --- 13. extract_pdf_one（mock parse_pdf_text）---
+def test_extract_pdf_one(monkeypatch):
+    """组合：parse_pdf_text -> commentary + rolling。"""
+    fake_text = (
+        "The Fund returned 0.53% in April. "
+        "Performance 1 month 3 months 6 months 12 months Since inception "
+        "Class A 0.53% 1.50% 3.00% 5.89% 6.91%"
+    )
+    monkeypatch.setattr(
+        "lib.extract.parse_pdf_text", lambda p, max_pages=None: fake_text
+    )
+    commentary, rolling = extract_pdf_one("/fake/path.pdf")
+    assert commentary == 0.0053
+    assert rolling["12mo"] == 0.0589
+    assert rolling["parse_error"] is False
+
+
+def test_extract_pdf_one_no_commentary(monkeypatch):
+    """Commentary 缺失返回 None，rolling 仍解析。"""
+    fake_text = (
+        "Performance 1 month 3 months 6 months 12 months Since inception "
+        "Class A 0.53% 1.50% 3.00% 5.89% 6.91%"
+    )
+    monkeypatch.setattr(
+        "lib.extract.parse_pdf_text", lambda p, max_pages=None: fake_text
+    )
+    commentary, rolling = extract_pdf_one("/fake/path.pdf")
+    assert commentary is None
+    assert rolling["1mo"] == 0.0053
+
+
+# --- 14. extract_pdf_links_from_archive ---
+def test_extract_pdf_links_from_archive_markdown_links():
+    """markdown 链接 [text](url.pdf)。"""
+    md = (
+        "# Monthly Performance Reports\n"
+        "- April 2025: [Report](https://example.com/apr-2025.pdf)\n"
+        "- March 2025: [Report](https://example.com/mar-2025.pdf)\n"
+    )
+    links = extract_pdf_links_from_archive(md)
+    assert ("2025-04", "https://example.com/apr-2025.pdf") in links
+    assert ("2025-03", "https://example.com/mar-2025.pdf") in links
+    assert len(links) == 2
+
+
+def test_extract_pdf_links_from_archive_bare_url():
+    """裸 url.pdf。"""
+    md = "May 2025 Report: https://example.com/may-2025.pdf"
+    links = extract_pdf_links_from_archive(md)
+    assert ("2025-05", "https://example.com/may-2025.pdf") in links
+
+
+def test_extract_pdf_links_from_archive_empty():
+    """空输入返回空列表。"""
+    assert extract_pdf_links_from_archive("") == []
+
+
+def test_extract_pdf_links_from_archive_dedup():
+    """重复链接去重。"""
+    md = (
+        "April 2025: https://example.com/apr-2025.pdf\n"
+        "April 2025 again: https://example.com/apr-2025.pdf"
+    )
+    links = extract_pdf_links_from_archive(md)
+    assert len(links) == 1
