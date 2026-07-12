@@ -14,3 +14,4 @@ data/*.db
 .pytest_cache/
 node_modules/
 webapp/frontend/node_modules/
+dist/
