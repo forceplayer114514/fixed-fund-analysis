@@ -25,6 +25,12 @@ function fmt(v: number | null, suffix = '', decimals = 2) {
 export default function CompareTable() {
   const compareData = useStore(s => s.compareData)
   const smoothingMode = useStore(s => s.smoothingMode)
+  const funds = useStore(s => s.funds)
+  const fundNameMap = useMemo(() => {
+    const m = new Map<string, string>()
+    funds.forEach(f => m.set(f.fund_id, f.fund_name))
+    return m
+  }, [funds])
 
   const rows = useMemo(() => {
     if (!compareData) return []
@@ -35,12 +41,13 @@ export default function CompareTable() {
     )
     const rankDD = rankBy(
       items,
-      m => (smoothingMode === 'original' ? m.orig_max_drawdown : m.un_max_drawdown),
-      true
+      m => (smoothingMode === 'original' ? m.orig_max_drawdown : m.un_max_drawdown)
     )
-    const rankOmega = rankBy(items, m =>
-      smoothingMode === 'original' ? m.orig_omega_ratio : m.un_omega_ratio
-    )
+    const rankOmega = rankBy(items, m => {
+      const v = smoothingMode === 'original' ? m.orig_omega_ratio : m.un_omega_ratio
+      // Omega 为 null（原 inf，无跑输月=最优）应排首位，而非末名
+      return v == null ? Infinity : v
+    })
     const rankWin = rankBy(items, m =>
       smoothingMode === 'original' ? m.orig_excess_win_rate : m.un_excess_win_rate
     )
@@ -69,7 +76,7 @@ export default function CompareTable() {
         fund_id: m.fund_id,
         excess: `${fmt(excess, '%')} (${rankExcess.get(m.fund_id)})`,
         dd: `${fmt(dd, '%')} (${rankDD.get(m.fund_id)})`,
-        omega: `${omega?.toFixed(2) ?? '—'} (${rankOmega.get(m.fund_id)})`,
+        omega: `${omega == null ? '极佳' : omega.toFixed(2)} (${rankOmega.get(m.fund_id)})`,
         winRate: `${fmt(winRate, '%')} (${rankWin.get(m.fund_id)})`,
         run: `${run} 个月`,
         vol: fmt(vol, '%'),
@@ -98,7 +105,7 @@ export default function CompareTable() {
           <tbody>
             {rows.map(r => (
               <tr key={r.fund_id} className="border-b border-gray-50 hover:bg-gray-50">
-                <td className="py-2.5 px-3 font-medium">{r.fund_id}</td>
+                <td className="py-2.5 px-3 font-medium max-w-xs truncate" title={fundNameMap.get(r.fund_id) ?? r.fund_id}>{fundNameMap.get(r.fund_id) ?? r.fund_id}</td>
                 <td className="py-2.5 px-3">{r.excess}</td>
                 <td className="py-2.5 px-3">{r.dd}</td>
                 <td className="py-2.5 px-3">{r.omega}</td>

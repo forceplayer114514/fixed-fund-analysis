@@ -35,17 +35,18 @@ def _find_month_gaps(dates: list[str]) -> list[str]:
 def compute_and_store_metrics(
     session: Session,
     fund_id: str,
-    fallback_rba_rate: Optional[float] = None,
 ) -> dict:
     """计算并持久化某基金的5维指标与异常。
 
     Args:
         session: 数据库会话。
         fund_id: 基金ID。
-        fallback_rba_rate: 数据库中缺失 RBA 利率时的回退值（通常为当前抓取的利率）。
 
     Returns:
         计算出的指标 dict（已写入 fund_metrics 表）。
+
+    Raises:
+        ValueError: 月度数据有缺口，或 RBA 利率缺失月份（零容忍）。
     """
     time_series = get_returns(session, fund_id)
     if not time_series:
@@ -62,10 +63,7 @@ def compute_and_store_metrics(
             f"拒绝计算（数据缺口零容忍）。"
         )
 
-    if fallback_rba_rate is None:
-        fallback_rba_rate = 0.0435  # 安全回退，正常流程应传入抓取值
-
-    rf_rates = resolve_rf_rates(session, dates, fallback_rate=fallback_rba_rate)
+    rf_rates = resolve_rf_rates(session, dates)
 
     # 计算5维指标
     metrics = compute_all_metrics(returns, rf_rates, fund_name=fund_id)

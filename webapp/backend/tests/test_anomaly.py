@@ -24,12 +24,15 @@ def test_detect_anomalies_needs_min_12_months():
 
 
 @pytest.mark.unit
-def test_detect_anomalies_zero_returns_ignored():
-    # net_return == 0 的点不参与统计也不报告
+def test_detect_anomalies_zero_return_participates_in_stats():
+    # 0.0 是合法月度收益（固收基金常见），参与统计不被当缺失忽略。
+    # 在 12 个相同值 0.005 中，0.0 偏离群体（MAD=0 回退标准差）被标记，交人工判断。
     ts = [{"date": f"2025-{m:02d}-28", "net_return": 0.005} for m in range(1, 13)]
     ts.append({"date": "2026-01-31", "net_return": 0.0})
     anomalies = detect_anomalies(ts)
-    assert len(anomalies) == 0
+    assert len(anomalies) == 1
+    assert anomalies[0]["date"] == "2026-01-31"
+    assert anomalies[0]["value"] == 0.0
 
 
 @pytest.mark.unit

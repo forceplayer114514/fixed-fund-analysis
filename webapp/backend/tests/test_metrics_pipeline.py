@@ -14,10 +14,11 @@ def test_compute_and_store_metrics_short_history(db_session):
     for i, r in enumerate([0.005, 0.006, 0.004, 0.007, 0.005, 0.006]):
         upsert_monthly_return(db_session, "f1", f"2025-{i+1:02d}-28", r)
 
-    db_session.add(RbaCashRate(date_period="2025-01", rate=0.0435))
+    for i in range(1, 7):
+        db_session.add(RbaCashRate(date_period=f"2025-{i:02d}", rate=0.0435))
     db_session.commit()
 
-    metrics = compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
+    metrics = compute_and_store_metrics(db_session, "f1")
     assert metrics["history_months"] == 6
     assert metrics["is_short_history_warning"] == 1
 
@@ -38,7 +39,12 @@ def test_compute_and_store_metrics_anomalies_persisted(db_session):
         upsert_monthly_return(db_session, "f1", f"2025-{m:02d}-28", 0.005)
     upsert_monthly_return(db_session, "f1", "2026-01-31", 0.5)
 
-    compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
+    for m in range(1, 13):
+        db_session.add(RbaCashRate(date_period=f"2025-{m:02d}", rate=0.0435))
+    db_session.add(RbaCashRate(date_period="2026-01", rate=0.0435))
+    db_session.commit()
+
+    compute_and_store_metrics(db_session, "f1")
 
     anomalies = db_session.query(Anomaly).filter_by(fund_id="f1").all()
     assert len(anomalies) == 1
@@ -47,19 +53,32 @@ def test_compute_and_store_metrics_anomalies_persisted(db_session):
 
 
 @pytest.mark.unit
-def test_compute_and_store_metrics_uses_db_rba_over_fallback(db_session):
-    """数据库中有 RBA 利率时优先使用，而非 fallback。"""
+def test_compute_and_store_metrics_uses_db_rba(db_session):
+    """数据库中的 RBA 利率被正确用于超额收益计算。"""
     create_fund(db_session, fund_id="f1", fund_name="Fund One",
                 confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
     upsert_monthly_return(db_session, "f1", "2026-01-31", 0.01)
     db_session.add(RbaCashRate(date_period="2026-01", rate=0.0435))
     db_session.commit()
 
-    metrics = compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0999)
-    # 应使用 DB 中的 0.0435 而非 fallback 0.0999
+    metrics = compute_and_store_metrics(db_session, "f1")
     excess = 0.01 - 0.0435 / 12.0
     expected_ann = (1.0 + excess) ** 12 - 1
     assert metrics["orig_annualized_excess_return"] == pytest.approx(expected_ann, rel=1e-6)
+
+
+@pytest.mark.unit
+def test_compute_and_store_metrics_rba_missing_raises(db_session):
+    """RBA 利率缺失月份时必须报错（零容忍，CLAUDE.md 第一条）。"""
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    upsert_monthly_return(db_session, "f1", "2026-01-31", 0.01)
+    # 不写入 RBA 利率
+    db_session.commit()
+
+    with pytest.raises(ValueError) as excinfo:
+        compute_and_store_metrics(db_session, "f1")
+    assert "2026-01" in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -68,9 +87,11 @@ def test_compute_and_store_metrics_idempotent(db_session):
     create_fund(db_session, fund_id="f1", fund_name="Fund One",
                 confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
     upsert_monthly_return(db_session, "f1", "2026-01-31", 0.01)
+    db_session.add(RbaCashRate(date_period="2026-01", rate=0.0435))
+    db_session.commit()
 
-    compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
-    compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
+    compute_and_store_metrics(db_session, "f1")
+    compute_and_store_metrics(db_session, "f1")
 
     assert db_session.query(FundMetric).filter_by(fund_id="f1").count() == 1
 
@@ -100,7 +121,7 @@ def test_compute_and_store_metrics_gap_detection(db_session):
     upsert_monthly_return(db_session, "f1", "2025-04-30", 0.03)
 
     with pytest.raises(ValueError) as excinfo:
-        compute_and_store_metrics(db_session, "f1", fallback_rba_rate=0.0435)
+        compute_and_store_metrics(db_session, "f1")
     msg = str(excinfo.value)
     assert "f1" in msg
     assert "2025-03" in msg

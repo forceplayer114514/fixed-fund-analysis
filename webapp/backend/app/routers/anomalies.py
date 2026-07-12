@@ -15,16 +15,25 @@ router = APIRouter(prefix="/api", tags=["anomalies"])
 
 @router.get("/anomalies", response_model=list[AnomalyResponse])
 def list_anomalies(session: Session = Depends(get_db)):
-    """汇总所有基金的异常检测结果，附基金名供前端审计展示。"""
+    """汇总所有基金的异常检测结果，附基金名 + monthly_return_id 供前端审计展示。
+
+    monthly_return_id 按 (fund_id, date) 关联查 MonthlyReturn 主键，供人工纠错
+    PATCH /api/monthly-returns/{row_id} 定位。不能用 anomalies.id（独立自增，
+    会改写无关基金数据）。
+    """
     rows = session.query(Anomaly).order_by(Anomaly.fund_id, Anomaly.date).all()
     out = []
     for a in rows:
         fund = session.get(Fund, a.fund_id)
+        # 按 (fund_id, date) 精确定位对应的 monthly_returns 行主键
+        mr = (session.query(MonthlyReturn)
+              .filter_by(fund_id=a.fund_id, date=a.date).first())
         out.append(AnomalyResponse(
             id=a.id, fund_id=a.fund_id, date=a.date, value=a.value,
             z_score=a.z_score, threshold_sigma=a.threshold_sigma,
             mean=a.mean, stdev=a.stdev,
             fund_name=fund.fund_name if fund else None,
+            monthly_return_id=mr.id if mr else None,
         ))
     return out
 

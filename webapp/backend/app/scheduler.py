@@ -1,6 +1,7 @@
 """RBA 定时调度：APScheduler 每日抓取 RBA 利率并入库。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -9,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.config import settings
 from app.rba import fetch_current_rba_rate, fetch_historical_rba_rates, upsert_rba_rates
 from app.database import SessionLocal
+from app.models import RbaCashRate
 
 
 def run_rba_update(session_factory=None) -> dict:
@@ -25,6 +27,14 @@ def run_rba_update(session_factory=None) -> dict:
     session = factory()
     try:
         count = upsert_rba_rates(session, historical)
+        # 当前利率以当月 key 落库（RBA 首页比 DBnomics 及时，降息/加息当日即更新）
+        current_month = datetime.now().strftime("%Y-%m")
+        existing = session.get(RbaCashRate, current_month)
+        if existing:
+            existing.rate = current
+        else:
+            session.add(RbaCashRate(date_period=current_month, rate=current))
+        session.commit()
         return {"current_rate": current, "upserted": count}
     finally:
         # 默认工厂创建的 session 需关闭；测试注入的 session 由测试管理

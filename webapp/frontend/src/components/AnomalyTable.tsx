@@ -7,6 +7,7 @@ export default function AnomalyTable() {
   const [filterFund, setFilterFund] = useState<string>('')
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editValue, setEditValue] = useState('')
+  const [editError, setEditError] = useState('')
 
   const fundOptions = useMemo(() => {
     const map = new Map<string, number>()
@@ -22,13 +23,22 @@ export default function AnomalyTable() {
     return anomalies.filter(a => (a.fund_name ?? a.fund_id) === filterFund)
   }, [anomalies, filterFund])
 
-  const handleEdit = async (id: number) => {
-    const val = parseFloat(editValue)
-    if (isNaN(val)) return
+  const handleEdit = async (mrId: number) => {
+    const pct = parseFloat(editValue)
+    if (isNaN(pct)) {
+      setEditError('请输入有效数字')
+      return
+    }
+    const val = pct / 100 // 百分比 -> 小数
+    if (Math.abs(val) >= 1) {
+      setEditError('收益率绝对值应小于 100%')
+      return
+    }
     try {
-      await patchMonthlyReturn(id, val)
+      await patchMonthlyReturn(mrId, val)
       setEditingId(null)
       setEditValue('')
+      setEditError('')
     } catch {
       // error handled by store
     }
@@ -67,7 +77,7 @@ export default function AnomalyTable() {
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">收益率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">Z-Score</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">阈值</th>
-              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">均值</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">中位数</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">标准差</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">操作</th>
             </tr>
@@ -80,7 +90,7 @@ export default function AnomalyTable() {
                 <td className="py-2.5 px-3">{(a.value * 100).toFixed(2)}%</td>
                 <td
                   className={`py-2.5 px-3 font-medium ${
-                    a.z_score >= 3 ? 'text-red-600' : a.z_score >= 2.5 ? 'text-orange-500' : ''
+                    Math.abs(a.z_score) >= 3 ? 'text-red-600' : Math.abs(a.z_score) >= 2.5 ? 'text-orange-500' : ''
                   }`}
                 >
                   {a.z_score.toFixed(2)}
@@ -89,32 +99,40 @@ export default function AnomalyTable() {
                 <td className="py-2.5 px-3">{(a.mean * 100).toFixed(2)}%</td>
                 <td className="py-2.5 px-3">{(a.stdev * 100).toFixed(2)}%</td>
                 <td className="py-2.5 px-3">
-                  {editingId === a.id ? (
-                    <span className="flex gap-1">
+                  {editingId === a.monthly_return_id ? (
+                    <span className="flex gap-1 items-center">
                       <input
                         className="w-20 text-xs border border-gray-200 rounded px-1.5 py-0.5"
                         type="number"
-                        step="0.0001"
+                        step="0.01"
                         value={editValue}
                         onChange={e => setEditValue(e.target.value)}
-                        placeholder="新值"
+                        placeholder="5.00"
                       />
+                      <span className="text-xs text-gray-400">%</span>
                       <button
                         className="text-xs text-white bg-blue-500 rounded px-2 py-0.5"
-                        onClick={() => handleEdit(a.id)}
+                        onClick={() => a.monthly_return_id != null && handleEdit(a.monthly_return_id)}
                       >
                         确认
                       </button>
-                      <button className="text-xs text-gray-500" onClick={() => setEditingId(null)}>
+                      <button
+                        className="text-xs text-gray-500"
+                        onClick={() => { setEditingId(null); setEditError('') }}
+                      >
                         取消
                       </button>
+                      {editError && <span className="text-xs text-red-500">{editError}</span>}
                     </span>
                   ) : (
                     <button
-                      className="text-xs text-gray-500 border border-gray-200 rounded px-2 py-0.5 hover:bg-gray-50"
+                      className="text-xs text-gray-500 border border-gray-200 rounded px-2 py-0.5 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={a.monthly_return_id == null}
                       onClick={() => {
-                        setEditingId(a.id)
-                        setEditValue('')
+                        if (a.monthly_return_id == null) return
+                        setEditingId(a.monthly_return_id)
+                        setEditValue((a.value * 100).toFixed(4))
+                        setEditError('')
                       }}
                     >
                       纠错

@@ -17,8 +17,9 @@ def detect_anomalies(time_series: list[dict], threshold_sigma: float = 3.0) -> l
     Returns:
         异常点 dict 列表，每个含 date, value, z_score, threshold_sigma, mean, stdev, commentary_truth。
     """
+    # 0.0 是合法月度收益（固收基金常见），不应当缺失忽略。仅排除 None。
     returns = [dp["net_return"] for dp in time_series
-               if "net_return" in dp and dp["net_return"] != 0.0]
+               if dp.get("net_return") is not None]
     if len(returns) < 12:
         return []  # 至少需要一年数据才有统计意义
 
@@ -26,13 +27,19 @@ def detect_anomalies(time_series: list[dict], threshold_sigma: float = 3.0) -> l
     abs_deviations = [abs(x - median) for x in returns]
     mad = statistics.median(abs_deviations)
 
-    # 由 MAD 估计标准差：std = MAD * 1.4826。MAD 为 0 时用极小值避免除零
-    robust_stdev = mad * 1.4826 if mad != 0 else 1e-6
+    # 由 MAD 估计标准差：std = MAD * 1.4826。MAD 为 0（超过半数值相同）时
+    # 回退到样本标准差；标准差也为 0 则数据全同，无离群点。
+    if mad != 0:
+        robust_stdev = mad * 1.4826
+    else:
+        robust_stdev = statistics.pstdev(returns) if len(returns) > 1 else 0.0
+        if robust_stdev == 0:
+            return []  # 全部相同，无离散，不报异常
 
     anomalies = []
     for dp in time_series:
         ret = dp.get("net_return")
-        if ret is None or ret == 0.0:
+        if ret is None:
             continue
         mad_score = (ret - median) / robust_stdev
         if abs(mad_score) >= threshold_sigma:
@@ -41,7 +48,7 @@ def detect_anomalies(time_series: list[dict], threshold_sigma: float = 3.0) -> l
                 "value": ret,
                 "z_score": mad_score,
                 "threshold_sigma": threshold_sigma,
-                "mean": median,  # 稳健均值用中位数
+                "mean": median,  # 稳健中心用中位数（字段名 mean 保留兼容，实为中位数）
                 "stdev": robust_stdev,
                 "commentary_truth": dp.get("commentary_truth", None),
             })

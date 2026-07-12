@@ -46,6 +46,14 @@ export default function FundManagement() {
 
   const handleAdd = async () => {
     setAddError('')
+    if (!addForm.fund_id || !addForm.fund_name || !addForm.confirmed_url || !addForm.url_type) {
+      setAddError('请填写所有必填字段')
+      return
+    }
+    if (addForm.apir_code && !/^[A-Z]{3}\d{4}AU$/.test(addForm.apir_code)) {
+      setAddError('APIR 格式应为 3大写字母+4数字+AU（如 ETL5010AU）')
+      return
+    }
     try {
       await api.createFund({
         fund_id: addForm.fund_id,
@@ -196,7 +204,7 @@ export default function FundManagement() {
                     onChange={e => setAddForm({ ...addForm, fetch_method: e.target.value })}
                   >
                     <option value="pdf">PDF</option>
-                    <option value="html_plotly">HTML</option>
+                    <option value="html">HTML</option>
                   </select>
                 </div>
                 <div className="flex-1">
@@ -210,8 +218,8 @@ export default function FundManagement() {
                 </div>
               </div>
               {addError && <div className="text-xs text-red-500">{addError}</div>}
-              <div className="text-xs text-gray-400">
-                仅注册元信息，数据抓取需在 skills 端运行 /add_fixed_fund
+              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                ⚠ 仅注册基金元信息（名称/APIR/URL），不抓取月度数据。添加后需在 skills/ 目录运行 <code className="bg-amber-100 px-1 rounded">/add_fixed_fund</code> 抓取数据，再回到此处点"重算"。
               </div>
               <button
                 className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e]"

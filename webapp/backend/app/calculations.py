@@ -157,6 +157,14 @@ def _annualized_excess_return_compounded(excess: list[float], n_months: int,
     comp = 1.0
     for r in excess:
         comp *= (1.0 + r)
+    if comp <= 0:
+        # 累计超额因子 <= 0 意味着存在 r_e <= -1 的极端月（单月亏损超 100%），
+        # 开分数次幂会得复数。保留原值参与复利，但拒绝年化并报错交人工复核。
+        raise ValueError(
+            f"[{fund_name}] 累计超额收益因子 comp={comp:.4f} <= 0，"
+            f"存在 r_e <= -1 的极端月度收益（单月亏损超 100%），数据异常，"
+            f"拒绝年化（请人工复核该基金月度数据）"
+        )
     return calculate_annualized_return(comp, n_months, fund_name=fund_name)
 
 
@@ -172,6 +180,12 @@ def compute_all_metrics(returns: list[float], rf_rates: list[float],
     Returns:
         dict，键名与 FundMetric 模型字段一致（不含 fund_id/updated_at）。
     """
+    # 长度守卫：zip 静默截断会导致年化用错误的 n，结果偏差极大且无报错。
+    if len(returns) != len(rf_rates):
+        raise ValueError(
+            f"[{fund_name}] returns 长度 {len(returns)} != rf_rates 长度 {len(rf_rates)}，"
+            f"拒绝计算（长度不等 zip 会静默截断致年化错误）"
+        )
     n = len(returns)
     is_short = n < 36
 

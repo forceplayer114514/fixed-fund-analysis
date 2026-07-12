@@ -15,14 +15,16 @@ router = APIRouter(prefix="/api/funds", tags=["funds"])
 
 
 def _to_response(fund: Fund, session: Session) -> FundResponse:
-    """ORM Fund -> FundResponse，附带数据截止年月与是否有指标。"""
+    """ORM Fund -> FundResponse，附带数据截止年月与是否有指标。
+
+    data_cutoff_month 直接取最新 monthly_return 月份，不用 fund_metrics 缓存值
+    （缓存可能在 skills 摄取新月份后过期）。
+    """
     metric = session.get(FundMetric, fund.fund_id)
-    cutoff = metric.date_period if metric else None
-    if cutoff is None:
-        latest = (session.query(MonthlyReturn)
-                  .filter_by(fund_id=fund.fund_id)
-                  .order_by(MonthlyReturn.date.desc()).first())
-        cutoff = latest.date[:7] if latest else None
+    latest = (session.query(MonthlyReturn)
+              .filter_by(fund_id=fund.fund_id)
+              .order_by(MonthlyReturn.date.desc()).first())
+    cutoff = latest.date[:7] if latest else None
     return FundResponse(
         fund_id=fund.fund_id, fund_name=fund.fund_name, apir_code=fund.apir_code,
         confirmed_url=fund.confirmed_url, fetch_method=fund.fetch_method,

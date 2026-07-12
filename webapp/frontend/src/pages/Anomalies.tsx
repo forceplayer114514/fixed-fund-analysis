@@ -8,6 +8,7 @@ export default function AnomaliesPage() {
   const fetchAnomalies = useStore(s => s.fetchAnomalies)
   const fetchCompare = useStore(s => s.fetchCompare)
   const funds = useStore(s => s.funds)
+  const selectedFundIds = useStore(s => s.selectedFundIds)
   const anomaliesLoading = useStore(s => s.anomaliesLoading)
 
   useEffect(() => {
@@ -19,7 +20,7 @@ export default function AnomaliesPage() {
     if (funds.length > 0) {
       fetchCompare()
     }
-  }, [funds.length])
+  }, [funds.length, selectedFundIds])
 
   return (
     <div>

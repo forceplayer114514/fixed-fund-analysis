@@ -60,6 +60,9 @@ class AnomalyResponse(BaseModel):
     mean: float
     stdev: float
     fund_name: Optional[str] = None
+    # 该异常点对应的 monthly_returns 行主键，供前端人工纠错 PATCH 定位。
+    # 不能用 anomalies.id（独立自增序列），否则会改写无关基金的月度数据。
+    monthly_return_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

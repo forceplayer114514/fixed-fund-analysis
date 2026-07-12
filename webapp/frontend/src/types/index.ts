@@ -14,6 +14,7 @@ export interface Fund {
 /** 5 维指标（来自 compare 端点或 recompute 返回） */
 export interface FundMetrics {
   fund_id: string
+  fund_name: string | null
   date_period: string
   history_months: number
   is_short_history_warning: boolean
@@ -68,6 +69,8 @@ export interface Anomaly {
   mean: number
   stdev: number
   fund_name: string | null
+  /** 对应 monthly_returns 行主键，人工纠错 PATCH 用（非 anomalies.id） */
+  monthly_return_id: number | null
 }
 
 /** 纠错请求体 */

@@ -21,8 +21,10 @@ interface AppState {
   // 数据
   compareData: CompareResponse | null
   compareLoading: boolean
+  compareError: string | null
   timeSeriesData: TimeSeriesResponse | null
   timeSeriesLoading: boolean
+  timeSeriesError: string | null
   anomalies: Anomaly[]
   anomaliesLoading: boolean
 
@@ -52,8 +54,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   compareData: null,
   compareLoading: false,
+  compareError: null,
   timeSeriesData: null,
   timeSeriesLoading: false,
+  timeSeriesError: null,
   anomalies: [],
   anomaliesLoading: false,
 
@@ -61,11 +65,17 @@ export const useStore = create<AppState>((set, get) => ({
     set({ fundsLoading: true, fundsError: null })
     try {
       const funds = await api.listFunds()
-      set({
-        funds,
-        fundsLoading: false,
-        selectedFundIds: funds.map(f => f.fund_id),
-      })
+      const prev = get().selectedFundIds
+      let selectedFundIds: string[]
+      if (prev.length === 0) {
+        // 首次加载：默认全选
+        selectedFundIds = funds.map(f => f.fund_id)
+      } else {
+        // 后续：保留已选（剔除已删除基金），新基金默认不选
+        const validIds = new Set(funds.map(f => f.fund_id))
+        selectedFundIds = prev.filter(id => validIds.has(id))
+      }
+      set({ funds, fundsLoading: false, selectedFundIds })
     } catch (e: unknown) {
       set({ fundsError: (e as Error).message, fundsLoading: false })
     }
@@ -73,25 +83,31 @@ export const useStore = create<AppState>((set, get) => ({
 
   fetchCompare: async () => {
     const { selectedFundIds, period } = get()
-    if (selectedFundIds.length === 0) return
-    set({ compareLoading: true })
+    if (selectedFundIds.length === 0) {
+      set({ compareData: null, compareError: null })
+      return
+    }
+    set({ compareLoading: true, compareError: null })
     try {
       const data = await api.compare(selectedFundIds, period)
       set({ compareData: data, compareLoading: false })
-    } catch {
-      set({ compareLoading: false })
+    } catch (e: unknown) {
+      set({ compareLoading: false, compareError: (e as Error).message, compareData: null })
     }
   },
 
   fetchTimeSeries: async () => {
     const { selectedFundIds, period } = get()
-    if (selectedFundIds.length === 0) return
-    set({ timeSeriesLoading: true })
+    if (selectedFundIds.length === 0) {
+      set({ timeSeriesData: null, timeSeriesError: null })
+      return
+    }
+    set({ timeSeriesLoading: true, timeSeriesError: null })
     try {
       const data = await api.timeSeries(selectedFundIds, period)
       set({ timeSeriesData: data, timeSeriesLoading: false })
-    } catch {
-      set({ timeSeriesLoading: false })
+    } catch (e: unknown) {
+      set({ timeSeriesLoading: false, timeSeriesError: (e as Error).message, timeSeriesData: null })
     }
   },
 
@@ -121,7 +137,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   patchMonthlyReturn: async (id: number, netReturn: number) => {
     await api.patchMonthlyReturn(id, { net_return: netReturn })
-    await get().fetchAnomalies()
+    await Promise.all([
+      get().fetchAnomalies(),
+      get().fetchCompare(),
+      get().fetchTimeSeries(),
+    ])
   },
 
   recomputeFund: async (fundId: string) => {
@@ -135,5 +155,12 @@ export const useStore = create<AppState>((set, get) => ({
       funds: state.funds.filter(f => f.fund_id !== fundId),
       selectedFundIds: state.selectedFundIds.filter(id => id !== fundId),
     }))
+    // 刷新对比/时序（删除的基金已不在选中）
+    if (get().selectedFundIds.length > 0) {
+      get().fetchCompare()
+      get().fetchTimeSeries()
+    } else {
+      set({ compareData: null, timeSeriesData: null })
+    }
   },
 }))

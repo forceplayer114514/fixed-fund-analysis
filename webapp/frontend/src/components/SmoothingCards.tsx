@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
+import type { FundMetrics } from '../types'
 
 function cardBorder(status: string) {
   switch (status) {
@@ -48,7 +49,7 @@ export default function SmoothingCards() {
 
   const cards = useMemo(() => {
     if (!compareData?.funds) return []
-    return compareData.funds.map((m: any) => {
+    return compareData.funds.map((m: FundMetrics) => {
       const historyMonths = m.history_months ?? 0
       const phi = m.unsmoothing_coefficient_phi ?? 0
       const q = m.ljung_box_q ?? 0

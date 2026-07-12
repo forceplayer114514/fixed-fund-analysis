@@ -77,16 +77,21 @@ def test_recompute_nav_after_mid_insertion(db_session):
 
 @pytest.mark.unit
 def test_resolve_rf_rates(db_session):
-    """按月份查 RBA 利率，缺失用 fallback。"""
+    """按月份查 RBA 利率，缺失月份抛 ValueError（零容忍，CLAUDE.md 第一条）。"""
     db_session.add(RbaCashRate(date_period="2026-03", rate=0.0435))
     db_session.add(RbaCashRate(date_period="2026-04", rate=0.0410))
     db_session.commit()
 
+    # 缺失月份必须报错，不允许 fallback
     dates = ["2026-03-31", "2026-04-30", "2026-05-31"]  # 5月缺失
-    rates = resolve_rf_rates(db_session, dates, fallback_rate=0.0425)
+    with pytest.raises(ValueError) as excinfo:
+        resolve_rf_rates(db_session, dates)
+    assert "2026-05" in str(excinfo.value)
+
+    # 完整月份正常返回
+    rates = resolve_rf_rates(db_session, ["2026-03-31", "2026-04-30"])
     assert rates[0] == pytest.approx(0.0435)
     assert rates[1] == pytest.approx(0.0410)
-    assert rates[2] == pytest.approx(0.0425)  # fallback
 
 
 def _minimal_metrics(**overrides) -> dict:

@@ -72,13 +72,26 @@ def recompute_nav(session: Session, fund_id: str) -> None:
     session.commit()
 
 
-def resolve_rf_rates(session: Session, dates: list[str], fallback_rate: float) -> list[float]:
-    """按月份从 rba_cash_rates 表查年化利率，缺失月份用 fallback。"""
+def resolve_rf_rates(session: Session, dates: list[str]) -> list[float]:
+    """按月份从 rba_cash_rates 表查年化利率。缺失月份抛 ValueError（零容忍）。
+
+    CLAUDE.md 第一条：数据缺失必须明确报错并停止计算，不允许用估算值/回退值
+    填补。RBA 缺失会扭曲超额收益类指标，必须先抓取再计算。
+    """
     rates = []
+    missing = []
     for d in dates:
         month_key = d[:7]  # YYYY-MM
         rba = session.get(RbaCashRate, month_key)
-        rates.append(rba.rate if rba else fallback_rate)
+        if rba is None:
+            missing.append(month_key)
+            continue
+        rates.append(rba.rate)
+    if missing:
+        raise ValueError(
+            f"RBA 利率缺失月份: {missing}。拒绝计算（数据缺口零容忍）。"
+            f"请先调用 POST /api/rba/refresh 抓取 RBA 利率后重试。"
+        )
     return rates
 
 

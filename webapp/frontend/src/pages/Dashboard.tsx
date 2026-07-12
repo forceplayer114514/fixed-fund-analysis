@@ -21,7 +21,9 @@ function rankAmong(
 export default function Dashboard() {
   const funds = useStore(s => s.funds)
   const fundsLoading = useStore(s => s.fundsLoading)
+  const fundsError = useStore(s => s.fundsError)
   const compareData = useStore(s => s.compareData)
+  const compareError = useStore(s => s.compareError)
   const selectedFundIds = useStore(s => s.selectedFundIds)
   const period = useStore(s => s.period)
   const smoothingMode = useStore(s => s.smoothingMode)
@@ -40,7 +42,7 @@ export default function Dashboard() {
       fetchCompare()
       fetchTimeSeries()
     }
-  }, [selectedFundIds, period])
+  }, [selectedFundIds, period, funds.length])
 
   // 取第一支选中基金的指标显示在卡片
   const firstId = selectedFundIds[0]
@@ -67,6 +69,8 @@ export default function Dashboard() {
     : null
 
   if (fundsLoading) return <div className="text-gray-400">加载基金列表...</div>
+  if (fundsError)
+    return <div className="text-red-500">基金列表加载失败：{fundsError}</div>
   if (funds.length === 0)
     return <div className="text-gray-400">暂无基金数据，请先通过 skills 端添加基金</div>
 
@@ -97,6 +101,19 @@ export default function Dashboard() {
       </div>
 
       <FundChips />
+
+      {compareError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-4 mb-5">
+          指标加载失败：{compareError}
+        </div>
+      )}
+
+      {firstMetrics && (
+        <div className="text-sm text-gray-500 mb-3">
+          当前展示：<span className="font-medium text-gray-800">{firstMetrics.fund_name ?? firstId ?? '-'}</span>
+          <span className="text-gray-400 ml-2">（{firstMetrics.history_months} 个月历史）</span>
+        </div>
+      )}
 
       <div className="flex gap-3 mb-6 flex-wrap">
         <MetricCard

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.crud import get_returns, get_fund, resolve_rf_rates
-from app.models import FundMetric
+from app.models import FundMetric, MonthlyReturn
 from app.calculations import (
     compute_all_metrics,
     calculate_autocorrelation,
@@ -14,7 +14,7 @@ from app.calculations import (
     should_apply_geltner,
     _build_nav_series,
 )
-from app.metrics_pipeline import _find_month_gaps
+from app.metrics_pipeline import _find_month_gaps, compute_and_store_metrics
 from app.period import get_common_months, slice_by_period, VALID_PERIODS
 from app.schemas import sanitize_for_json
 
@@ -39,7 +39,7 @@ def _recompute_for_slice(session: Session, fund_id: str, period: str,
     gaps = _find_month_gaps(d_slice)
     if gaps:
         raise ValueError(f"基金 {fund_id} 切片后月份存在缺口: {gaps}")
-    rf = resolve_rf_rates(session, d_slice, fallback_rate=0.0435)
+    rf = resolve_rf_rates(session, d_slice)
     metrics = compute_all_metrics(r_slice, rf, fund_name=fund_id)
     metrics["fund_id"] = fund_id
     metrics["date_period"] = d_slice[-1][:7]
@@ -68,15 +68,33 @@ def compare(fund_ids: str = Query(...),
 
     results = []
     for fid in ids:
-        if period == "full":
-            m = session.get(FundMetric, fid)
-            if m is None:
-                # 无预计算指标：即时全量重算
-                m_dict = _recompute_for_slice(session, fid, "full")
+        try:
+            if period == "full":
+                m = session.get(FundMetric, fid)
+                # 缓存新鲜度校验：date_period 必须等于最新 monthly_return 月份，
+                # 否则 skills 摄取新月份后缓存过期，回退即时重算并写回（自愈）。
+                latest_mr = (session.query(MonthlyReturn)
+                             .filter_by(fund_id=fid)
+                             .order_by(MonthlyReturn.date.desc()).first())
+                latest_month = latest_mr.date[:7] if latest_mr else None
+                if (m is not None and latest_month is not None
+                        and m.date_period == latest_month):
+                    m_dict = {c.name: getattr(m, c.name) for c in m.__table__.columns}
+                else:
+                    # 缓存过期/不存在：重算并写回 fund_metrics（自愈缓存）
+                    m_dict = compute_and_store_metrics(session, fid)
             else:
-                m_dict = {c.name: getattr(m, c.name) for c in m.__table__.columns}
-        else:
-            m_dict = _recompute_for_slice(session, fid, period, common_months)
+                m_dict = _recompute_for_slice(session, fid, period, common_months)
+        except ValueError as e:
+            # 缺口/RBA 缺失是可预期业务错误，返回 422 而非 500
+            raise HTTPException(status_code=422, detail=str(e))
+        m_dict["fund_id"] = fid
+        fund = get_fund(session, fid)
+        m_dict["fund_name"] = fund.fund_name if fund else None
+        # 布尔字段统一转 bool（FundMetric 是 Integer 0/1，time-series 返回 bool）
+        for bk in ("is_short_history_warning", "is_geltner_applied", "is_q_significant"):
+            if m_dict.get(bk) is not None:
+                m_dict[bk] = bool(m_dict[bk])
         results.append(m_dict)
     return {"period": period, "funds": sanitize_for_json(results)}
 
