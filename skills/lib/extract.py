@@ -11,6 +11,7 @@ scripts/fetch_web.py 复制而来，已去除对 registry/yaml/项目路径的�
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import os
 import re
@@ -384,3 +385,145 @@ def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
             seen.add(key)
             results.append(key)
     return results
+
+
+# ---------------------------------------------------------------------------
+# 并发下载+提取 pipeline（ThreadPool，M5 满核）
+# 线程安全：fitz C 层释放 GIL，每 worker 独立 fitz.open。不用 ProcessPool
+# （macOS spawn 重新 import fitz 开销 > 15 个小 PDF 收益）。
+# ---------------------------------------------------------------------------
+
+
+def download_and_extract_parallel(
+    links: list[tuple[str, str]],
+    dest_dir: str,
+    max_workers: Optional[int] = None,
+) -> list[tuple[str, Optional[float], dict]]:
+    """ThreadPool pipeline：每 worker 下载一个 PDF 后立即提取。
+
+    IO 下载与 CPU 提取重叠，无 barrier（比"下载并发->提取并发"两阶段更快）。
+    max_workers 默认 min(16, os.cpu_count())（M5 满核 10-16）。
+    返回 [(ym, commentary_return, rolling), ...]，按 ym 升序排序。
+    失败隔离：单 PDF 下载/提取失败 -> (ym, None, {'parse_error':True})，不中断其他。
+    复用 download_file + extract_pdf_one。
+    """
+    if max_workers is None:
+        max_workers = min(16, os.cpu_count() or 8)
+
+    def _failed_rolling() -> dict:
+        return {"1mo": None, "3mo": None, "6mo": None,
+                "12mo": None, "inception": None, "parse_error": True}
+
+    def _worker(ym: str, url: str) -> tuple[Optional[float], dict]:
+        filepath = os.path.join(dest_dir, f"{ym}.pdf")
+        download_file(url, filepath)
+        return extract_pdf_one(filepath)
+
+    results: list[tuple[str, Optional[float], dict]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_ym = {ex.submit(_worker, ym, url): ym for ym, url in links}
+        for fut in concurrent.futures.as_completed(future_to_ym):
+            ym = future_to_ym[fut]
+            try:
+                commentary, rolling = fut.result()
+            except Exception:
+                commentary, rolling = None, _failed_rolling()
+            results.append((ym, commentary, rolling))
+    results.sort(key=lambda r: r[0])
+    return results
+
+
+def verify_monthly_vs_rolling(
+    monthly: list[tuple[str, float]],
+    rolling: dict,
+) -> dict:
+    """复利交叉验证：用 monthly 复利算最近 N 月累计，对比 rolling 同期值。
+
+    阈值：绝对误差 < 0.5%（容忍 PDF 四舍五入）。rolling 缺列或 monthly 不足
+    N 月时跳过该窗口。至少一个窗口通过 -> pass=True（rolling 数据可用）。
+
+    Args:
+        monthly: [(date_str, net_return), ...]，可乱序，内部排序。
+        rolling: extract_perf_rolling 的返回 dict。
+
+    Returns:
+        {'3mo':{'expected','actual','error','pass'}, '6mo':.., '12mo':.., 'pass':bool}
+    """
+    result = {"3mo": None, "6mo": None, "12mo": None, "pass": False}
+    if not monthly or not rolling:
+        return result
+
+    sorted_m = sorted(monthly, key=lambda x: x[0])
+    returns = [r for _, r in sorted_m]
+
+    any_pass = False
+    for key, n in [("3mo", 3), ("6mo", 6), ("12mo", 12)]:
+        rolling_val = rolling.get(key)
+        if rolling_val is None or len(returns) < n:
+            result[key] = {"expected": None, "actual": None,
+                           "error": None, "pass": False}
+            continue
+        actual = 1.0
+        for r in returns[-n:]:
+            actual *= (1.0 + r)
+        actual = actual - 1.0
+        error = abs(actual - rolling_val)
+        win_pass = error < 0.005  # 0.5%
+        result[key] = {"expected": rolling_val, "actual": actual,
+                       "error": error, "pass": win_pass}
+        if win_pass:
+            any_pass = True
+    result["pass"] = any_pass
+    return result
+
+
+def gate_check(
+    records: list[tuple[str, float]],
+    rolling_per_month: dict,
+) -> tuple[bool, list[str]]:
+    """入库前硬 gate（数据完整性兜底）。
+
+    组合校验：
+    1. check_gaps（缺口零容忍）
+    2. ANTI-FABRICATION（连续 >= 3 个相同非零浮点数，参考教训 213bdd）
+    3. verify_monthly_vs_rolling（用最近月份 rolling，至少一个窗口通过；
+       rolling parse_error=True 时跳过不因此 fail）
+    4. 字段类型校验（|net_return| < 0.5 即 50%，超出视为字段类型错误）
+
+    Returns:
+        (pass, errors)。pass=False 时 errors 列出具体问题，调用方必须停止入库。
+    """
+    errors: list[str] = []
+    if not records:
+        return (False, ["无数据"])
+
+    # 1. 缺口检查（缺口零容忍）
+    dates = [d for d, _ in records]
+    gaps = check_gaps(dates)
+    if gaps:
+        errors.append(f"缺口: {gaps}")
+
+    # 2. ANTI-FABRICATION：连续 >= 3 个相同非零值（捏造迹象）
+    returns = [r for _, r in records]
+    for i in range(len(returns) - 2):
+        if returns[i] != 0.0 and returns[i] == returns[i + 1] == returns[i + 2]:
+            errors.append(
+                f"ANTI-FABRICATION: 连续3月相同值 {returns[i]} 起于第 {i} 月"
+            )
+            break
+
+    # 3. 字段类型校验：|r| < 0.5（月度收益 50% 上限）
+    for d, r in records:
+        if abs(r) >= 0.5:
+            errors.append(f"字段异常: {d} 收益 {r} 超出月度合理范围 |r|<0.5")
+
+    # 4. 复利验证：用最近月份的 rolling
+    if rolling_per_month:
+        latest_ym = max(d[:7] for d, _ in records)
+        latest_rolling = rolling_per_month.get(latest_ym, {})
+        if latest_rolling and not latest_rolling.get("parse_error", True):
+            verify = verify_monthly_vs_rolling(records, latest_rolling)
+            if not verify["pass"]:
+                errors.append(f"复利验证失败（{latest_ym}）: {verify}")
+
+    return (len(errors) == 0, errors)

@@ -351,3 +351,190 @@ def test_extract_pdf_links_from_archive_dedup():
     )
     links = extract_pdf_links_from_archive(md)
     assert len(links) == 1
+
+
+from lib.extract import (
+    download_and_extract_parallel,
+    verify_monthly_vs_rolling,
+    gate_check,
+)
+
+
+# --- 15. verify_monthly_vs_rolling ---
+def test_verify_monthly_vs_rolling_pass():
+    """3 月窗口复利验证通过（Stake 2026-03~05 真实数据）。"""
+    # 复利 = (1-0.0026)(1+0.0061)(1+0.0105)-1 ≈ 0.01400
+    monthly = [
+        ("2026-03-31", -0.0026),
+        ("2026-04-30", 0.0061),
+        ("2026-05-31", 0.0105),
+    ]
+    rolling = {
+        "1mo": 0.0105, "3mo": 0.0140, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    r = verify_monthly_vs_rolling(monthly, rolling)
+    assert r["3mo"]["pass"] is True
+    assert r["pass"] is True
+
+
+def test_verify_monthly_vs_rolling_fail():
+    """构造错误序列：复利不匹配 rolling。"""
+    monthly = [
+        ("2026-03-31", 0.05),
+        ("2026-04-30", 0.05),
+        ("2026-05-31", 0.05),
+    ]
+    rolling = {
+        "1mo": 0.05, "3mo": 0.01, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    r = verify_monthly_vs_rolling(monthly, rolling)
+    # 复利 0.1576 != rolling 0.01
+    assert r["3mo"]["pass"] is False
+    assert r["pass"] is False
+
+
+def test_verify_monthly_vs_rolling_skip_missing_window():
+    """monthly 不足 N 月或 rolling 缺列 -> 跳过该窗口。"""
+    monthly = [("2026-05-31", 0.0105)]
+    rolling = {
+        "1mo": 0.0105, "3mo": 0.0140, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    r = verify_monthly_vs_rolling(monthly, rolling)
+    # 3mo 窗口因 monthly 不足跳过，pass=False（无窗口通过）
+    assert r["3mo"]["pass"] is False
+    assert r["pass"] is False
+
+
+# --- 16. gate_check ---
+def test_gate_check_pass():
+    """完整通过流程：无缺口、无捏造、复利通过、字段正常。"""
+    records = [
+        ("2025-01-31", 0.005),
+        ("2025-02-28", 0.006),
+        ("2025-03-31", 0.004),
+    ]
+    # 最近 3 月复利 = 1.005*1.006*1.004-1 ≈ 0.01503，rolling 3mo=0.015 误差<0.5%
+    rolling = {
+        "1mo": 0.004, "3mo": 0.015, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    pass_ok, errors = gate_check(records, {"2025-03": rolling})
+    assert pass_ok is True
+    assert errors == []
+
+
+def test_gate_check_gap_fail():
+    """缺口失败。"""
+    records = [
+        ("2025-01-31", 0.005),
+        ("2025-03-31", 0.004),
+    ]
+    pass_ok, errors = gate_check(records, {})
+    assert pass_ok is False
+    assert any("缺口" in e for e in errors)
+
+
+def test_gate_check_fabrication_fail():
+    """连续 3 月相同非零值（捏造迹象，参考 213bdd）失败。"""
+    records = [
+        ("2025-01-31", 0.00657),
+        ("2025-02-28", 0.00657),
+        ("2025-03-31", 0.00657),
+        ("2025-04-30", 0.005),
+    ]
+    pass_ok, errors = gate_check(records, {})
+    assert pass_ok is False
+    assert any("ANTI-FABRICATION" in e for e in errors)
+
+
+def test_gate_check_field_range_fail():
+    """字段异常：单月 |r| >= 0.5（50%）失败。"""
+    records = [
+        ("2025-01-31", 0.005),
+        ("2025-02-28", 0.6),  # 60%，异常
+        ("2025-03-31", 0.004),
+    ]
+    pass_ok, errors = gate_check(records, {})
+    assert pass_ok is False
+    assert any("字段异常" in e for e in errors)
+
+
+def test_gate_check_rolling_parse_error_skipped():
+    """rolling parse_error=True 时跳过复利验证（不因此 fail）。"""
+    records = [
+        ("2025-01-31", 0.005),
+        ("2025-02-28", 0.006),
+        ("2025-03-31", 0.004),
+    ]
+    rolling = {"1mo": None, "3mo": None, "6mo": None,
+               "12mo": None, "inception": None, "parse_error": True}
+    pass_ok, errors = gate_check(records, {"2025-03": rolling})
+    # 缺口无、捏造无、字段正常、复利跳过 -> pass
+    assert pass_ok is True
+
+
+# --- 17. download_and_extract_parallel ---
+def test_download_and_extract_parallel_success(monkeypatch, tmp_path):
+    """并发下载+提取成功（mock download_file + extract_pdf_one）。"""
+    calls = []
+
+    def fake_download(url, filepath, headers=None):
+        calls.append(url)
+        with open(filepath, "wb") as f:
+            f.write(b"fake pdf")
+
+    def fake_extract(pdf_path, max_pages=None):
+        return (0.0053, {"1mo": 0.0053, "3mo": None, "6mo": None,
+                         "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    monkeypatch.setattr("lib.extract.extract_pdf_one", fake_extract)
+
+    links = [
+        ("2025-03", "https://example.com/mar.pdf"),
+        ("2025-01", "https://example.com/jan.pdf"),
+        ("2025-02", "https://example.com/feb.pdf"),
+    ]
+    results = download_and_extract_parallel(links, str(tmp_path), max_workers=3)
+    # 按 ym 排序
+    yms = [r[0] for r in results]
+    assert yms == ["2025-01", "2025-02", "2025-03"]
+    # 全部成功
+    for ym, commentary, rolling in results:
+        assert commentary == 0.0053
+        assert rolling["parse_error"] is False
+    # 3 个 url 都被下载
+    assert len(calls) == 3
+
+
+def test_download_and_extract_parallel_failure_isolation(monkeypatch, tmp_path):
+    """单 PDF 下载失败不中断其他（失败隔离）。"""
+    def fake_download(url, filepath, headers=None):
+        if "fail" in url:
+            raise ConnectionError("boom")
+        with open(filepath, "wb") as f:
+            f.write(b"ok")
+
+    def fake_extract(pdf_path, max_pages=None):
+        return (0.0053, {"1mo": 0.0053, "3mo": None, "6mo": None,
+                         "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    monkeypatch.setattr("lib.extract.extract_pdf_one", fake_extract)
+
+    links = [
+        ("2025-01", "https://example.com/ok.pdf"),
+        ("2025-02", "https://example.com/fail.pdf"),
+        ("2025-03", "https://example.com/ok2.pdf"),
+    ]
+    results = download_and_extract_parallel(links, str(tmp_path), max_workers=3)
+    by_ym = {r[0]: r for r in results}
+    # 成功项
+    assert by_ym["2025-01"][1] == 0.0053
+    assert by_ym["2025-03"][1] == 0.0053
+    # 失败项：commentary=None, parse_error=True
+    assert by_ym["2025-02"][1] is None
+    assert by_ym["2025-02"][2]["parse_error"] is True
