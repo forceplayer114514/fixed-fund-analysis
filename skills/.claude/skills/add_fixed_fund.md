@@ -69,6 +69,12 @@ cd skills && python3 -m lib.strategies probe \
 
 **搜索/抓取主会话直接执行，不派子 agent**（子 agent 有时不退出，阻塞 pipeline）。禁 WebSearch，用 `mcp__search__search`。按优先级顺序探测：
 
+**探测子 agent 越权防护（2026-07-13 字段错位教训）**：
+- 若主会话派探测子 agent（并行探多源时），**必须**用 `cavecrew-investigator`（read-only：Read/Grep/Glob/Bash，无 Write/Edit），禁止用有写权限的 agent 类型。
+- 子 agent prompt 必须明确：仅返回 JSON 探测结果（候选 URL、PDF 是否含逐月表、付费墙状态），**禁止**调 `lib.db`/`lib.ingest` 任何写操作（`create_fund`/`upsert_monthly_return`/`add_fund*`），**禁止**写 .py 脚本调 lib.db。
+- 主会话派子 agent 前后各跑一次 `SELECT COUNT(*) FROM funds` + `SELECT COUNT(*) FROM monthly_returns`，行数变了说明子 agent 越权写库，立即回滚并报错。
+- 入库一律由主会话跑 `python3 -m lib.ingest`（带 `FUND_DB_WRITE_TOKEN`），探测 agent bash 不继承 token，越权写库 raise PermissionError。
+
 **步骤 1 -- 官网优先**（最权威免费源）：
 - 搜 `<基金名> site:<issuer官网域名>` + `Performance` / `Latest Reports` / `Download Centre`（`mcp__search__search`）
 - 查官网**所有下载入口**（不只 /performance，含 /download-centre / /reports / /fund-factsheet 等子页），找月度业绩 PDF/HTML 报告链接
