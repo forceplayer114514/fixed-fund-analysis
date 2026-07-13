@@ -5,6 +5,8 @@ mock download_and_extract_parallel（不触网），用 db_path 指向 tmp_path 
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from lib.ingest import add_fund, add_fund_from_html_table
@@ -263,3 +265,82 @@ def test_add_fund_from_html_table_gap_fail(tmp_path):
         assert get_fund(conn, "test_html_fund3") is None
     finally:
         conn.close()
+
+
+# --- add_fund_from_plotly_html（Plotly HTML + PDF rolling，Coolabah 模式）---
+
+
+@pytest.mark.unit
+def test_add_fund_from_plotly_html_happy_path(tmp_path, monkeypatch):
+    """Plotly HTML + PDF rolling -> 正确入库（compound 一致）。"""
+    from lib.ingest import add_fund_from_plotly_html
+
+    # 用 fixture A 的 HTML（5 月 Assisted）
+    fix = Path(__file__).parent / "fixtures"
+    html_path = tmp_path / "report.html"
+    html_path.write_text((fix / "frhy_assisted.html").read_text(), encoding="utf-8")
+
+    # 构造 PDF text 使 extract_perf_rolling 与 NAV 复利一致
+    # Assisted NAV: 100->102.08 over 5 mo -> inception = 0.0208
+    # 3mo compound (last 3) ≈ 0.01551, rolling 3mo = 1.53% -> 0.0153 (误差 < 0.5%)
+    # extract_perf_rolling 需要 "Class A" 标记 + % 符号
+    pdf_text = (
+        "Performance\n1 month 3 months 6 months 12 months since inception\n"
+        "Class A 0.51% 1.53% 2.08% 2.08% 2.08%\n"
+    )
+    pdf_path = tmp_path / "rolling.pdf"
+    pdf_path.write_text(pdf_text, encoding="utf-8")
+
+    # parse_pdf_text 用 PyMuPDF 打开真实 PDF；测试用纯文本文件，mock 返回文本
+    monkeypatch.setattr("lib.ingest.parse_pdf_text", lambda path: pdf_text)
+
+    db_path = tmp_path / "test.db"
+    monkeypatch.setenv("FUND_DB_WRITE_TOKEN", "test")
+    result = add_fund_from_plotly_html(
+        "test_plotly_assisted", "Test Plotly Assisted", str(html_path),
+        confirmed_url="http://x", rolling_pdf_path=str(pdf_path),
+        fund_name_pattern="Assisted",
+        shareclass_prefix="test_plotly_", db_path=str(db_path),
+    )
+    assert result["gate_pass"], result["errors"]
+    assert result["months"] == 4  # 5 NAV -> 4 monthly returns
+
+
+@pytest.mark.unit
+def test_add_fund_from_plotly_html_compound_mismatch_blocks(tmp_path, monkeypatch):
+    """Plotly NAV 与 rolling 不一致 -> consistency block，不入库。"""
+    from lib.ingest import add_fund_from_plotly_html
+
+    fix = Path(__file__).parent / "fixtures"
+    html_path = tmp_path / "report.html"
+    html_path.write_text((fix / "frhy_assisted.html").read_text(), encoding="utf-8")
+
+    # rolling inception 故意写 50.00%（与 NAV 复利 0.0208 严重不符）
+    pdf_text = (
+        "Performance\n1 month 3 months 6 months 12 months since inception\n"
+        "Class A 0.51% 1.53% 2.08% 2.08% 50.00%\n"
+    )
+    pdf_path = tmp_path / "rolling.pdf"
+    pdf_path.write_text(pdf_text, encoding="utf-8")
+
+    monkeypatch.setattr("lib.ingest.parse_pdf_text", lambda path: pdf_text)
+
+    db_path = tmp_path / "test.db"
+    monkeypatch.setenv("FUND_DB_WRITE_TOKEN", "test")
+    result = add_fund_from_plotly_html(
+        "test_plotly_bad", "Test Plotly Bad", str(html_path),
+        confirmed_url="http://x", rolling_pdf_path=str(pdf_path),
+        fund_name_pattern="Assisted",
+        shareclass_prefix="test_plotly_", db_path=str(db_path),
+    )
+    assert not result["gate_pass"]
+    assert any("复利" in e for e in result["errors"])
+    # DB 未写入
+    from lib.db import get_connection, ensure_tables
+    conn = get_connection(str(db_path)); ensure_tables(conn)
+    cnt = conn.execute(
+        "SELECT COUNT(*) FROM monthly_returns WHERE fund_id=?",
+        ("test_plotly_bad",),
+    ).fetchone()[0]
+    conn.close()
+    assert cnt == 0
