@@ -129,12 +129,8 @@ def _check_compound(
     对每个窗口：用 records 末 N 月复利 vs rolling 同期，误差 >0.5% 报 block。
     inception：全序列复利 vs rolling['inception']。
     """
-    from lib.extract import verify_monthly_vs_rolling
-
     sorted_m = sorted(records, key=lambda x: x[0])
     rets = [r for _, r in sorted_m]
-    # 短窗口（3/6/12mo）复用 extract.verify_monthly_vs_rolling
-    short = verify_monthly_vs_rolling(records, rolling)
     # verify 用"至少一个窗口通过"逻辑，这里要全窗口严格：单独判
     for key, n in [("3mo", 3), ("6mo", 6), ("12mo", 12)]:
         rv = rolling.get(key)

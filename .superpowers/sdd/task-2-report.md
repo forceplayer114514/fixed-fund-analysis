@@ -1,54 +1,74 @@
-# Task 2 Execution Report: 实现差异化下载 fetch_web.py
+# Task 2 Report: consistency_check A-group (1/2/3/4) + multi-field fixture
 
-## Status: DONE
+## What was implemented
 
-## Description
-Implemented diff downloading (fetch diffing) in `scripts/fetch_web.py` to check the local `history_cache.json` for previously successfully parsed dates, parsing PDF urls to match their month prefix, and skipping downloading if those months are already cached.
+Created a new self-contained module `skills/lib/consistency.py` implementing the A-group (document-internal, DB-independent) self-consistency checks plus a compound-validation helper, with B-group stubs reserved for Task 3.
 
-## Changes Included
-- Modified: `scripts/fetch_web.py`
-  - Added `load_cache_dates(fund_id: str) -> Set[str]` to read cached dates from `/data/raw/<fund_id>/history_cache.json`.
-  - Added `filter_pdf_links(pdf_links: List[Tuple[str, str]], existing_dates: Set[str], fund_id: str) -> List[Tuple[str, str]]` to filter PDF links by parsing Bentham-style date patterns, Metrics MXT-style patterns, and general YYYYMMDD/YYYYMM/MonthName-YYYY patterns.
-  - Updated `fetch_bentham` and `fetch_metrics` to filter links before initiating async downloads.
-  - Handled imports (e.g., `re`, `json`, `asyncio`, typing) cleanly in PEP 8 order.
-- Created: `tests/test_fetch_web.py`
-  - Added test case `test_filter_pdf_links_bentham` covering multiple date formats (YYYYMMDD, YYYYMM, MonthName-YYYY, YYYY-MonthName, etc.).
-  - Added test case `test_filter_pdf_links_metrics` covering `_YYMM` / `YYMM` patterns for Metrics Master Income Trust.
+### Files changed (all new)
+- `skills/tests/fixtures/pdf_multifield.json` — synthetic multi-field monthly records fixture (CORRECTED version with `excess_net` / `excess_gross` split keys, all 4 A-group checks self-consistent).
+- `skills/tests/test_consistency_check.py` — 5 tests: A-group positive, Check 1 / 3 / 4 negatives, and fields-missing-skip case.
+- `skills/lib/consistency.py` — `consistency_check(...)` public entry + `_check_compound` helper + `_check_bgroup` / `_check_correlation` no-op stubs.
 
-## Tests Run & Commands
+### Module surface (must stay stable for Tasks 3/4/5/7)
+- Public: `consistency_check(fund_id, records, conn, *, gross_records=None, benchmark_records=None, excess_records=None, excess_gross_records=None, growth_records=None, income_records=None, shareclass_prefix=None, rolling=None, corr_threshold=0.98, fee_diff_monthly_max=0.001) -> tuple[bool, list[str], list[str]]` returning `(pass, errors_block, errors_warn)`. `pass = (len(errors_block) == 0)`.
+- A-group (block-level, each skipped when its fields are absent, never fails on missing data):
+  - Check 1: `excess_net ≈ net - benchmark` (tol `_TOL = 0.0005`).
+  - Check 2: `excess_gross ≈ gross - benchmark` (tol `_TOL`).
+  - Check 3: `net < gross + 0.001` (fee-waiver tolerance).
+  - Check 4: `net ≈ growth + income` (tol `_TOL`).
+- Compound (block-level, A-group substitute for Plotly sources): runs only when `rolling` truthy AND `rolling.get("parse_error", True)` is falsy. Strict all-windows check (3mo/6mo/12mo/inception) at 0.5% threshold — every window must pass, not "at least one". Reuses `lib.extract.verify_monthly_vs_rolling` internally but re-implements the strict judgment per the brief.
+- B-group stubs: `_check_bgroup` (Checks 5/6) and `_check_correlation` (Check 7 warn) are `pass` no-ops; `_check_correlation` is always called (warn-level), `_check_bgroup` only when `shareclass_prefix` provided. Task 3 fills these.
 
-1. **Test differential fetching unit tests specifically:**
-   - **Command:** `python3 -m pytest tests/test_fetch_web.py`
-   - **Output:**
-     ```
-     ============================= test session starts ==============================
-     platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0
-     rootdir: /Users/chong/Desktop/fixed_fund_analysis
-     plugins: anyio-4.12.1
-     collected 2 items
+## TDD evidence
 
-     tests/test_fetch_web.py ..                                               [100%]
-     ======================== 2 passed, 3 warnings in 0.22s =========================
-     ```
+### RED (Step 3)
+Command: `cd skills && /usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+```
+ERROR collecting tests/test_consistency_check.py
+tests/test_consistency_check.py:7: in <module>
+    from lib.consistency import consistency_check
+E   ModuleNotFoundError: No module named 'lib.consistency'
+!!! Interrupted: 1 error during collection !!!
+```
 
-2. **Test entire workspace test suite:**
-   - **Command:** `python3 -m pytest tests/`
-   - **Output:**
-     ```
-     ============================= test session starts ==============================
-     platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0
-     rootdir: /Users/chong/Desktop/fixed_fund_analysis
-     plugins: anyio-4.12.1
-     collected 28 items
+### GREEN (Step 5)
+Command: `cd skills && /usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+```
+tests/test_consistency_check.py::test_agroup_all_pass PASSED             [ 20%]
+tests/test_consistency_check.py::test_check1_net_excess_mismatch_blocks PASSED [ 40%]
+tests/test_consistency_check.py::test_check3_net_not_less_than_gross_blocks PASSED [ 60%]
+tests/test_consistency_check.py::test_check4_total_return_decomposition_blocks PASSED [ 80%]
+tests/test_consistency_check.py::test_agroup_fields_missing_skips_not_fails PASSED [100%]
+============================== 5 passed in 0.02s ===============================
+```
 
-     tests/test_discover_source.py ..                                         [  7%]
-     tests/test_fetch_web.py ..                                               [ 14%]
-     tests/test_metrics.py ......                                             [ 35%]
-     tests/test_metrics_mxt.py ..                                             [ 42%]
-     tests/test_pdf_regex.py .......                                          [ 67%]
-     tests/test_pdf_regex_edge.py .....                                       [ 85%]
-     tests/test_validate_registry.py ....                                     [100%]
-     ======================= 28 passed, 29 warnings in 0.21s ========================
-     ```
+### Full-suite regression
+`cd skills && /usr/bin/python3 -m pytest` -> `94 passed, 35 warnings in 0.24s` (warnings are pre-existing `PytestUnknownMarkWarning` from `test_strategies.py`, unrelated to this task).
 
-All verification steps passed successfully!
+## Commit
+`c97aa09 feat(consistency): A-group self-consistency checks 1/2/3/4 + compound validation` — 3 files, +300 lines.
+
+## Self-review findings
+- Return type is exactly `tuple[bool, list[str], list[str]]` (both the normal return and the empty-records early return `(False, ["无数据"], [])`). PASS.
+- A-group checks skip (not fail) when their fields are missing — each guarded by `if net and benchmark and excess_net:` style predicate; verified by `test_agroup_fields_missing_skips_not_fails`. PASS.
+- `_check_compound` runs only when `rolling` truthy AND `not rolling.get("parse_error", True)` — parse_error defaults to True when the key is absent, so compound is opt-in on a clean parse. PASS.
+- `_check_bgroup` and `_check_correlation` present as `pass` no-ops for Task 3. PASS.
+- No `if fund_id ==` special cases anywhere. PASS.
+- Tests use real JSON fixtures and the real `db_conn` tmp SQLite fixture (no mocks). PASS.
+- Test output pristine (5 passed, no warnings from new tests). PASS.
+
+## Fix: dead code removal
+
+Removed two dead lines in `_check_compound`:
+- `from lib.extract import verify_monthly_vs_rolling` (lazy import, only supported the dead call)
+- `short = verify_monthly_vs_rolling(records, rolling)` (assigned, never used)
+
+The strict 3mo/6mo/12mo/inception loop below remains unchanged.
+
+Test command: `/usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+```
+5 passed in 0.02s
+```
+All 5 tests pass, unchanged from baseline.
+- Minor: the brief's `_check_compound` calls `verify_monthly_vs_rolling(records, rolling)` and binds the result to `short` but never uses it (the strict re-implementation loop below is what actually reports errors). I kept this faithful to the brief; it is dead code but harmless. Task 3 or a later cleanup can remove the unused call if desired.
+- No other concerns. The interface contract is stable for downstream tasks.
