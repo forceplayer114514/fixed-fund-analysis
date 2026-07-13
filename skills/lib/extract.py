@@ -695,3 +695,71 @@ def gate_check_table(
                 )
 
     return (len(errors) == 0, errors)
+
+
+# ---------------------------------------------------------------------------
+# Plotly NAV 序列提取（pandoc HTML 报告嵌入的 Plotly hovertext）
+# 数据完整性：按 trace name 字段过滤 fund class，benchmark trace（含
+# Benchmark/Index/AusBond）自动丢弃，防 benchmark 误存为 share class。
+# 零匹配/多匹配均 raise（防 pattern 打错或 agent 按 trace 顺序猜）。
+# 返回 [(YYYY-MM-DD, nav), ...] 升序。
+# ---------------------------------------------------------------------------
+
+
+def parse_plotly_nav_series(
+    html: str,
+    fund_name_pattern: str,
+) -> list[tuple[str, float]]:
+    """从 pandoc HTML 报告 Plotly hovertext 提取基金类 NAV 序列。
+
+    按 fund_name_pattern 在 trace 的 name 字段过滤；name 含
+    Benchmark/Index/AusBond 的 trace 自动丢弃（结构上 benchmark 不可能混入）。
+    多 trace 匹配 pattern -> raise（防 agent 按 trace 顺序猜）。零匹配 -> raise
+    （防 pattern 打错时空列表被当"无数据"跳过）。返回 [(date, nav), ...] 升序。
+    """
+    import re
+
+    if not html or not fund_name_pattern:
+        raise ValueError("parse_plotly_nav_series: html 与 fund_name_pattern 必填")
+
+    # 提取所有 "text":[...] 数组（Plotly JSON 单行，DOTALL 跨行）
+    text_arrays = re.findall(r'"text":\s*\[([^\]]+)\]', html, re.DOTALL)
+    name_fields = re.findall(r'"name":\s*"([^"]+)"', html)
+
+    if len(text_arrays) != len(name_fields):
+        raise ValueError(
+            f"parse_plotly_nav_series: text 数组数 {len(text_arrays)} != "
+            f"name 字段数 {len(name_fields)}，HTML 结构异常"
+        )
+
+    # 过滤 benchmark trace，对剩余 trace 按 pattern 匹配
+    benchmark_markers = ("benchmark", "index", "ausbond")
+    matched: list[list[tuple[str, float]]] = []
+    for name, text_arr in zip(name_fields, text_arrays):
+        name_lower = name.lower()
+        if any(m in name_lower for m in benchmark_markers):
+            continue  # benchmark 自动丢弃
+        if fund_name_pattern.lower() in name_lower:
+            points = re.findall(
+                r'"([^"]*?)<br />(\d{4}-\d{2}-\d{2}):\s*\$([\d,.]+)"',
+                text_arr,
+            )
+            series = [
+                (date, float(navier.replace(",", "")))
+                for _trace_name, date, navier in points
+            ]
+            matched.append(series)
+
+    if len(matched) == 0:
+        raise ValueError(
+            f"parse_plotly_nav_series: 零匹配 pattern={fund_name_pattern!r}"
+            "（benchmark 已排除）"
+        )
+    if len(matched) > 1:
+        raise ValueError(
+            f"parse_plotly_nav_series: 多 trace 匹配 pattern="
+            f"{fund_name_pattern!r}，匹配数={len(matched)}"
+        )
+
+    series = sorted(matched[0], key=lambda x: x[0])
+    return series
