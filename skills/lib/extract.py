@@ -610,6 +610,7 @@ def parse_html_monthly_table(
         "jul", "aug", "sep", "oct", "nov", "dec",
     ]
     col_map: dict[str, int] = {}
+    expected_cell_count = 0
 
     for line in section.split("\n"):
         if "|" not in line:
@@ -628,9 +629,12 @@ def parse_html_monthly_table(
             hdr_map = {n: i for i, n in enumerate(normed) if n in _HEADER_TOKENS}
             if len(hdr_map) >= 2 and not col_map:
                 col_map = hdr_map
+                expected_cell_count = len(cells)
             continue  # 表头行本身非数据行
         # 数据行需 col_map 已构建（数据行先于表头出现 -> 跳过，不猜测）
         if not col_map:
+            continue
+        if expected_cell_count and len(cells) != expected_cell_count:
             continue
         year_str = cells[0].replace("**", "").strip()
         if not re.fullmatch(r"\d{4}", year_str):
