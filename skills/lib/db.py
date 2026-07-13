@@ -51,7 +51,11 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """CREATE TABLE IF NOT EXISTS(幂等)。建立 funds 与 monthly_returns。"""
+    """CREATE TABLE IF NOT EXISTS(幂等)。建立 funds 与 monthly_returns。
+
+    对已存在的旧库做幂等迁移：funds 表加 shareclass_prefix 列（SQLite 无
+    ADD COLUMN IF NOT EXISTS，先 PRAGMA table_info 查列是否存在）。
+    """
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS funds (
@@ -63,7 +67,8 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             url_type TEXT NOT NULL,
             max_pdf_pages INTEGER,
             verified_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            shareclass_prefix TEXT
         );
 
         CREATE TABLE IF NOT EXISTS monthly_returns (
@@ -78,6 +83,14 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # 幂等迁移：旧库 funds 表无 shareclass_prefix 列时补加。新库 CREATE 已含此列，
+    # PRAGMA 查不到才 ALTER，避免重复加列报错。
+    cols = [
+        r["name"]
+        for r in conn.execute("PRAGMA table_info(funds)").fetchall()
+    ]
+    if "shareclass_prefix" not in cols:
+        conn.execute("ALTER TABLE funds ADD COLUMN shareclass_prefix TEXT")
     conn.commit()
 
 
@@ -92,23 +105,25 @@ def create_fund(
     apir_code: Optional[str] = None,
     max_pdf_pages: Optional[int] = None,
     verified_at: Optional[str] = None,
+    shareclass_prefix: Optional[str] = None,
 ) -> None:
     """插入一只基金(纯 INSERT,不 upsert)。
 
     fund_name / apir_code 的 UNIQUE 冲突抛 sqlite3.IntegrityError;
-    重复注册应报错而非静默覆盖。
+    重复注册应报错而非静默覆盖。shareclass_prefix 存入 funds 表供 audit 读取
+    （B 组跨份额类校验的前缀，None 表示单份额类/不参与跨份额类校验）。
     """
     _require_write_token()
     conn.execute(
         """
         INSERT INTO funds
             (fund_id, fund_name, apir_code, confirmed_url, fetch_method,
-             url_type, max_pdf_pages, verified_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             url_type, max_pdf_pages, verified_at, shareclass_prefix)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             fund_id, fund_name, apir_code, confirmed_url, fetch_method,
-            url_type, max_pdf_pages, verified_at,
+            url_type, max_pdf_pages, verified_at, shareclass_prefix,
         ),
     )
     conn.commit()

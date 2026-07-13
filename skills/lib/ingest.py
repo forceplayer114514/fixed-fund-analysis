@@ -62,6 +62,7 @@ def add_fund(
     verified_at: Optional[str] = None,
     db_path: Optional[str] = None,
     max_workers: Optional[int] = None,
+    shareclass_prefix: Optional[str] = None,
 ) -> dict:
     """全自动流水线。
 
@@ -119,6 +120,7 @@ def add_fund(
         latest_rolling = rolling_per_month.get(latest_ym, {}) if latest_ym else {}
         c_ok, c_block, c_warn = consistency_check(
             fund_id, records, conn, rolling=latest_rolling,
+            shareclass_prefix=shareclass_prefix,
         )
         if not c_ok:
             return {"months": len(records), "start": None, "end": None,
@@ -131,6 +133,7 @@ def add_fund(
             conn, fund_id=fund_id, fund_name=name,
             confirmed_url=confirmed_url, fetch_method=fetch_method,
             url_type=url_type, apir_code=apir, verified_at=verified_at,
+            shareclass_prefix=shareclass_prefix,
         )
         for date, net_return in records:
             upsert_monthly_return(
@@ -167,6 +170,7 @@ def add_fund_from_html_table(
     fetch_method: str = "html",
     verified_at: Optional[str] = None,
     db_path: Optional[str] = None,
+    shareclass_prefix: Optional[str] = None,
 ) -> dict:
     """HTML 表格源全自动流水线（fundmonitors 等聚合站逐月收益表）。
 
@@ -206,6 +210,7 @@ def add_fund_from_html_table(
         ensure_tables(conn)
         c_ok, c_block, c_warn = consistency_check(
             fund_id, records_sorted, conn, rolling=None,
+            shareclass_prefix=shareclass_prefix,
         )
         if not c_ok:
             return {"months": len(records_sorted),
@@ -220,6 +225,7 @@ def add_fund_from_html_table(
             conn, fund_id=fund_id, fund_name=name,
             confirmed_url=confirmed_url, fetch_method=fetch_method,
             url_type=url_type, apir_code=apir, verified_at=verified_at,
+            shareclass_prefix=shareclass_prefix,
         )
         for date, net_return in records_sorted:
             upsert_monthly_return(
@@ -314,6 +320,7 @@ def add_fund_from_plotly_html(
             conn, fund_id=fund_id, fund_name=name,
             confirmed_url=confirmed_url, fetch_method=fetch_method,
             url_type=url_type, apir_code=apir, verified_at=verified_at,
+            shareclass_prefix=shareclass_prefix,
         )
         for date, net_return in records:
             upsert_monthly_return(

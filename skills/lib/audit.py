@@ -1,8 +1,10 @@
 """批量一致性审计：扫所有已入库基金，找静默字段错位存量。
 
-入库后自动触发（ingest 入口末尾调 audit_all_funds）。跨份额类（5/6）按 fund_id
-前缀分组组内互校验；7 所有基金两两相关 >0.98 报嫌疑对（warn）；复利验证需
-rolling（audit 无 rolling 时跳过 compound）。报告写 docs/superpowers/audits/。
+入库后自动触发（ingest 入口末尾调 audit_all_funds）。跨份额类（5/6）按 funds
+表 shareclass_prefix 字段分组组内互校验（入库时由调用方传入，非 fund_id 启发式
+推导——避免 stake_accumulate/stake_growth 等不同基金误判同份额类）；7 所有基金
+两两相关 >0.98 报嫌疑对（warn）；复利验证需 rolling（audit 无 rolling 时跳过
+compound）。报告写 docs/superpowers/audits/。
 """
 from __future__ import annotations
 
@@ -13,14 +15,6 @@ from pathlib import Path
 from typing import Optional
 
 from lib.consistency import consistency_check
-
-
-def _fund_prefix(fund_id: str) -> Optional[str]:
-    """coolabah_frhy_assisted -> coolabah_frhy_；无下划线 -> None。"""
-    idx = fund_id.rfind("_")
-    if idx < 0:
-        return None
-    return fund_id[: idx + 1]
 
 
 def audit_all_funds(conn: sqlite3.Connection) -> dict:
@@ -42,7 +36,12 @@ def audit_all_funds(conn: sqlite3.Connection) -> dict:
             (fid,),
         ).fetchall()
         records = [(r["date"], r["net_return"]) for r in rec_rows]
-        prefix = _fund_prefix(fid)
+        # shareclass_prefix 从 funds 表读（入库时调用方传入），非 fund_id 启发式
+        # 推导--避免 stake_accumulate/stake_growth 等不同基金误判同份额类。
+        row = conn.execute(
+            "SELECT shareclass_prefix FROM funds WHERE fund_id=?", (fid,)
+        ).fetchone()
+        prefix = row["shareclass_prefix"] if row is not None else None
         ok, block, warn = consistency_check(
             fid, records, conn, shareclass_prefix=prefix,
         )
