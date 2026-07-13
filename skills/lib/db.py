@@ -11,6 +11,19 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+
+def _require_write_token() -> None:
+    """写操作凭证检查：FUND_DB_WRITE_TOKEN 未设 -> PermissionError。
+
+    软隔离：提高越权门槛（agent bash 内联无 token 失败）。绝对隔离须 harness
+    sandbox（agent bash 与主对话 DB 写权限完全隔离），超出 skills 代码层。
+    """
+    if not os.environ.get("FUND_DB_WRITE_TOKEN"):
+        raise PermissionError(
+            "DB 写操作需要 FUND_DB_WRITE_TOKEN 环境变量（越权防护软隔离）。"
+            "主对话跑 ingest.py 时由 _cli 注入；探测 agent bash 不继承。"
+        )
+
 # 默认 DB 路径:<仓库根>/data/fund_analysis.db
 # skills/lib/db.py -> parent(lib) -> parent(skills) -> parent(仓库根)
 _DEFAULT_DB_PATH = (
@@ -85,6 +98,7 @@ def create_fund(
     fund_name / apir_code 的 UNIQUE 冲突抛 sqlite3.IntegrityError;
     重复注册应报错而非静默覆盖。
     """
+    _require_write_token()
     conn.execute(
         """
         INSERT INTO funds
@@ -114,6 +128,7 @@ def upsert_monthly_return(
     COALESCE(excluded, 旧值) 处理 -- 仅当传入非 None 时覆盖,传 None 则保留
     旧值。新插入行 nav 暂占位 1.0,由随后的 recompute_nav 重算为正确复利值。
     """
+    _require_write_token()
     conn.execute(
         """
         INSERT INTO monthly_returns (fund_id, date, net_return, nav, commentary_truth)
@@ -135,6 +150,7 @@ def recompute_nav(conn: sqlite3.Connection, fund_id: str) -> None:
     逐行 UPDATE(按主键 id 定位,避免依赖行顺序)。与 webapp crud.recompute_nav
     逻辑一致。
     """
+    _require_write_token()
     rows = conn.execute(
         "SELECT id, net_return FROM monthly_returns "
         "WHERE fund_id = ? ORDER BY date",

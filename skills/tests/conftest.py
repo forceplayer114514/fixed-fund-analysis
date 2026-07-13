@@ -31,3 +31,9 @@ def db_conn(tmp_path):
     ensure_tables(conn)
     yield conn
     conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _write_token(monkeypatch):
+    """所有测试默认带写凭证（避免每个测试显式 setenv）。"""
+    monkeypatch.setenv("FUND_DB_WRITE_TOKEN", "test")
