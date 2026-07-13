@@ -37,3 +37,14 @@ def db_conn(tmp_path):
 def _write_token(monkeypatch):
     """所有测试默认带写凭证（避免每个测试显式 setenv）。"""
     monkeypatch.setenv("FUND_DB_WRITE_TOKEN", "test")
+
+
+@pytest.fixture(autouse=True)
+def _audit_dir(tmp_path, monkeypatch):
+    """所有测试隔离审计报告输出目录到 tmp_path，避免污染仓库 docs/。
+
+    audit_all_funds 末尾 _write_report 读 FUND_AUDIT_DIR；未设则写仓库默认
+    docs/superpowers/audits/。autouse 统一重定向到 tmp_path。需断言写入的
+    测试（test_audit_writes_report_file）仍可在测试体内 setenv 覆盖（同值）。
+    """
+    monkeypatch.setenv("FUND_AUDIT_DIR", str(tmp_path))
