@@ -167,9 +167,47 @@ def _check_bgroup(
     fee_diff_monthly_max: float,
     errors_block: list[str],
 ) -> None:
-    """B 组跨序列校验（Task 3 实现）。"""
-    # 占位，Task 3 填充
-    pass
+    """B 组跨序列校验（依赖 DB 同 family 兄弟）。
+
+    Check 5：同 family 份额类月度收益符号一致（0 值除外，block）。
+    Check 6：份额类月度差值 < fee_diff_monthly_max（默认 0.1%/月）。
+    当前假设无 performance fee 差异；带 perf fee 基金二期加 funds.management_fee/
+    performance_fee 动态容差。
+    """
+    pattern = f"{shareclass_prefix}%"
+    rows = conn.execute(
+        "SELECT fund_id, date, net_return FROM monthly_returns "
+        "WHERE fund_id LIKE ? AND fund_id != ?",
+        (pattern, fund_id),
+    ).fetchall()
+    if not rows:
+        return  # 无兄弟，跳过
+
+    # 按 fund_id 分组
+    siblings: dict[str, dict[str, float]] = {}
+    for r in rows:
+        siblings.setdefault(r["fund_id"], {})[r["date"]] = r["net_return"]
+
+    net = {d: r for d, r in records}
+    for sib_id, sib_net in siblings.items():
+        # Check 5：符号一致（同月，0 值除外）
+        for d, r in net.items():
+            if d in sib_net and r != 0.0 and sib_net[d] != 0.0:
+                if (r > 0) != (sib_net[d] > 0):
+                    errors_block.append(
+                        f"Check 5 份额类符号不一致 {d}: 本基金 {r} vs "
+                        f"{sib_id} {sib_net[d]}"
+                    )
+        # Check 6：月度差值
+        for d, r in net.items():
+            if d in sib_net:
+                diff = abs(r - sib_net[d])
+                if diff > fee_diff_monthly_max:
+                    errors_block.append(
+                        f"Check 6 份额类月度差值超阈值 {d}: 本基金 {r} vs "
+                        f"{sib_id} {sib_net[d]}，差 {diff:.6f} > "
+                        f"{fee_diff_monthly_max}（假设无 performance fee 差异）"
+                    )
 
 
 def _check_correlation(
@@ -180,6 +218,50 @@ def _check_correlation(
     corr_threshold: float,
     errors_warn: list[str],
 ) -> None:
-    """Check 7 相关嫌疑（Task 3 实现）。"""
-    # 占位，Task 3 填充
-    pass
+    """Check 7：新序列 vs DB 其他基金（非同 family）相关系数 > 阈值 -> warn。
+
+    须 >=24 月重叠才判。统计嫌疑非会计恒等式，warn + 人工确认，非 block。
+    Coolabah 产品矩阵天然高相关（同 RBA 现金利率因子），0.98 阈值真实假阳性。
+    """
+    rows = conn.execute(
+        "SELECT fund_id, date, net_return FROM monthly_returns WHERE fund_id != ?",
+        (fund_id,),
+    ).fetchall()
+    if not rows:
+        return
+
+    other_funds: dict[str, dict[str, float]] = {}
+    for r in rows:
+        # 排除同 family（已在 B 组校验）
+        if shareclass_prefix and r["fund_id"].startswith(shareclass_prefix):
+            continue
+        other_funds.setdefault(r["fund_id"], {})[r["date"]] = r["net_return"]
+
+    net = {d: r for d, r in records}
+    for other_id, other_net in other_funds.items():
+        common = sorted(set(net) & set(other_net))
+        if len(common) < 24:
+            continue
+        a = [net[d] for d in common]
+        b = [other_net[d] for d in common]
+        corr = _pearson(a, b)
+        if corr is not None and abs(corr) > corr_threshold:
+            errors_warn.append(
+                f"Check 7 相关嫌疑: vs {other_id} 相关系数 {corr:.4f} > "
+                f"{corr_threshold}（{len(common)} 月重叠，须人工确认）"
+            )
+
+
+def _pearson(a: list[float], b: list[float]) -> Optional[float]:
+    """皮尔逊相关系数。常数序列返回 None（避免除零）。"""
+    n = len(a)
+    if n != len(b) or n == 0:
+        return None
+    ma = sum(a) / n
+    mb = sum(b) / n
+    num = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
+    da = (sum((x - ma) ** 2 for x in a)) ** 0.5
+    db = (sum((x - mb) ** 2 for x in b)) ** 0.5
+    if da == 0 or db == 0:
+        return None
+    return num / (da * db)

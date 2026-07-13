@@ -99,3 +99,48 @@ def test_agroup_fields_missing_skips_not_fails(db_conn):
     ok, block, warn = consistency_check(f["fund_id"], f["net"], db_conn)
     assert ok
     assert block == []
+
+
+def test_fixture_d_misaligned_blocks_on_compound_and_check6(db_conn):
+    """复现 bug：AusBond 当 Institutional，compound + Check 6 拦截。"""
+    f = _load("field_misaligned.json")
+    # 先入库 sibling assisted（DB 兄弟，同 family）
+    sib = f["sibling_assisted"]
+    db_conn.execute(
+        "INSERT INTO funds(fund_id, fund_name, confirmed_url, fetch_method, url_type) "
+        "VALUES(?, ?, ?, ?, ?)",
+        (sib["fund_id"], sib["fund_id"], "http://x", "html", "test"),
+    )
+    for d, r in sib["rows"]:
+        db_conn.execute(
+            "INSERT INTO monthly_returns(fund_id, date, net_return, nav) "
+            "VALUES(?, ?, ?, 1.0)",
+            (sib["fund_id"], d, r),
+        )
+    # 入库非同 family 外部基金（供 Check 7 相关嫌疑）
+    ext = f["sibling_external"]
+    db_conn.execute(
+        "INSERT INTO funds(fund_id, fund_name, confirmed_url, fetch_method, url_type) "
+        "VALUES(?, ?, ?, ?, ?)",
+        (ext["fund_id"], ext["fund_id"], "http://x", "html", "test"),
+    )
+    for d, r in ext["rows"]:
+        db_conn.execute(
+            "INSERT INTO monthly_returns(fund_id, date, net_return, nav) "
+            "VALUES(?, ?, ?, 1.0)",
+            (ext["fund_id"], d, r),
+        )
+    db_conn.commit()
+
+    ok, block, warn = consistency_check(
+        f["fund_id"], f["net"], db_conn,
+        shareclass_prefix=f["shareclass_prefix"],
+        rolling=f["rolling"],
+    )
+    assert not ok, f"应 block，实际 block={block}"
+    # Check 6：份额类月度差值超阈值
+    assert any("Check 6" in e for e in block), f"Check 6 缺失，block={block}"
+    # 复利验证：AusBond 24mo 复利 vs inception rolling 9.05%
+    assert any("复利验证失败" in e for e in block), f"复利验证缺失，block={block}"
+    # Check 7：高相关 -> warn（非 block）
+    assert any("Check 7" in e for e in warn), f"Check 7 缺失，warn={warn}"
