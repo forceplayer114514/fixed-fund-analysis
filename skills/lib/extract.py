@@ -740,6 +740,83 @@ def gate_check_table(
 # ---------------------------------------------------------------------------
 
 
+def _extract_data_array_content(html: str) -> Optional[str]:
+    """提取 Plotly data 数组的括号内内容（不含外层方括号）。
+
+    同时兼容 JS 形式 `var data = [...]` 与 JSON 形式 `"data":[...]`。用括号匹配
+    （跳过字符串字面量内的 `]`）定位配对的 `]`，避免正则跨结构误匹配。找不到
+    data 数组返回 None（调用方回退到全文顶层对象扫描）。
+    """
+    m = re.search(r'(?:var\s+data\s*=\s*\[|"data"\s*:\s*\[)', html)
+    if not m:
+        return None
+    start = m.end()  # 紧跟在 '[' 之后
+    depth = 1
+    i = start
+    in_str = False
+    esc = False
+    while i < len(html) and depth > 0:
+        c = html[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+        i += 1
+    if depth != 0:
+        return None  # 括号不配平，结构损坏
+    return html[start:i - 1]
+
+
+def _split_top_level_objects(s: str) -> list[str]:
+    """把字符串切成顶层 `{...}` 对象子串（括号匹配，跳过字符串字面量）。
+
+    返回每个完整对象（含外层花括号）。用于从 data 数组内容里拆出各 trace 对象。
+    """
+    objs: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == "{":
+            depth = 1
+            j = i + 1
+            in_str = False
+            esc = False
+            while j < n and depth > 0:
+                cc = s[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif cc == "\\":
+                        esc = True
+                    elif cc == '"':
+                        in_str = False
+                else:
+                    if cc == '"':
+                        in_str = True
+                    elif cc == "{":
+                        depth += 1
+                    elif cc == "}":
+                        depth -= 1
+                j += 1
+            if depth == 0:
+                objs.append(s[i:j])
+                i = j
+                continue
+            break  # 括号不配平，停止
+        i += 1
+    return objs
+
+
 def parse_plotly_nav_series(
     html: str,
     fund_name_pattern: str,
@@ -750,30 +827,39 @@ def parse_plotly_nav_series(
     Benchmark/Index/AusBond 的 trace 自动丢弃（结构上 benchmark 不可能混入）。
     多 trace 匹配 pattern -> raise（防 agent 按 trace 顺序猜）。零匹配 -> raise
     （防 pattern 打错时空列表被当"无数据"跳过）。返回 [(date, nav), ...] 升序。
+
+    实现按 trace 对象作用域配对 (name, text)：先括号匹配提取 data 数组，再拆成
+    各 trace 对象，在每个对象内分别取 name 与 text 数组。这样 layout 块里的
+    annotation/axis/legend "name" 字段（无对应 text 数组）不会与 trace 的 text
+    误配对，也无需脆弱的 count-mismatch 校验。
     """
     import re
 
     if not html or not fund_name_pattern:
         raise ValueError("parse_plotly_nav_series: html 与 fund_name_pattern 必填")
 
-    # 提取所有 "text":[...] 数组（Plotly JSON 单行，DOTALL 跨行）
-    text_arrays = re.findall(r'"text":\s*\[([^\]]+)\]', html, re.DOTALL)
-    name_fields = re.findall(r'"name":\s*"([^"]+)"', html)
+    # 优先从 data 数组提取 trace 对象（精确，排除 layout/config）；找不到 data
+    # 数组时回退到全文顶层对象扫描（兼容无 data 包裹的极简 fixture）。
+    data_content = _extract_data_array_content(html)
+    trace_objs = _split_top_level_objects(
+        data_content if data_content is not None else html
+    )
 
-    if len(text_arrays) != len(name_fields):
-        raise ValueError(
-            f"parse_plotly_nav_series: text 数组数 {len(text_arrays)} != "
-            f"name 字段数 {len(name_fields)}，HTML 结构异常"
-        )
-
-    # 过滤 benchmark trace，对剩余 trace 按 pattern 匹配
     benchmark_markers = ("benchmark", "index", "ausbond")
     matched: list[list[tuple[str, float]]] = []
-    for name, text_arr in zip(name_fields, text_arrays):
+    for trace in trace_objs:
+        nm = re.search(r'"name"\s*:\s*"([^"]+)"', trace)
+        if not nm:
+            continue
+        name = nm.group(1)
         name_lower = name.lower()
         if any(m in name_lower for m in benchmark_markers):
             continue  # benchmark 自动丢弃
         if fund_name_pattern.lower() in name_lower:
+            tm = re.search(r'"text"\s*:\s*\[([^\]]+)\]', trace, re.DOTALL)
+            if not tm:
+                continue  # 有 name 无 text 数组：非数据 trace，跳过
+            text_arr = tm.group(1)
             points = re.findall(
                 r'"([^"]*?)<br />(\d{4}-\d{2}-\d{2}):\s*\$([\d,.]+)"',
                 text_arr,
