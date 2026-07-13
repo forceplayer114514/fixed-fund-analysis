@@ -599,33 +599,63 @@ def parse_html_monthly_table(
     records: list[tuple[str, float]] = []
     ytd_map: dict[str, float] = {}
 
+    # 表头文字 -> 列索引映射：按表头文字定位列（非位置索引），容忍列序打乱
+    # （如 YTD 移到 Jan 前）。规范化：strip ** / " %" / "%" / 空白，小写。
+    _HEADER_TOKENS = {
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec", "ytd",
+    }
+    _MONTH_ORDER = [
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    col_map: dict[str, int] = {}
+
     for line in section.split("\n"):
         if "|" not in line:
             continue
         # markdown 表格行：| cell | cell | ... | -> 去首尾管道后 split
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        # 数据行需 >= 14 cell（年 + 12 月 + YTD）
-        if len(cells) < 14:
+        if not cells:
+            continue
+        # 规范化所有 cell 用于表头识别（strip ** / % / 空白，小写）
+        normed = [
+            c.replace("**", "").replace(" %", "").replace("%", "").strip().lower()
+            for c in cells
+        ]
+        # 表头行：首列 "year" 且识别出 >= 2 个月名/ytd -> 建 col_map（仅首个表头）
+        if normed[0] == "year":
+            hdr_map = {n: i for i, n in enumerate(normed) if n in _HEADER_TOKENS}
+            if len(hdr_map) >= 2 and not col_map:
+                col_map = hdr_map
+            continue  # 表头行本身非数据行
+        # 数据行需 col_map 已构建（数据行先于表头出现 -> 跳过，不猜测）
+        if not col_map:
             continue
         year_str = cells[0].replace("**", "").strip()
         if not re.fullmatch(r"\d{4}", year_str):
-            continue  # 跳过表头/分隔行
+            continue  # 跳过分隔行等
         year = int(year_str)
-        # cells[1..12] = Jan..Dec
-        for m_idx in range(12):
-            val = cells[1 + m_idx].strip().replace("**", "")
+        # 按表头定位取月度值（非位置索引），容忍列序打乱与 % 后缀
+        for m_name in _MONTH_ORDER:
+            idx = col_map.get(m_name)
+            if idx is None or idx >= len(cells):
+                continue
+            val = cells[idx].strip().replace("**", "").replace("%", "")
             if val in ("", "N/R", "N/A", "-"):
                 continue
-            # 仅接受 [+-]?\d+\.\d+ 格式，其他跳过（不猜测）
+            # 仅接受 [+-]?\d+\.\d+ 格式（% 已剥离），其他跳过（不猜测）
             if not re.fullmatch(r"[+-]?\d+\.\d+", val):
                 continue
-            month = m_idx + 1
+            month = _MONTH_ORDER.index(m_name) + 1
             date = get_last_day_of_month(year, month).strftime("%Y-%m-%d")
             records.append((date, _pct_to_decimal(val)))
-        # cells[13] = YTD
-        ytd_val = cells[13].strip().replace("**", "")
-        if re.fullmatch(r"[+-]?\d+\.\d+", ytd_val):
-            ytd_map[year_str] = _pct_to_decimal(ytd_val)
+        # YTD 列按表头定位（非固定 cells[13]），剥离 %
+        ytd_idx = col_map.get("ytd")
+        if ytd_idx is not None and ytd_idx < len(cells):
+            ytd_val = cells[ytd_idx].strip().replace("**", "").replace("%", "")
+            if re.fullmatch(r"[+-]?\d+\.\d+", ytd_val):
+                ytd_map[year_str] = _pct_to_decimal(ytd_val)
 
     records.sort(key=lambda x: x[0])
     return records, ytd_map
