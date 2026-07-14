@@ -75,6 +75,7 @@ class DiscoveryReport:
     obtained: list = field(default_factory=list)  # sorted ["YYYY-MM", ...]
     gaps: list = field(default_factory=list)      # sorted ["YYYY-MM", ...] 穷尽后正常产出
     per_level_contribution: dict = field(default_factory=dict)  # {"L0": n, ...}
+    per_level_payload: dict = field(default_factory=dict)  # {"L0": ingest_payload, ...}
     unparseable_links: list = field(default_factory=list)
     pending_input: Optional[dict] = None          # 缺输入挂起(断点续跑)
     human_intervention_needed: bool = False       # 仅 obtained 空集 True
@@ -399,6 +400,7 @@ def run_discovery(
     obtained: set = set()
     unparseable_all: list = []
     per_level: dict = {}
+    per_level_payload: dict = {}
     evidence_log: list = []
     pending_input: Optional[dict] = None
     fail_streak = 0
@@ -427,6 +429,8 @@ def run_discovery(
             pending_input = result.pending_input
         obtained |= new
         per_level[level_key] = len(new)
+        if result.ingest_payload:
+            per_level_payload[level_key] = result.ingest_payload
 
         # ★重点1:下界单向向更早收敛(禁后缩)
         if new:
@@ -454,6 +458,7 @@ def run_discovery(
         obtained=sorted(_ym_to_str(y, m) for y, m in obtained),
         gaps=sorted(_ym_to_str(y, m) for y, m in gaps),
         per_level_contribution=per_level,
+        per_level_payload=per_level_payload,
         unparseable_links=unparseable_all,
         pending_input=pending_input,
         human_intervention_needed=human,

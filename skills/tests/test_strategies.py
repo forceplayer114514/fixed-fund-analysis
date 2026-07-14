@@ -226,8 +226,9 @@ def test_structured_output_fields():
     report = run_discovery(fund_info, probes=probes)
     d = asdict(report)
     for f in ["fund_id", "inception_date", "inception_assumed", "obtained",
-              "gaps", "per_level_contribution", "unparseable_links",
-              "pending_input", "human_intervention_needed", "evidence_log"]:
+              "gaps", "per_level_contribution", "per_level_payload",
+              "unparseable_links", "pending_input", "human_intervention_needed",
+              "evidence_log"]:
         assert f in d, f"缺少字段 {f}"
     # 已删字段不存在(修正3.2.5)
     for gone in ["coverage", "exhausted", "premature_exit", "total_months_obtainable",

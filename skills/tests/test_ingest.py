@@ -344,3 +344,161 @@ def test_add_fund_from_plotly_html_compound_mismatch_blocks(tmp_path, monkeypatc
     ).fetchone()[0]
     conn.close()
     assert cnt == 0
+
+
+# --- ingest_discovery(DiscoveryReport 入库分流,M4)---
+
+from lib.strategies import DiscoveryReport
+from lib.ingest import ingest_discovery
+from lib.db import list_confirmed_gaps, list_pending_review
+
+_PE = {"1mo": None, "3mo": None, "6mo": None, "12mo": None,
+       "inception": None, "parse_error": True}
+
+
+def _disc_report(fund_id="disc_fund", links=None, records=None, gaps=None,
+                 inception_date="2025-02-28"):
+    """构造 DiscoveryReport(per_level_payload L1 links 或 L3 records)。"""
+    if links is not None:
+        payload = {"fetch_method": "pdf", "confirmed_url": "https://example.com/archive",
+                   "links": links}
+        obtained = [ym for ym, _ in links]
+        level = "L1"
+    else:
+        payload = {"fetch_method": "html", "confirmed_url": "https://fm.com/profile",
+                   "records": records}
+        obtained = [d[:7] for d, _ in records]
+        level = "L3"
+    return DiscoveryReport(
+        fund_id=fund_id, inception_date=inception_date,
+        obtained=obtained, gaps=gaps or [],
+        per_level_contribution={level: len(obtained)},
+        per_level_payload={level: payload},
+    )
+
+
+@pytest.mark.unit
+def test_ingest_discovery_success(monkeypatch, tmp_path):
+    """ingest_discovery 全流程:L1 links -> 下载提取 -> gate 通过 -> 入库。"""
+    db_path = str(tmp_path / "test.db")
+    report = _disc_report(
+        links=[("2025-02", "https://x/feb.pdf"), ("2025-03", "https://x/mar.pdf"),
+               ("2025-04", "https://x/apr.pdf")],
+    )
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [("2025-02", 0.005, _PE), ("2025-03", 0.006, _PE), ("2025-04", 0.004, _PE)]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = ingest_discovery(report, "Disc Fund", db_path=db_path)
+    assert result["gate_pass"] is True
+    assert result["months"] == 3
+    conn = get_connection(db_path)
+    try:
+        rows = get_monthly_returns(conn, "disc_fund")
+        assert len(rows) == 3
+        fund = get_fund(conn, "disc_fund")
+        assert fund["inception_date"] == "2025-02-28"
+        assert fund["inception_assumed"] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_ingest_discovery_gaps_to_confirmed_gaps(monkeypatch, tmp_path):
+    """缺口非失败:report.gaps 写 confirmed_gaps,obtained 入库(修正3.2.4)。"""
+    db_path = str(tmp_path / "test.db")
+    report = _disc_report(
+        links=[("2025-02", "https://x/feb.pdf"), ("2025-04", "https://x/apr.pdf")],
+        gaps=["2025-03"],
+    )
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [("2025-02", 0.005, _PE), ("2025-04", 0.004, _PE)]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = ingest_discovery(report, "Gap Fund", db_path=db_path)
+    assert result["gate_pass"] is True  # 缺口非 fail
+    assert result["months"] == 2
+    assert result["gaps"] == ["2025-03"]
+    conn = get_connection(db_path)
+    try:
+        assert len(get_monthly_returns(conn, "disc_fund")) == 2
+        gaps = list_confirmed_gaps(conn, "disc_fund")
+        assert [g["missing_month"] for g in gaps] == ["2025-03"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_ingest_discovery_over_threshold_to_pending(monkeypatch, tmp_path):
+    """|r|>=0.5 超限月进 pending_review,不入 monthly_returns,不丢弃(§5/确认)。"""
+    db_path = str(tmp_path / "test.db")
+    report = _disc_report(
+        links=[("2025-02", "https://x/feb.pdf"), ("2025-03", "https://x/mar.pdf"),
+               ("2025-04", "https://x/apr.pdf")],
+    )
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [
+            ("2025-02", 0.005, _PE),
+            ("2025-03", 0.6, _PE),   # 60% 超限 -> pending
+            ("2025-04", 0.004, _PE),
+        ]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = ingest_discovery(report, "Ovr Fund", db_path=db_path)
+    assert result["gate_pass"] is True  # 超限不 fail,进 pending
+    assert result["months"] == 2  # 02,04 入库(03 进 pending)
+    assert result["pending_review_count"] == 1
+    conn = get_connection(db_path)
+    try:
+        rows = get_monthly_returns(conn, "disc_fund")
+        assert [r["date"] for r in rows] == ["2025-02-28", "2025-04-30"]
+        pending = list_pending_review(conn, "disc_fund")
+        assert len(pending) == 1
+        assert pending[0]["review_reason"] == "abs_return_exceeds_threshold"
+        assert pending[0]["net_return"] == pytest.approx(0.6)
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_ingest_discovery_html_records_payload(tmp_path):
+    """L3 records payload(HTML 表)直接入库,无需下载 PDF。"""
+    db_path = str(tmp_path / "test.db")
+    records = [("2025-01-31", 0.005), ("2025-02-28", 0.006), ("2025-03-31", 0.004)]
+    report = _disc_report(records=records)
+    result = ingest_discovery(report, "HTML Disc Fund", db_path=db_path)
+    assert result["gate_pass"] is True
+    assert result["months"] == 3
+    conn = get_connection(db_path)
+    try:
+        assert len(get_monthly_returns(conn, "disc_fund")) == 3
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_ingest_discovery_fabrication_fail_not_ingested(monkeypatch, tmp_path):
+    """ANTI-FABRICATION(连续3月相同非零值)-> 真 fail,不入库(不进 pending)。"""
+    db_path = str(tmp_path / "test.db")
+    report = _disc_report(
+        links=[("2025-01", "https://x/jan.pdf"), ("2025-02", "https://x/feb.pdf"),
+               ("2025-03", "https://x/mar.pdf"), ("2025-04", "https://x/apr.pdf")],
+    )
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [("2025-01", 0.00657, _PE), ("2025-02", 0.00657, _PE),
+                ("2025-03", 0.00657, _PE), ("2025-04", 0.005, _PE)]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = ingest_discovery(report, "Fab Fund", db_path=db_path)
+    assert result["gate_pass"] is False
+    assert any("ANTI-FABRICATION" in e for e in result["errors"])
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        assert get_fund(conn, "disc_fund") is None
+    finally:
+        conn.close()

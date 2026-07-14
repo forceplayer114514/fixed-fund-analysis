@@ -18,9 +18,11 @@ from typing import Callable, Optional
 from lib.audit import audit_all_funds
 from lib.consistency import consistency_check
 from lib.db import (
+    add_pending_review,
     create_fund,
     ensure_tables,
     get_connection,
+    record_confirmed_gap,
     upsert_monthly_return,
 )
 from lib.extract import (
@@ -353,6 +355,161 @@ def add_fund_from_plotly_html(
     }
 
 
+def ingest_discovery(
+    report,
+    name: str,
+    *,
+    db_path: Optional[str] = None,
+    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
+    max_workers: Optional[int] = None,
+    shareclass_prefix: Optional[str] = None,
+    apir: Optional[str] = None,
+    verified_at: Optional[str] = None,
+    url_type: str = "archive_page",
+    dest_dir: Optional[str] = None,
+) -> dict:
+    """接 DiscoveryReport 入库分流(M4 集合差驱动入库入口)。
+
+    遍历 report.per_level_payload(按 L0->L3 保序):
+    - L1/L2 PDF(links):download_and_extract_parallel 下载提取
+    - L3 HTML(records):直接用
+    - L0 local:跳过(已入库)
+    合并 records(去重 by date,低 level 优先)。
+
+    gate_check 分类(缺口非失败,修正3.2.4):
+    - 缺口 -> report.gaps 写 confirmed_gaps(不 fail)
+    - |r|>=0.5 -> pending_review(不丢弃,§5 闸门/确认);over 月存在时复利
+      验证降级(over 月致复利不可靠,不因连带复利 fail)
+    - ANTI-FABRICATION / 复利 fail(无 over 时)-> 真 fail 不入库
+
+    create_fund 存 inception_date/inception_assumed(从 report)。
+
+    Returns: {'months','start','end','gaps','gate_pass','errors',
+              'failed_months','pending_review_count','short_history_warning'}
+    """
+    import tempfile
+
+    records: list[tuple[str, float]] = []
+    rolling_per_month: dict = {}
+    seen_dates: set = set()
+    failed_months: list = []
+    best_payload: Optional[dict] = None
+
+    for level_key, payload in report.per_level_payload.items():
+        if not payload:
+            continue
+        if best_payload is None and payload.get("fetch_method") != "local":
+            best_payload = payload
+        if payload.get("fetch_method") == "local":
+            continue  # L0 已入库,跳过
+        if "links" in payload:
+            if dest_dir is None:
+                dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
+            results = download_and_extract_parallel(
+                payload["links"], dest_dir,
+                max_workers=max_workers, extractor=extractor,
+            )
+            for ym, commentary, rolling in results:
+                if commentary is None:
+                    failed_months.append(ym)
+                    continue
+                date = _ym_to_month_end(ym)
+                if date is None:
+                    failed_months.append(ym)
+                    continue
+                if date in seen_dates:
+                    continue
+                seen_dates.add(date)
+                records.append((date, commentary))
+                rolling_per_month[ym] = rolling
+        elif "records" in payload:
+            for date_str, ret in payload["records"]:
+                if date_str in seen_dates:
+                    continue
+                seen_dates.add(date_str)
+                records.append((date_str, ret))
+
+    if not records:
+        return {"months": 0, "start": None, "end": None, "gaps": report.gaps,
+                "gate_pass": False,
+                "errors": ["无 records 可入库(提取全失败或无 payload)"],
+                "failed_months": failed_months, "pending_review_count": 0,
+                "short_history_warning": True}
+
+    # gate_check:缺口 -> confirmed_gaps(不 fail);|r|>=0.5 -> pending;
+    # over 月存在时复利降级;ANTI-FABRICATION/复利(无 over)-> fail
+    _pass_ok, errors = gate_check(records, rolling_per_month)
+    over_threshold = {d for d, r in records if abs(r) >= 0.5}
+    has_over = bool(over_threshold)
+    other_errors = [
+        e for e in errors
+        if "缺口" not in e
+        and "字段异常" not in e
+        and not (has_over and "复利验证失败" in e)
+    ]
+    if other_errors:
+        records_sorted = sorted(records, key=lambda x: x[0])
+        return {"months": len(records_sorted),
+                "start": records_sorted[0][0] if records_sorted else None,
+                "end": records_sorted[-1][0] if records_sorted else None,
+                "gaps": report.gaps, "gate_pass": False, "errors": other_errors,
+                "failed_months": failed_months, "pending_review_count": 0,
+                "short_history_warning": len(records_sorted) < 36}
+
+    # 入库(over 月 -> pending_review;其余 -> monthly_returns;gaps -> confirmed_gaps)
+    confirmed_url = (best_payload or {}).get("confirmed_url", "")
+    fetch_method = (best_payload or {}).get("fetch_method", "pdf")
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        create_fund(
+            conn, fund_id=report.fund_id, fund_name=name,
+            confirmed_url=confirmed_url, fetch_method=fetch_method,
+            url_type=url_type, apir_code=apir, verified_at=verified_at,
+            shareclass_prefix=shareclass_prefix,
+            inception_date=report.inception_date,
+            inception_assumed=1 if report.inception_assumed else 0,
+        )
+        pending_count = 0
+        for date, r in records:
+            if date in over_threshold:
+                add_pending_review(
+                    conn, fund_id=report.fund_id, date=date, net_return=r,
+                    extract_method="code",
+                    gate_result="abs_return_exceeds_threshold",
+                    review_reason="abs_return_exceeds_threshold",
+                )
+                pending_count += 1
+            else:
+                upsert_monthly_return(
+                    conn, fund_id=report.fund_id, date=date,
+                    net_return=r, commentary_truth=r,
+                )
+        exhausted = ",".join(report.per_level_contribution.keys()) or "L0,L1,L2,L3"
+        for gap_ym in report.gaps:
+            record_confirmed_gap(
+                conn, fund_id=report.fund_id, missing_month=gap_ym,
+                exhausted_levels=exhausted,
+            )
+        audit_all_funds(conn)
+    finally:
+        conn.close()
+
+    records_sorted = sorted(records, key=lambda x: x[0])
+    ingested = [d for d, _ in records_sorted if d not in over_threshold]
+    return {
+        "months": len(ingested),
+        "start": ingested[0] if ingested else None,
+        "end": ingested[-1] if ingested else None,
+        "gaps": report.gaps,
+        "gate_pass": True,
+        "errors": [],
+        "failed_months": failed_months,
+        "pending_review_count": pending_count,
+        "short_history_warning": len(records_sorted) < 36,
+    }
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description="skills 全自动入库流水线")
     parser.add_argument(
@@ -385,6 +542,17 @@ def _cli() -> int:
     pl_p.add_argument("--confirmed-url", required=True)
     pl_p.add_argument("--apir", default=None)
     pl_p.add_argument("--verified-at", default=None)
+    disc_p = sub.add_parser("discover", help="LLM 定位归档页 URL 后代码全流程(抓取+run_discovery+ingest_discovery)")
+    disc_p.add_argument("--fund-id", required=True)
+    disc_p.add_argument("--name", required=True)
+    disc_p.add_argument("--url", required=True, help="已验证归档页 URL(L1,LLM 定位)")
+    disc_p.add_argument("--inception-date", default=None)
+    disc_p.add_argument("--inception-assumed", action="store_true")
+    disc_p.add_argument("--latest-month", default=None)
+    disc_p.add_argument("--issuer-domain", default=None)
+    disc_p.add_argument("--apir", default=None)
+    disc_p.add_argument("--verified-at", default=None)
+    disc_p.add_argument("--db-path", default=None)
     args = parser.parse_args()
 
     if args.write_token is not None:
@@ -413,6 +581,35 @@ def _cli() -> int:
             rolling_pdf_path=args.rolling_pdf,
             fund_name_pattern=args.fund_name_pattern,
             shareclass_prefix=args.shareclass_prefix,
+            apir=args.apir, verified_at=args.verified_at,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0 if result["gate_pass"] else 1
+    if args.command == "discover":
+        from lib.strategies import run_discovery
+        import subprocess
+        r = subprocess.run(
+            ["curl", "-sL", "--max-time", "60", args.url],
+            capture_output=True, text=True, timeout=70,
+        )
+        archive_html = r.stdout if r.returncode == 0 and r.stdout else ""
+        if not archive_html:
+            print(json.dumps({"gate_pass": False,
+                              "errors": [f"curl 抓归档页失败: {args.url}"]},
+                             ensure_ascii=False))
+            return 1
+        fund_info = {
+            "fund_id": args.fund_id, "confirmed_url": args.url,
+            "archive_markdown": archive_html,
+            "inception_date": args.inception_date,
+            "inception_assumed": args.inception_assumed,
+            "latest_month": args.latest_month,
+            "issuer_domain": args.issuer_domain,
+            "db_path": args.db_path,
+        }
+        report = run_discovery(fund_info)
+        result = ingest_discovery(
+            report, args.name, db_path=args.db_path,
             apir=args.apir, verified_at=args.verified_at,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
