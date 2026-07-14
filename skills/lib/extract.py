@@ -83,14 +83,16 @@ def extract_month_prefix(filename: str) -> Optional[str]:
     if date_match:
         year = int(date_match.group(2))
         month = int(date_match.group(3))
-        return f"{year}-{month:02d}"
+        if 1 <= month <= 12:
+            return f"{year}-{month:02d}"
 
     # 2. YYYYMM（前后需非数字边界）
     date_match_short = re.search(r"(\b|[^0-9])(\d{4})(\d{2})(\b|[^0-9])", filename)
     if date_match_short:
         year = int(date_match_short.group(2))
         month = int(date_match_short.group(3))
-        return f"{year}-{month:02d}"
+        if 1 <= month <= 12:
+            return f"{year}-{month:02d}"
 
     # 3. 月份名 + 年（先尝试月份名在前，再尝试年在前）
     month_names_pattern = "|".join(MONTH_MAP.keys())

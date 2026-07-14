@@ -79,6 +79,17 @@ def test_extract_month_prefix():
     assert extract_month_prefix("random-file-no-date.pdf") is None
 
 
+def test_extract_month_prefix_rejects_invalid_month():
+    """策略1/2 误匹配非法月份(如 URL hash 262821=2628年21月)-> None,不提 2628-21。
+
+    端到端 stake discover 发现:assets.contentstack.io URL 含 hash 262821 被策略1
+    误提为 YYYYMMDD 2628-21(month=21 非法),_ym_to_month_end 拒入 failed_months。
+    策略1/2 须校验 1<=month<=12。
+    """
+    assert extract_month_prefix("prefix-262821-suffix.pdf") is None
+    assert extract_month_prefix("26282199.pdf") is None  # 2628年21月 非法
+
+
 # --- 5. parse_date_string ---
 def test_parse_date_string():
     """多种日期格式统一解析成月末 YYYY-MM-DD。"""
