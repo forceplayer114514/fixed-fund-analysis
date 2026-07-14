@@ -4,31 +4,14 @@ import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent, MarkLineComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { useStore, type Period } from '../store/useStore'
+import { useStore } from '../store/useStore'
 import type { FundReturns } from '../lib/rebase'
-import { rollingExcess } from '../lib/rebase'
+import { rollingExcess, computeAxisMonths } from '../lib/rebase'
+import { buildShortCodeMap } from '../lib/fundCodes'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer])
 
 const COLORS = ['#4fc3f7', '#7c4dff', '#ff7043', '#66bb6a', '#ffca28', '#ec407a', '#26c6da', '#ab47bc']
-
-/** 与 NavChart 同口径算显示月份轴 */
-function computeAxisMonths(months: string[], funds: FundReturns[], period: Period, anchorFundId: string | null): string[] {
-  if (anchorFundId) {
-    const anchor = funds.find(f => f.fund_id === anchorFundId)
-    if (!anchor) return months
-    const tA = anchor.dates[0].slice(0, 7)
-    const end = funds.map(f => f.dates[f.dates.length - 1].slice(0, 7)).sort().pop()!
-    return months.filter(m => m >= tA && m <= end)
-  }
-  if (period === 'full') return months
-  if (period === '1y') return months.slice(-12)
-  if (period === '3y') return months.slice(-36)
-  const sets = funds.map(f => new Set(f.dates.map(d => d.slice(0, 7))))
-  let common = sets[0] ?? new Set<string>()
-  for (const s of sets.slice(1)) common = new Set([...common].filter(m => s.has(m)))
-  return months.filter(m => common.has(m))
-}
 
 export default function RollingExcessChart() {
   const timeSeriesData = useStore(s => s.timeSeriesData)
@@ -36,6 +19,8 @@ export default function RollingExcessChart() {
   const period = useStore(s => s.period)
   const anchorFundId = useStore(s => s.anchorFundId)
   const smoothingMode = useStore(s => s.smoothingMode)
+  const allFunds = useStore(s => s.funds)
+  const codeMap = useMemo(() => buildShortCodeMap(allFunds), [allFunds])
 
   const option = useMemo(() => {
     if (!timeSeriesData || timeSeriesData.series.length === 0) return null
@@ -64,7 +49,7 @@ export default function RollingExcessChart() {
       })
       return {
         id: `roll:${f.fund_id}`,
-        name: short ? `${f.fund_name}（历史不足12个月）` : f.fund_name,
+        name: short ? `${codeMap.get(f.fund_id) ?? f.fund_name}（历史不足12个月）` : (codeMap.get(f.fund_id) ?? f.fund_name),
         type: 'line' as const,
         data,
         connectNulls: false,
@@ -98,8 +83,8 @@ export default function RollingExcessChart() {
           return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.length ? lines.join('<br/>') : '无数据'}`
         },
       },
-      legend: { bottom: 0, textStyle: { fontSize: 12 } },
-      grid: { left: 60, right: 20, top: 20, bottom: 50 },
+      legend: { top: 0, textStyle: { fontSize: 12 } },
+      grid: { left: 60, right: 20, top: 30, bottom: 50 },
       xAxis: { type: 'category', data: axisMonths,
         axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
       yAxis: { type: 'value', min: yMin, max: yMax,
@@ -108,7 +93,7 @@ export default function RollingExcessChart() {
       dataZoom: [{ type: 'inside', start: 0, end: 100 }],
       series,
     }
-  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode])
+  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode, codeMap])
 
   if (!option) {
     return <div className="h-80 flex items-center justify-center text-gray-400 text-sm">加载中...</div>

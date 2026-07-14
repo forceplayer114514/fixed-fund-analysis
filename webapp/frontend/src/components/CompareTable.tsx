@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import type { FundMetrics } from '../types'
+import WarnBadge from './WarnBadge'
+import { buildShortCodeMap } from '../lib/fundCodes'
 
 /** 小样本门禁阈值（PDD 1.5）：n < 24 时 IR/胜率名次置灰 + 角标。 */
 const SMALL_SAMPLE_THRESHOLD = 24
@@ -32,11 +34,14 @@ export default function CompareTable() {
   const compareData = useStore(s => s.compareData)
   const smoothingMode = useStore(s => s.smoothingMode)
   const funds = useStore(s => s.funds)
+  const period = useStore(s => s.period)
+  const anchorFundId = useStore(s => s.anchorFundId)
   const fundNameMap = useMemo(() => {
     const m = new Map<string, string>()
     funds.forEach(f => m.set(f.fund_id, f.fund_name))
     return m
   }, [funds])
+  const codeMap = useMemo(() => buildShortCodeMap(funds), [funds])
 
   const rows = useMemo(() => {
     if (!compareData) return []
@@ -85,11 +90,30 @@ export default function CompareTable() {
     })
   }, [compareData, smoothingMode])
 
+  // F5：窗口说明（共同区间/1y/3y 显示起止+n；full 或锚定显示对应口径），消除满屏⚠困惑
+  const windowNote = useMemo(() => {
+    if (anchorFundId) return '锚定模式 · 锚定基金完整历史'
+    const items = compareData?.funds ?? []
+    if (period === 'full' || items.length === 0) return '全部区间'
+    const endYM = items[0].date_period
+    const n = items[0].excess_sample_months ?? 0
+    if (!endYM || n === 0) return ''
+    const [y, m] = endYM.split('-').map(Number)
+    const startIdx = (y * 12 + (m - 1)) - (n - 1)
+    const sy = Math.floor(startIdx / 12)
+    const sm = (startIdx % 12) + 1
+    const startYM = `${sy}-${String(sm).padStart(2, '0')}`
+    return `当前窗口: ${startYM} 至 ${endYM} (n=${n})`
+  }, [period, anchorFundId, compareData])
+
   if (rows.length === 0) return null
 
   return (
     <div className="bg-white rounded-lg p-5 shadow-sm">
-      <h3 className="text-sm text-gray-400 mb-4">指标对比</h3>
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-sm text-gray-400">指标对比</h3>
+        {windowNote && <span className="text-xs text-gray-400">{windowNote}</span>}
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -107,16 +131,17 @@ export default function CompareTable() {
           <tbody>
             {rows.map(r => (
               <tr key={r.fund_id} className="border-b border-gray-50 hover:bg-gray-50">
-                <td className="py-2.5 px-3 font-medium max-w-xs truncate" title={fundNameMap.get(r.fund_id) ?? r.fund_id}>{fundNameMap.get(r.fund_id) ?? r.fund_id}</td>
+                <td className="py-2.5 px-3 font-medium max-w-xs truncate" title={fundNameMap.get(r.fund_id) ?? r.fund_id}>
+                  {fundNameMap.get(r.fund_id) ?? r.fund_id}
+                  <span className="ml-1.5 text-xs text-gray-400 font-normal">{codeMap.get(r.fund_id)}</span>
+                </td>
                 {/* 年化收益率：无名次括号（PDD 1.3） */}
                 <td className="py-2.5 px-3">{r.annReturn}</td>
                 <td className="py-2.5 px-3">{r.excess} ({r.excessRank})</td>
                 <td className="py-2.5 px-3">
                   {r.ir == null ? '-' : r.ir.toFixed(2)}
                   {r.irRank != null && <span className="text-xs text-gray-400 ml-1">({r.irRank})</span>}
-                  {r.small && (
-                    <span className="ml-1 text-orange-400 cursor-help" title={`样本不足(n=${r.n})，统计指标不可靠`}>⚠</span>
-                  )}
+                  {r.small && <WarnBadge note={`样本不足(n=${r.n})，统计指标不可靠`} />}
                 </td>
                 <td className="py-2.5 px-3">
                   {r.dd} ({r.ddRank}) <span className="text-xs text-gray-400">· {r.recoveryLabel}</span>
@@ -124,9 +149,7 @@ export default function CompareTable() {
                 <td className="py-2.5 px-3">
                   {r.winRate}
                   {r.winRank != null && <span className="text-xs text-gray-400 ml-1">({r.winRank})</span>}
-                  {r.small && (
-                    <span className="ml-1 text-orange-400 cursor-help" title={`样本不足(n=${r.n})，统计指标不可靠`}>⚠</span>
-                  )}
+                  {r.small && <WarnBadge note={`样本不足(n=${r.n})，统计指标不可靠`} />}
                 </td>
                 <td className="py-2.5 px-3">{r.run}</td>
                 <td className="py-2.5 px-3">{r.vol}</td>

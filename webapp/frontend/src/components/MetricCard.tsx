@@ -1,3 +1,5 @@
+import WarnBadge from './WarnBadge'
+
 interface Props {
   label: string
   value: string | number
@@ -14,9 +16,7 @@ export default function MetricCard({ label, value, rank, subtext, warn, warnNote
     <div className="flex-1 min-w-[140px] bg-white rounded-lg p-4 shadow-sm">
       <div className="text-xs text-gray-400 mb-1">
         {label}
-        {warn && warnNote && (
-          <span className="ml-1 text-orange-400 cursor-help" title={warnNote}>⚠</span>
-        )}
+        {warn && warnNote && <WarnBadge note={warnNote} />}
       </div>
       <div className="text-lg font-semibold">
         {value ?? '-'}

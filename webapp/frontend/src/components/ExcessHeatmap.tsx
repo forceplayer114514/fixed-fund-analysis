@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { monthlyExcess, monthlyBench, type FundReturns } from '../lib/rebase'
+import { buildShortCodeMap } from '../lib/fundCodes'
 
 /** 月度超额热力图（PDD 2.6）：仅锚定时渲染于 CompareTable 下方。
  *  单元格 e_t = r_fund − monthlyBench(rba)（与 Phase 1 管道口径一致）；缺月灰格；发散色标 0 中心。 */
@@ -8,6 +9,8 @@ export default function ExcessHeatmap() {
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const anchorFundId = useStore(s => s.anchorFundId)
   const smoothingMode = useStore(s => s.smoothingMode)
+  const funds = useStore(s => s.funds)
+  const codeMap = useMemo(() => buildShortCodeMap(funds), [funds])
 
   const rows = useMemo(() => {
     if (!anchorFundId || !timeSeriesData) return null
@@ -37,11 +40,12 @@ export default function ExcessHeatmap() {
   if (!rows || !anchorFundId) return null
   const months = Array.from({ length: 12 }, (_, i) => i + 1)
   const fundName = timeSeriesData?.series.find(s => s.fund_id === anchorFundId)?.fund_name ?? anchorFundId
+  const fundCode = codeMap.get(anchorFundId) ?? anchorFundId
 
   return (
     <div className="bg-white rounded-lg p-5 shadow-sm mb-5">
       <h3 className="text-sm text-gray-400 mb-3">
-        月度超额热力图 · <span className="text-gray-700 font-medium">{fundName}</span>
+        月度超额热力图 · <span className="text-gray-700 font-medium" title={fundName}>{fundCode}</span>
       </h3>
       <div className="overflow-x-auto">
         <table className="text-xs border-collapse">

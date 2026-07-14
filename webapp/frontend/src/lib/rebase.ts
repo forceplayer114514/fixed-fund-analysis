@@ -32,6 +32,32 @@ export interface RebasedSeries {
   degraded?: boolean
 }
 
+/**
+ * 按状态算 x 轴显示月份（NavChart / RollingExcessChart / CompareTable 共用，F3 去重）。
+ *  A full：全历史并集；B 1y/3y：末段 12/36 月；B common：选中基金月份交集；
+ *  C 锚定：[t_A, max(所有基金末月)]（修正2，容纳降级基金延伸至锚定之后）。
+ *  period 取 string 以避免与 store 循环依赖；调用方传 Period 字面量。
+ */
+export function computeAxisMonths(
+  months: string[], funds: FundReturns[], period: string, anchorFundId: string | null,
+): string[] {
+  if (anchorFundId) {
+    const anchor = funds.find(f => f.fund_id === anchorFundId)
+    if (!anchor) return months
+    const tA = anchor.dates[0].slice(0, 7)
+    const end = funds.map(f => f.dates[f.dates.length - 1].slice(0, 7)).sort().pop()!
+    return months.filter(m => m >= tA && m <= end)
+  }
+  if (period === 'full') return months
+  if (period === '1y') return months.slice(-12)
+  if (period === '3y') return months.slice(-36)
+  // common：选中基金月份交集
+  const sets = funds.map(f => new Set(f.dates.map(d => d.slice(0, 7))))
+  let common = sets[0] ?? new Set<string>()
+  for (const s of sets.slice(1)) common = new Set([...common].filter(m => s.has(m)))
+  return months.filter(m => common.has(m))
+}
+
 /** RBA 年化利率 -> 月化基准收益（修正B：单一工具，热力图 + 滚动超额共用，杜绝分叉） */
 export function monthlyBench(rbaAnnual: number): number {
   return rbaAnnual / 12.0

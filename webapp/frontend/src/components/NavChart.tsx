@@ -7,40 +7,21 @@ import {
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
+  MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { useStore, type Period } from '../store/useStore'
+import { useStore } from '../store/useStore'
 import type { FundReturns } from '../lib/rebase'
 import {
-  rebasePlain, rebaseAnchored, drawdownSeries, type RebasedSeries,
+  rebasePlain, rebaseAnchored, drawdownSeries, computeAxisMonths, type RebasedSeries,
 } from '../lib/rebase'
+import { buildShortCodeMap } from '../lib/fundCodes'
 import RollingExcessChart from './RollingExcessChart'
 
 echarts.use([LineChart, ScatterChart, GridComponent, TooltipComponent,
-  LegendComponent, DataZoomComponent, CanvasRenderer])
+  LegendComponent, DataZoomComponent, MarkLineComponent, CanvasRenderer])
 
 const COLORS = ['#4fc3f7', '#7c4dff', '#ff7043', '#66bb6a', '#ffca28', '#ec407a', '#26c6da', '#ab47bc']
-
-/** 按状态算 x 轴月份：A=full，B=窗口(前端裁剪 full)，C=[t_A, max 末月]（修正2） */
-function computeAxisMonths(
-  months: string[], funds: FundReturns[], period: Period, anchorFundId: string | null,
-): string[] {
-  if (anchorFundId) {
-    const anchor = funds.find(f => f.fund_id === anchorFundId)
-    if (!anchor) return months
-    const tA = anchor.dates[0].slice(0, 7)
-    const end = funds.map(f => f.dates[f.dates.length - 1].slice(0, 7)).sort().pop()!
-    return months.filter(m => m >= tA && m <= end)
-  }
-  if (period === 'full') return months
-  if (period === '1y') return months.slice(-12)
-  if (period === '3y') return months.slice(-36)
-  // common：选中基金月份交集
-  const sets = funds.map(f => new Set(f.dates.map(d => d.slice(0, 7))))
-  let common = sets[0] ?? new Set<string>()
-  for (const s of sets.slice(1)) common = new Set([...common].filter(m => s.has(m)))
-  return months.filter(m => common.has(m))
-}
 
 export default function NavChart() {
   const timeSeriesData = useStore(s => s.timeSeriesData)
@@ -51,19 +32,28 @@ export default function NavChart() {
   const chartMetric = useStore(s => s.chartMetric)
   const setChartMetric = useStore(s => s.setChartMetric)
   const setAnchor = useStore(s => s.setAnchor)
-
-  const option = useMemo(() => {
-    if (!timeSeriesData || timeSeriesData.series.length === 0) return null
+  const allFunds = useStore(s => s.funds)
+  const codeMap = useMemo(() => buildShortCodeMap(allFunds), [allFunds])
+  // 选中的基金收益序列（组件级，option 与 onEvents 共用）
+  const funds: FundReturns[] = useMemo(() => {
+    if (!timeSeriesData) return []
     const isOrig = smoothingMode === 'original'
-    const funds: FundReturns[] = timeSeriesData.series
+    return timeSeriesData.series
       .filter(s => selectedFundIds.includes(s.fund_id))
       .map(s => ({
-        fund_id: s.fund_id,
-        fund_name: s.fund_name,
-        dates: s.dates,
+        fund_id: s.fund_id, fund_name: s.fund_name, dates: s.dates,
         returns: (isOrig ? s.returns : (s.unsm_returns ?? s.returns)),
       }))
-    if (funds.length === 0) return null
+  }, [timeSeriesData, selectedFundIds, smoothingMode])
+  // seriesName（短码）-> fund_id，供 onEvents click 反查（echarts click params 无 seriesId）
+  const nameToFundId = useMemo(() => {
+    const m = new Map<string, string>()
+    funds.forEach(f => m.set(codeMap.get(f.fund_id) ?? f.fund_name, f.fund_id))
+    return m
+  }, [funds, codeMap])
+
+  const option = useMemo(() => {
+    if (!timeSeriesData || funds.length === 0) return null
 
     const axisMonths = computeAxisMonths(timeSeriesData.months, funds, period, anchorFundId)
 
@@ -85,8 +75,9 @@ export default function NavChart() {
     const inC = anchorFundId != null
     const navSeries = rebased.map((r, i) => ({
       id: `nav:${r.fund_id}`,
-      name: r.fund_name,
+      name: codeMap.get(r.fund_id) ?? r.fund_name,
       type: 'line' as const,
+      triggerLineEvent: true,
       xAxisIndex: 0,
       yAxisIndex: 0,
       data: r.nav,
@@ -99,11 +90,20 @@ export default function NavChart() {
       },
       itemStyle: { color: COLORS[i % COLORS.length] },
       z: r.isAnchor ? 10 : 2,
+      // F2：NAV y 轴 1.0 起点基准线（A/B/C 均显示，参考线非数据修饰；silent 不吞 click）
+      markLine: i === 0 ? {
+        symbol: 'none',
+        silent: true,
+        data: [{ yAxis: 1.0 }],
+        lineStyle: { color: '#bbb', type: 'dashed', width: 1 },
+        label: { show: true, position: 'end', formatter: '起点', color: '#999', fontSize: 10 },
+      } : undefined,
     }))
     const ddSeries = rebased.map((r, i) => ({
       id: `dd:${r.fund_id}`,
-      name: r.fund_name,
+      name: codeMap.get(r.fund_id) ?? r.fund_name,
       type: 'line' as const,
+      triggerLineEvent: true,
       xAxisIndex: 1,
       yAxisIndex: 1,
       data: drawdowns[i],
@@ -122,13 +122,13 @@ export default function NavChart() {
         type: 'scatter' as const,
         xAxisIndex: 0,
         yAxisIndex: 0,
-        name: r.fund_name,
+        name: codeMap.get(r.fund_id) ?? r.fund_name,
         data: [[r.splicePoint!.month, r.splicePoint!.value]],
         symbolSize: 10,
         itemStyle: { color: 'transparent', borderColor: '#555', borderWidth: 1.5 },
         tooltip: {
           formatter: () =>
-            `自 ${r.splicePoint!.month} 起加入对比，承接锚定基金上月累计值`,
+            `${codeMap.get(r.fund_id) ?? r.fund_name}：自 ${r.splicePoint!.month} 起加入对比，承接锚定基金上月累计值`,
         },
         z: 20,
       }))
@@ -147,10 +147,10 @@ export default function NavChart() {
           return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.join('<br/>')}`
         },
       },
-      legend: { bottom: 0, textStyle: { fontSize: 12 } },
+      legend: { top: 0, textStyle: { fontSize: 12 } },
       grid: [
-        { left: 60, right: 20, top: 20, height: 300 },
-        { left: 60, right: 20, top: 350, height: 150 },
+        { left: 60, right: 20, top: 30, height: 290 },
+        { left: 60, right: 20, top: 345, height: 150 },
       ],
       xAxis: [
         { type: 'category', data: axisMonths, gridIndex: 0,
@@ -169,15 +169,16 @@ export default function NavChart() {
       dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }],
       series: [...navSeries, ...ddSeries, ...splicePoints],
     }
-  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode])
+  }, [timeSeriesData, funds, period, anchorFundId, codeMap])
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
-      const sid: string | undefined = params?.seriesId
-      if (sid && sid.startsWith('nav:')) setAnchor(sid.slice(4))
-      else if (sid && sid.startsWith('dd:')) setAnchor(sid.slice(3))
+      // echarts click params 无 seriesId 字段，用 seriesName（短码）反查 fund_id；
+      // nav/dd/splicePoint 的 seriesName 均为该基金短码，统一处理。
+      const fundId = nameToFundId.get(params?.seriesName)
+      if (fundId) setAnchor(fundId)
     },
-  }), [setAnchor])
+  }), [setAnchor, nameToFundId])
 
   return (
     <div className="bg-white rounded-lg p-5 shadow-sm mb-5">
