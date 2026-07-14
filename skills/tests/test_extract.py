@@ -633,3 +633,91 @@ def test_bentham_rolling_insufficient_tokens():
     text = "Total return (after fees)1\n-0.02\n-0.40\nBenchmark\n"
     r = extract_bentham_rolling(text)
     assert r["parse_error"] is True
+
+
+# --- M3: ExtractedReturn + ArchiveLinks(unparseable 不静默消失)---
+from lib.extract import (
+    ExtractedReturn,
+    extract_archive_links,
+    extract_commentary_return_full,
+    extract_bentham_net_return_full,
+    extract_pdf_one_full,
+)
+
+
+def test_extract_commentary_return_full_has_quote():
+    r = extract_commentary_return_full("The Fund returned 0.53% in April 2025.")
+    assert isinstance(r, ExtractedReturn)
+    assert r.value == 0.0053
+    assert "returned 0.53%" in r.source_quote
+
+
+def test_extract_commentary_return_full_no_match():
+    assert extract_commentary_return_full("no pct here") is None
+
+
+def test_extract_bentham_net_return_full_has_quote():
+    text = "had a total return (after fees) of -0.02% in September."
+    r = extract_bentham_net_return_full(text)
+    assert isinstance(r, ExtractedReturn)
+    assert r.value == -0.0002
+    assert "after fees" in r.source_quote
+
+
+def test_extract_pdf_one_full_returns_extracted_return(monkeypatch):
+    fake_text = (
+        "The Fund returned 0.53% in April. "
+        "Performance 1 month 3 months 6 months 12 months Since inception "
+        "Class A 0.53% 1.50% 3.00% 5.89% 6.91%"
+    )
+    monkeypatch.setattr(
+        "lib.extract.parse_pdf_text", lambda p, max_pages=None: fake_text
+    )
+    commentary, rolling = extract_pdf_one_full("/fake/path.pdf")
+    assert isinstance(commentary, ExtractedReturn)
+    assert commentary.value == 0.0053
+    assert "returned 0.53%" in commentary.source_quote
+    assert rolling["12mo"] == 0.0589
+
+
+def test_extract_archive_links_parsed_and_unparseable():
+    """★重点2:解析不出月份的 PDF 链接进 unparseable,不静默消失。"""
+    md = (
+        "# Reports\n"
+        "- April 2025: [Report](https://example.com/apr-2025.pdf)\n"
+        "- Mystery: [Doc](https://example.com/no-date-here.pdf)\n"
+    )
+    al = extract_archive_links(md)
+    assert ("2025-04", "https://example.com/apr-2025.pdf") in al.parsed
+    assert len(al.unparseable) == 1
+    assert al.unparseable[0]["url"] == "https://example.com/no-date-here.pdf"
+    assert al.unparseable[0]["reason"] == "month_not_parsed"
+    assert al.unparseable[0]["raw_text"] == "Doc"
+    # parsed 不含 unparseable 的 url
+    assert all("no-date-here" not in u for _, u in al.parsed)
+
+
+def test_extract_archive_links_unparseable_bare_url():
+    """裸 url.pdf 解析不出月份也进 unparseable。"""
+    md = "Report: https://example.com/undated-report.pdf"
+    al = extract_archive_links(md)
+    assert al.parsed == []
+    assert len(al.unparseable) == 1
+    assert al.unparseable[0]["raw_text"] == "https://example.com/undated-report.pdf"
+
+
+def test_extract_archive_links_empty():
+    al = extract_archive_links("")
+    assert al.parsed == []
+    assert al.unparseable == []
+
+
+def test_extract_archive_links_dedup_parsed():
+    """parsed 去重;月数=去重集合大小非链接数(修正3.2.6)。"""
+    md = (
+        "April 2025: https://example.com/apr-2025.pdf\n"
+        "April 2025 again: https://example.com/apr-2025.pdf"
+    )
+    al = extract_archive_links(md)
+    assert len(al.parsed) == 1
+    assert len({ym for ym, _ in al.parsed}) == 1

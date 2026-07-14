@@ -15,6 +15,7 @@ import concurrent.futures
 import datetime
 import os
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Optional
 
@@ -245,6 +246,33 @@ def _pct_to_decimal(num_str: str) -> float:
     return float(Decimal(num_str) / Decimal(100))
 
 
+@dataclass
+class ExtractedReturn:
+    """单月收益提取结果(含原文片段,供 pending_review 审计)。
+
+    value: 月度收益小数(如 0.0053)。
+    source_quote: 匹配到的原文片段(如 'returned 0.53%'),进 pending_review 时
+        附在记录里供人工裁决(§5 闸门:代码提取也带原文片段,非仅 LLM 兜底)。
+    """
+    value: float
+    source_quote: str
+
+
+def extract_commentary_return_full(text: str) -> Optional[ExtractedReturn]:
+    """从 PDF 文本提取 Commentary 当月收益 + 原文片段,返回 ExtractedReturn。
+
+    正则 r'returned\\s+([+-]?\\d+\\.\\d+)%'，捕获符号。取第一个匹配（当月声明，
+    非后续滚动收益数字）。source_quote = m.group(0)（含 'returned X%'）。
+    无匹配返回 None（绝不猜测）。
+    """
+    if not text:
+        return None
+    m = re.search(r"returned\s+([+-]?\d+\.\d+)%", text)
+    if not m:
+        return None
+    return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0))
+
+
 def extract_commentary_return(text: str) -> Optional[float]:
     """从 PDF 文本提取 Commentary 当月收益（after fees，返回小数）。
 
@@ -363,6 +391,21 @@ _BENTHAM_NET_RE = re.compile(
 )
 
 
+def extract_bentham_net_return_full(text: str) -> Optional[ExtractedReturn]:
+    """Bentham Commentary net total return (after fees) + 原文片段,返回 ExtractedReturn。
+
+    匹配 "had a total return (after fees[*]) of X[%|percent]"，捕获 net 值。
+    区别于 extract_commentary_return（returned\\s+X% 对 Bentham 取 gross
+    before-fees，字段口径错误）。source_quote = m.group(0)。无匹配返回 None。
+    """
+    if not text:
+        return None
+    m = _BENTHAM_NET_RE.search(text)
+    if not m:
+        return None
+    return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0))
+
+
 def extract_bentham_net_return(text: str) -> Optional[float]:
     """Bentham Commentary net total return (after fees)，返回小数。
 
@@ -413,6 +456,21 @@ def extract_bentham_rolling(text: str) -> dict:
     return result
 
 
+def extract_pdf_one_bentham_full(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[ExtractedReturn], dict]:
+    """Bentham 单 PDF 提取(带 quote):parse_pdf_text -> net ExtractedReturn + rolling。
+
+    同 extract_pdf_one_full 接口,但用 Bentham 专属提取器(net 非 gross)。
+    """
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_bentham_net_return_full(text), extract_bentham_rolling(text))
+
+
 def extract_pdf_one_bentham(
     pdf_path: str, max_pages: Optional[int] = None
 ) -> tuple[Optional[float], dict]:
@@ -426,6 +484,23 @@ def extract_pdf_one_bentham(
         return (None, {"1mo": None, "3mo": None, "6mo": None,
                        "12mo": None, "inception": None, "parse_error": True})
     return (extract_bentham_net_return(text), extract_bentham_rolling(text))
+
+
+def extract_pdf_one_full(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[ExtractedReturn], dict]:
+    """单 PDF 提取(带 quote):parse_pdf_text -> ExtractedReturn + rolling。
+
+    顶层纯函数(可被 ThreadPool/ProcessPool 调用)。失败返回
+    (None, {'parse_error':True})。需要 source_quote 的调用方(ingest 超 |r|<0.5
+    进 pending_review)用本函数。
+    """
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_commentary_return_full(text), extract_perf_rolling(text))
 
 
 def extract_pdf_one(
@@ -454,6 +529,69 @@ def _text_to_ym(text: str) -> Optional[str]:
     """
     date_str = parse_date_string(text)
     return date_str[:7] if date_str else None
+
+
+@dataclass
+class ArchiveLinks:
+    """归档页解析结果:成功解析月份的链接 + 解析失败日志(不静默丢弃)。
+
+    parsed: [(YYYY-MM, pdf_url), ...] 去重保序,供 download_and_extract_parallel。
+    unparseable: [{"url","raw_text","reason"}] 解析不出月份的 PDF 链接,写入
+        DiscoveryReport(M3 ★重点2),不计 obtained,不静默消失。
+    月数 = len({ym for ym,_ in parsed})(去重集合大小,非链接数,修正3.2.6)。
+    """
+    parsed: list[tuple[str, str]]
+    unparseable: list[dict]
+
+
+def extract_archive_links(markdown: str) -> ArchiveLinks:
+    """从归档页 markdown 提取 PDF 月报链接 + 解析失败日志(不静默丢弃)。
+
+    成功解析月份的 -> parsed(去重保序);解析不出月份的 PDF 链接 -> unparseable
+    (含 url/raw_text/reason),写入 DiscoveryReport 交人工判断,绝不静默消失
+    (M3 ★重点2 / 修正3.2.6:月解析错一个 gap 错一个)。
+
+    优先从 markdown 链接文本 [text](url.pdf) 提月份(比 URL 文件名可靠);
+    链接文本无月份时回退 URL 用 extract_month_prefix;裸 url.pdf 从 URL 提。
+    """
+    if not markdown:
+        return ArchiveLinks(parsed=[], unparseable=[])
+    parsed: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    unparseable: list[dict] = []
+
+    # 1. markdown 链接 [text](url.pdf):优先从 text 提月份,回退 url
+    link_pattern = re.compile(
+        r"\[([^\]]+)\]\((https?://[^\s\)]+\.pdf[^\s\)]*)\)", re.IGNORECASE
+    )
+    for m in link_pattern.finditer(markdown):
+        text, url = m.group(1), m.group(2)
+        ym = _text_to_ym(text) or extract_month_prefix(url)
+        if ym is None:
+            unparseable.append({"url": url, "raw_text": text,
+                                "reason": "month_not_parsed"})
+            continue
+        key = (ym, url)
+        if key not in seen:
+            seen.add(key)
+            parsed.append(key)
+
+    # 2. 裸 url.pdf(无链接文本):从 url 提月份。排除已处理(parsed ∪ unparseable)
+    # 的 url,避免同一 url 被 markdown 链接与裸 url 正则双重收集进 unparseable。
+    linked_urls = {url for _, url in parsed} | {u["url"] for u in unparseable}
+    for url in re.findall(r"https?://[^\s\)]+\.pdf[^\s\)]*", markdown, re.IGNORECASE):
+        if url in linked_urls:
+            continue
+        ym = extract_month_prefix(url)
+        if ym is None:
+            unparseable.append({"url": url, "raw_text": url,
+                                "reason": "month_not_parsed"})
+            continue
+        key = (ym, url)
+        if key not in seen:
+            seen.add(key)
+            parsed.append(key)
+    return ArchiveLinks(parsed=parsed, unparseable=unparseable)
 
 
 def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
