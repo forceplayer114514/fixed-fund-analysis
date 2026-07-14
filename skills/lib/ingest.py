@@ -22,6 +22,7 @@ from lib.db import (
     create_fund,
     ensure_tables,
     get_connection,
+    get_extractor_verified,
     get_fund,
     get_monthly_returns,
     list_confirmed_gaps,
@@ -29,15 +30,20 @@ from lib.db import (
     record_confirmed_gap,
     remove_confirmed_gap,
     upsert_monthly_return,
+    verify_extractor,
 )
 from lib.extract import (
+    ExtractedReturn,
     download_and_extract_parallel,
+    extractor_names,
     extract_pdf_links_from_archive,
     extract_pdf_one_bentham,
     extract_perf_rolling,
     gate_check,
     gate_check_table,
+    get_extractor,
     get_last_day_of_month,
+    is_generic_extractor,
     parse_html_monthly_table,
     parse_pdf_text,
     parse_plotly_nav_series,
@@ -365,13 +371,15 @@ def ingest_discovery(
     name: str,
     *,
     db_path: Optional[str] = None,
-    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
+    extractor: Optional[Callable] = None,
+    extractor_name: Optional[str] = "generic",
     max_workers: Optional[int] = None,
     shareclass_prefix: Optional[str] = None,
     apir: Optional[str] = None,
     verified_at: Optional[str] = None,
     url_type: str = "archive_page",
     dest_dir: Optional[str] = None,
+    dry_run: bool = False,
 ) -> dict:
     """接 DiscoveryReport 入库分流(M4 集合差驱动入库入口)。
 
@@ -394,7 +402,7 @@ def ingest_discovery(
     """
     import tempfile
 
-    records: list[tuple[str, float]] = []
+    records: list[tuple[str, ExtractedReturn]] = []
     rolling_per_month: dict = {}
     seen_dates: set = set()
     failed_months: list = []
@@ -412,10 +420,10 @@ def ingest_discovery(
                 dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
             results = download_and_extract_parallel(
                 payload["links"], dest_dir,
-                max_workers=max_workers, extractor=extractor,
+                max_workers=max_workers, extractor=extractor, return_full=True,
             )
-            for ym, commentary, rolling in results:
-                if commentary is None:
+            for ym, er, rolling in results:
+                if er is None:
                     failed_months.append(ym)
                     continue
                 date = _ym_to_month_end(ym)
@@ -425,26 +433,28 @@ def ingest_discovery(
                 if date in seen_dates:
                     continue
                 seen_dates.add(date)
-                records.append((date, commentary))
+                records.append((date, er))
                 rolling_per_month[ym] = rolling
         elif "records" in payload:
             for date_str, ret in payload["records"]:
                 if date_str in seen_dates:
                     continue
                 seen_dates.add(date_str)
-                records.append((date_str, ret))
+                records.append((date_str, ExtractedReturn(
+                    value=ret, source_quote="", ambiguous=False)))
 
     if not records:
         return {"months": 0, "start": None, "end": None, "gaps": report.gaps,
                 "gate_pass": False,
                 "errors": ["无 records 可入库(提取全失败或无 payload)"],
                 "failed_months": failed_months, "pending_review_count": 0,
-                "short_history_warning": True}
+                "short_history_warning": True,
+                "extractor_mismatch": bool(failed_months),
+                "mismatch_months": failed_months}
 
-    # gate_check:缺口 -> confirmed_gaps(不 fail);|r|>=0.5 -> pending;
-    # over 月存在时复利降级;ANTI-FABRICATION/复利(无 over)-> fail
-    _pass_ok, errors = gate_check(records, rolling_per_month)
-    over_threshold = {d for d, r in records if abs(r) >= 0.5}
+    gate_records = [(d, er.value) for d, er in records]
+    _pass_ok, errors = gate_check(gate_records, rolling_per_month)
+    over_threshold = {d for d, er in records if abs(er.value) >= 0.5}
     has_over = bool(over_threshold)
     other_errors = [
         e for e in errors
@@ -452,37 +462,99 @@ def ingest_discovery(
         and "字段异常" not in e
         and not (has_over and "复利验证失败" in e)
     ]
-    if other_errors:
-        records_sorted = sorted(records, key=lambda x: x[0])
-        return {"months": len(records_sorted),
-                "start": records_sorted[0][0] if records_sorted else None,
-                "end": records_sorted[-1][0] if records_sorted else None,
-                "gaps": report.gaps, "gate_pass": False, "errors": other_errors,
-                "failed_months": failed_months, "pending_review_count": 0,
-                "short_history_warning": len(records_sorted) < 36}
 
-    # 入库(over 月 -> pending_review;其余 -> monthly_returns;gaps -> confirmed_gaps)
+    records_sorted = sorted(records, key=lambda x: x[0])
+    start = records_sorted[0][0] if records_sorted else None
+    end = records_sorted[-1][0] if records_sorted else None
+
+    # EXTRACTOR_MISMATCH(A3):generic 正则没匹配(failed_months 非空)-> 报指引,
+    # 不 fail(已提取月仍入库/pending)。提示走 add_fixed_fund.md 4.5 加专属提取器。
+    extractor_mismatch = bool(failed_months)
+    mismatch_errors: list[str] = []
+    if extractor_mismatch:
+        mismatch_errors.append(
+            f"EXTRACTOR_MISMATCH: 提取器({extractor_name})无法匹配该基金 "
+            f"Commentary(失败月: {failed_months})。固定流程(add_fixed_fund.md 4.5): "
+            "1.下2-3样本PDF(早期+晚期)REPL探正则(仅探,不发write_token) "
+            "2.extract.py加extract_<issuer>_net_return_full+source_quote "
+            "3.tests/test_extract.py加测试(早期+晚期) "
+            "4.EXTRACTORS注册表加{<issuer>:...} "
+            "5.--dry-run全量回跑验收(成功率+gate通过率) "
+            "6.pytest通过后--extractor <issuer>重跑discover。禁REPL手写提取入库"
+        )
+
+    if other_errors:
+        return {"months": len(records_sorted), "start": start, "end": end,
+                "gaps": report.gaps, "gate_pass": False,
+                "errors": other_errors + mismatch_errors,
+                "failed_months": failed_months, "pending_review_count": 0,
+                "short_history_warning": len(records_sorted) < 36,
+                "extractor_mismatch": extractor_mismatch,
+                "mismatch_months": failed_months}
+
+    # dry_run:跑提取+gate不入库,出报告(4.5 全量回跑验收用)
+    if dry_run:
+        return {"months": len(records_sorted), "start": start, "end": end,
+                "gaps": report.gaps, "gate_pass": not extractor_mismatch,
+                "errors": mismatch_errors, "failed_months": failed_months,
+                "extractor_mismatch": extractor_mismatch,
+                "mismatch_months": failed_months,
+                "pending_review_count": 0,
+                "short_history_warning": len(records_sorted) < 36,
+                "dry_run": True}
+
+    # 入库三层分流(A4):
+    # |r|>=0.5 -> pending abs_return_exceeds_threshold(无论 generic/专属)
+    # generic+ambiguous -> pending ambiguous_subject(反 benchmark 守卫命中)
+    # generic+!ambiguous+!verified -> pending generic_first_use(新基金首批全审)
+    # generic+!ambiguous+verified -> 直通(update 增量)
+    # 专属 -> 直通(gate 已跑)
     confirmed_url = (best_payload or {}).get("confirmed_url", "")
     fetch_method = (best_payload or {}).get("fetch_method", "pdf")
+    use_generic = is_generic_extractor(extractor_name)
     conn = get_connection(db_path)
     try:
         ensure_tables(conn)
-        create_fund(
-            conn, fund_id=report.fund_id, fund_name=name,
-            confirmed_url=confirmed_url, fetch_method=fetch_method,
-            url_type=url_type, apir_code=apir, verified_at=verified_at,
-            shareclass_prefix=shareclass_prefix,
-            inception_date=report.inception_date,
-            inception_assumed=1 if report.inception_assumed else 0,
+        already_exists = get_fund(conn, report.fund_id) is not None
+        extractor_verified = (
+            get_extractor_verified(conn, report.fund_id) if already_exists else 0
         )
+        if not already_exists:
+            create_fund(
+                conn, fund_id=report.fund_id, fund_name=name,
+                confirmed_url=confirmed_url, fetch_method=fetch_method,
+                url_type=url_type, apir_code=apir, verified_at=verified_at,
+                shareclass_prefix=shareclass_prefix,
+                inception_date=report.inception_date,
+                inception_assumed=1 if report.inception_assumed else 0,
+                extractor_verified=0,
+            )
         pending_count = 0
-        for date, r in records:
-            if date in over_threshold:
+        ingested_dates: list[str] = []
+        for date, er in records:
+            r = er.value
+            if abs(r) >= 0.5:
                 add_pending_review(
                     conn, fund_id=report.fund_id, date=date, net_return=r,
-                    extract_method="code",
+                    source_quote=er.source_quote, extract_method="code",
                     gate_result="abs_return_exceeds_threshold",
                     review_reason="abs_return_exceeds_threshold",
+                )
+                pending_count += 1
+            elif use_generic and er.ambiguous:
+                add_pending_review(
+                    conn, fund_id=report.fund_id, date=date, net_return=r,
+                    source_quote=er.source_quote, extract_method="code",
+                    gate_result="ambiguous_subject",
+                    review_reason="ambiguous_subject",
+                )
+                pending_count += 1
+            elif use_generic and not extractor_verified:
+                add_pending_review(
+                    conn, fund_id=report.fund_id, date=date, net_return=r,
+                    source_quote=er.source_quote, extract_method="code",
+                    gate_result="generic_first_use",
+                    review_reason="generic_first_use",
                 )
                 pending_count += 1
             else:
@@ -490,6 +562,7 @@ def ingest_discovery(
                     conn, fund_id=report.fund_id, date=date,
                     net_return=r, commentary_truth=r,
                 )
+                ingested_dates.append(date)
         exhausted = ",".join(report.per_level_contribution.keys()) or "L0,L1,L2,L3"
         for gap_ym in report.gaps:
             record_confirmed_gap(
@@ -500,16 +573,17 @@ def ingest_discovery(
     finally:
         conn.close()
 
-    records_sorted = sorted(records, key=lambda x: x[0])
-    ingested = [d for d, _ in records_sorted if d not in over_threshold]
+    ingested_dates.sort()
     return {
-        "months": len(ingested),
-        "start": ingested[0] if ingested else None,
-        "end": ingested[-1] if ingested else None,
+        "months": len(ingested_dates),
+        "start": ingested_dates[0] if ingested_dates else None,
+        "end": ingested_dates[-1] if ingested_dates else None,
         "gaps": report.gaps,
         "gate_pass": True,
-        "errors": [],
+        "errors": mismatch_errors,
         "failed_months": failed_months,
+        "extractor_mismatch": extractor_mismatch,
+        "mismatch_months": failed_months,
         "pending_review_count": pending_count,
         "short_history_warning": len(records_sorted) < 36,
     }
@@ -532,10 +606,10 @@ def _collect_records(report, dest_dir=None, extractor=None, max_workers=None):
                 dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
             results = download_and_extract_parallel(
                 payload["links"], dest_dir,
-                max_workers=max_workers, extractor=extractor,
+                max_workers=max_workers, extractor=extractor, return_full=True,
             )
-            for ym, commentary, rolling in results:
-                if commentary is None:
+            for ym, er, rolling in results:
+                if er is None:
                     failed_months.append(ym)
                     continue
                 date = _ym_to_month_end(ym)
@@ -545,14 +619,15 @@ def _collect_records(report, dest_dir=None, extractor=None, max_workers=None):
                 if date in seen_dates:
                     continue
                 seen_dates.add(date)
-                records.append((date, commentary))
+                records.append((date, er))
                 rolling_per_month[ym] = rolling
         elif "records" in payload:
             for date_str, ret in payload["records"]:
                 if date_str in seen_dates:
                     continue
                 seen_dates.add(date_str)
-                records.append((date_str, ret))
+                records.append((date_str, ExtractedReturn(
+                    value=ret, source_quote="", ambiguous=False)))
     return records, rolling_per_month, failed_months
 
 
@@ -562,7 +637,8 @@ def update_fund(
     db_path: Optional[str] = None,
     archive_markdown: Optional[str] = None,
     latest_month: Optional[str] = None,
-    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
+    extractor: Optional[Callable] = None,
+    extractor_name: Optional[str] = "generic",
     max_workers: Optional[int] = None,
     dest_dir: Optional[str] = None,
 ) -> dict:
@@ -610,17 +686,36 @@ def update_fund(
         records, _rolling, failed_months = _collect_records(
             report, dest_dir=dest_dir, extractor=extractor, max_workers=max_workers)
 
-        new_records = [(d, r) for d, r in records if d[:7] not in existing_months]
+        use_generic = is_generic_extractor(extractor_name)
+        extractor_verified = get_extractor_verified(conn, fund_id)
+        new_records = [(d, er) for d, er in records if d[:7] not in existing_months]
         upserted = 0
         pending_count = 0
         newly_filled: set = set()
-        for date, r in new_records:
+        for date, er in new_records:
+            r = er.value
             if abs(r) >= 0.5:
                 add_pending_review(
                     conn, fund_id=fund_id, date=date, net_return=r,
-                    extract_method="code",
+                    source_quote=er.source_quote, extract_method="code",
                     gate_result="abs_return_exceeds_threshold",
                     review_reason="abs_return_exceeds_threshold",
+                )
+                pending_count += 1
+            elif use_generic and er.ambiguous:
+                add_pending_review(
+                    conn, fund_id=fund_id, date=date, net_return=r,
+                    source_quote=er.source_quote, extract_method="code",
+                    gate_result="ambiguous_subject",
+                    review_reason="ambiguous_subject",
+                )
+                pending_count += 1
+            elif use_generic and not extractor_verified:
+                add_pending_review(
+                    conn, fund_id=fund_id, date=date, net_return=r,
+                    source_quote=er.source_quote, extract_method="code",
+                    gate_result="generic_first_use",
+                    review_reason="generic_first_use",
                 )
                 pending_count += 1
             else:
@@ -647,6 +742,8 @@ def update_fund(
             "pending_review_count": pending_count,
             "gaps": sorted(set(report.gaps)),
             "failed_months": failed_months,
+            "extractor_mismatch": bool(failed_months),
+            "mismatch_months": failed_months,
             "stale_pending_reviews": stale,
             "inception_assumed": bool(fund["inception_assumed"]),
         }
@@ -697,11 +794,21 @@ def _cli() -> int:
     disc_p.add_argument("--apir", default=None)
     disc_p.add_argument("--verified-at", default=None)
     disc_p.add_argument("--db-path", default=None)
-    disc_p.add_argument("--extractor", default=None, choices=["stake", "bentham"],
-                        help="PDF 提取器口径(stake=gross 默认,bentham=net)")
+    disc_p.add_argument("--extractor", default="generic",
+                        choices=extractor_names(),
+                        help="PDF 提取器(generic=默认 returned X%; 新基金先 generic,"
+                             "gate 失败/EXTRACTOR_MISMATCH 走 add_fixed_fund.md 4.5 加专属)")
+    disc_p.add_argument("--dry-run", action="store_true",
+                        help="跑提取+gate 不入库,出报告(4.5 全量回跑验收用)")
     upd_p = sub.add_parser("update", help="增量复查最新月+confirmed_gaps 复查+pending_review 滞留报告")
     upd_p.add_argument("--fund-id", required=True)
     upd_p.add_argument("--db-path", default=None)
+    upd_p.add_argument("--extractor", default="generic", choices=extractor_names(),
+                       help="PDF 提取器(须与 discover 时一致)")
+    ve_p = sub.add_parser("verify-extractor",
+                          help="人工审核通过 generic 首批后:标 extractor_verified=1 + 批量 promote generic_first_use pending")
+    ve_p.add_argument("--fund-id", required=True)
+    ve_p.add_argument("--db-path", default=None)
     args = parser.parse_args()
 
     if args.write_token is not None:
@@ -757,19 +864,29 @@ def _cli() -> int:
             "db_path": args.db_path,
         }
         report = run_discovery(fund_info)
-        extractor = None
-        if args.extractor == "bentham":
-            from lib.extract import extract_pdf_one_bentham
-            extractor = extract_pdf_one_bentham
+        extractor = get_extractor(args.extractor)
         result = ingest_discovery(
             report, args.name, db_path=args.db_path,
-            apir=args.apir, verified_at=args.verified_at, extractor=extractor,
+            apir=args.apir, verified_at=args.verified_at,
+            extractor=extractor, extractor_name=args.extractor,
+            dry_run=args.dry_run,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["gate_pass"] else 1
     if args.command == "update":
-        result = update_fund(args.fund_id, db_path=args.db_path)
+        result = update_fund(args.fund_id, db_path=args.db_path,
+                             extractor_name=args.extractor,
+                             extractor=get_extractor(args.extractor))
         print(json.dumps(result, indent=2, ensure_ascii=False, default=list))
+        return 0
+    if args.command == "verify-extractor":
+        conn = get_connection(args.db_path)
+        try:
+            ensure_tables(conn)
+            result = verify_extractor(conn, args.fund_id)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     return 1
 

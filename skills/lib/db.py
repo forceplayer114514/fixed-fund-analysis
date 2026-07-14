@@ -121,6 +121,14 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE funds ADD COLUMN inception_date TEXT")
     if "inception_assumed" not in cols:
         conn.execute("ALTER TABLE funds ADD COLUMN inception_assumed INTEGER DEFAULT 0")
+    if "extractor_verified" not in cols:
+        conn.execute("ALTER TABLE funds ADD COLUMN extractor_verified INTEGER DEFAULT 0")
+        # 已有 monthly_returns 的老基金信任,标 1(未走 A4 准入,数据已入库)。
+        # 新基金 discover 时无 monthly_returns(A4 首批全进 pending),不会被标。
+        conn.execute(
+            "UPDATE funds SET extractor_verified=1 WHERE fund_id IN "
+            "(SELECT DISTINCT fund_id FROM monthly_returns)"
+        )
     conn.commit()
 
 
@@ -138,6 +146,7 @@ def create_fund(
     shareclass_prefix: Optional[str] = None,
     inception_date: Optional[str] = None,
     inception_assumed: int = 0,
+    extractor_verified: int = 0,
 ) -> None:
     """插入一只基金(纯 INSERT,不 upsert)。
 
@@ -146,6 +155,8 @@ def create_fund(
     （B 组跨份额类校验的前缀，None 表示单份额类/不参与跨份额类校验）。
     inception_date 为基金成立日(YYYY-MM-DD);无精确日时由调用方标
     inception_assumed=1 并以全链最早可得月作下界(见 strategies expected_range)。
+    extractor_verified:A4 准入标记。新基金默认 0(generic 首批全进 pending,
+    人工 verify_extractor 后标 1,update 侧增量才直通)。
     """
     _require_write_token()
     conn.execute(
@@ -153,13 +164,13 @@ def create_fund(
         INSERT INTO funds
             (fund_id, fund_name, apir_code, confirmed_url, fetch_method,
              url_type, max_pdf_pages, verified_at, shareclass_prefix,
-             inception_date, inception_assumed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             inception_date, inception_assumed, extractor_verified)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             fund_id, fund_name, apir_code, confirmed_url, fetch_method,
             url_type, max_pdf_pages, verified_at, shareclass_prefix,
-            inception_date, inception_assumed,
+            inception_date, inception_assumed, extractor_verified,
         ),
     )
     conn.commit()
@@ -397,3 +408,49 @@ def list_stale_pending_reviews(
         (f"-{days} days",),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- A4:generic 提取器准入验证(extractor_verified) ----------
+
+
+def get_extractor_verified(conn: sqlite3.Connection, fund_id: str) -> int:
+    """读 extractor_verified 标记(0/1)。基金不存在返 0(视为未验证,走 pending)。"""
+    row = conn.execute(
+        "SELECT extractor_verified FROM funds WHERE fund_id=?", (fund_id,)
+    ).fetchone()
+    return int(row["extractor_verified"]) if row else 0
+
+
+def verify_extractor(conn: sqlite3.Connection, fund_id: str) -> dict:
+    """人工审核通过 generic 首批后:标 extractor_verified=1 + 批量 promote 该基金
+    review_reason='generic_first_use' 的 pending(走同一 upsert_monthly_return)。
+
+    仅 promote generic_first_use(信任已抽审),不碰 ambiguous_subject / 超限值
+    pending(那些 review_reason 不同,需逐条人工 promote_pending)。
+    返回 {fund_id, promoted_count}。基金不存在抛 KeyError。
+    """
+    _require_write_token()
+    exists = conn.execute(
+        "SELECT 1 FROM funds WHERE fund_id=?", (fund_id,)
+    ).fetchone()
+    if not exists:
+        raise KeyError(f"fund_id={fund_id} 不存在")
+    rows = conn.execute(
+        "SELECT id, date, net_return FROM pending_review "
+        "WHERE fund_id=? AND review_state='pending' "
+        "AND review_reason='generic_first_use'",
+        (fund_id,),
+    ).fetchall()
+    for row in rows:
+        upsert_monthly_return(
+            conn, fund_id=fund_id, date=row["date"], net_return=row["net_return"],
+        )
+        conn.execute(
+            "UPDATE pending_review SET review_state='approved' WHERE id=?",
+            (row["id"],),
+        )
+    conn.execute(
+        "UPDATE funds SET extractor_verified=1 WHERE fund_id=?", (fund_id,)
+    )
+    conn.commit()
+    return {"fund_id": fund_id, "promoted_count": len(rows)}

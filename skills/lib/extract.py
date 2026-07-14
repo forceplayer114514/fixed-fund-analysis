@@ -263,9 +263,25 @@ class ExtractedReturn:
     value: 月度收益小数(如 0.0053)。
     source_quote: 匹配到的原文片段(如 'returned 0.53%'),进 pending_review 时
         附在记录里供人工裁决(§5 闸门:代码提取也带原文片段,非仅 LLM 兜底)。
+    ambiguous: 仅 generic 提取器(extract_commentary_return_full)置 True --
+        匹配窗口内出现 benchmark/index/outperform 等词时,正则可能命中 benchmark
+        收益而非基金自身收益(认错对象,非没认出)。专属提取器人写时人眼看过样本,
+        永远 False。ambiguous=True 的月强制进 pending_review(review_reason=
+        ambiguous_subject),不直通 monthly_returns(A4 反 benchmark 守卫)。
     """
     value: float
     source_quote: str
+    ambiguous: bool = False
+
+
+# 反 benchmark 守卫:generic 提取匹配点前后窗口含这些词 -> ambiguous=True。
+# 基金 Commentary 常写"returned 0.72%, outperforming the benchmark which
+# returned 0.35%",generic 的 returned\s+X% 可能命中 benchmark 的 0.35%。
+# 宁可误伤进 pending(人工审),不漏(A4c)。
+_BENCHMARK_GUARD_RE = re.compile(
+    r"benchmark|outperform|underperform|\bindex\b|relative\s+to|versus|\bvs\.?\b",
+    re.IGNORECASE,
+)
 
 
 def extract_commentary_return_full(text: str) -> Optional[ExtractedReturn]:
@@ -273,14 +289,24 @@ def extract_commentary_return_full(text: str) -> Optional[ExtractedReturn]:
 
     正则 r'returned\\s+([+-]?\\d+\\.\\d+)%'，捕获符号。取第一个匹配（当月声明，
     非后续滚动收益数字）。source_quote = m.group(0)（含 'returned X%'）。
-    无匹配返回 None（绝不猜测）。
+
+    反 benchmark 守卫(A4c):匹配点前后各 200 字符窗口内出现 benchmark/index/
+    outperform/underperform/relative to/versus/vs 等词时 ambiguous=True --
+    该月强制进 pending_review(ambiguous_subject),不直通。无匹配返回 None。
     """
     if not text:
         return None
     m = re.search(r"returned\s+([+-]?\d+\.\d+)%", text)
     if not m:
         return None
-    return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0))
+    lo = max(0, m.start() - 200)
+    hi = min(len(text), m.end() + 200)
+    ambiguous = bool(_BENCHMARK_GUARD_RE.search(text[lo:hi]))
+    return ExtractedReturn(
+        value=_pct_to_decimal(m.group(1)),
+        source_quote=m.group(0),
+        ambiguous=ambiguous,
+    )
 
 
 def extract_commentary_return(text: str) -> Optional[float]:
@@ -513,6 +539,36 @@ def extract_pdf_one_full(
     return (extract_commentary_return_full(text), extract_perf_rolling(text))
 
 
+# ---------------------------------------------------------------------------
+# 提取器注册表(A1):--extractor choices 从此动态取,新基金默认 generic。
+# generic = extract_commentary_return_full("returned X%"),带 A4c 反 benchmark
+# 守卫(ambiguous)。专属提取器(bentham 等)人写时人眼看过样本,ambiguous=False。
+# 新基金先 generic,gate 失败/EXTRACTOR_MISMATCH -> 走 add_fixed_fund.md 4.5
+# 固定流程加专属提取器(禁 REPL 手写入库)。
+# ---------------------------------------------------------------------------
+EXTRACTORS = {
+    "generic": extract_pdf_one_full,
+    "stake": extract_pdf_one_full,
+    "bentham": extract_pdf_one_bentham_full,
+}
+
+
+def get_extractor(name: Optional[str]) -> Callable[[str], tuple[Optional[ExtractedReturn], dict]]:
+    """按名取 _full 提取器(返 ExtractedReturn+rolling)。None/未知 -> generic。"""
+    return EXTRACTORS.get(name or "generic", EXTRACTORS["generic"])
+
+
+def extractor_names() -> list[str]:
+    """--extractor choices 动态源。"""
+    return list(EXTRACTORS.keys())
+
+
+def is_generic_extractor(name: Optional[str]) -> bool:
+    """generic/stake 走 A4 准入验证(首批进 pending + 反 benchmark 守卫);
+    专属(bentham 等)人写过样本,直通。"""
+    return (name or "generic") in ("generic", "stake")
+
+
 def extract_pdf_one(
     pdf_path: str, max_pages: Optional[int] = None
 ) -> tuple[Optional[float], dict]:
@@ -676,22 +732,26 @@ def download_and_extract_parallel(
     links: list[tuple[str, str]],
     dest_dir: str,
     max_workers: Optional[int] = None,
-    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
-) -> list[tuple[str, Optional[float], dict]]:
+    extractor: Optional[Callable] = None,
+    return_full: bool = False,
+) -> list:
     """ThreadPool pipeline：每 worker 下载一个 PDF 后立即提取。
 
     IO 下载与 CPU 提取重叠，无 barrier（比"下载并发->提取并发"两阶段更快）。
     max_workers 默认 min(16, os.cpu_count())（M5 满核 10-16）。
-    extractor 默认 extract_pdf_one（Stake 口径）；Bentham 等基金专属口径
+    extractor 默认 extract_pdf_one（Stake 口径,返 float）；Bentham 等基金专属口径
     传 extract_pdf_one_bentham。
-    返回 [(ym, commentary_return, rolling), ...]，按 ym 升序排序。
-    失败隔离：单 PDF 下载/提取失败 -> (ym, None, {'parse_error':True})，不中断其他。
-    复用 download_file + extract_pdf_one。
+    return_full=True:extractor 默认 extract_pdf_one_full(返 ExtractedReturn +
+    rolling),供 ingest_discovery 拿 source_quote/ambiguous(A4)。调用方据此取
+    .value 或直接用 ExtractedReturn。
+    返回 [(ym, commentary, rolling), ...]，按 ym 升序排序。commentary 类型=
+    float(return_full=False)或 ExtractedReturn(return_full=True)。失败 ->
+    (ym, None, {'parse_error':True})，不中断其他。复用 download_file。
     """
     if max_workers is None:
         max_workers = min(16, os.cpu_count() or 8)
     if extractor is None:
-        extractor = extract_pdf_one
+        extractor = extract_pdf_one_full if return_full else extract_pdf_one
 
     def _failed_rolling() -> dict:
         return {"1mo": None, "3mo": None, "6mo": None,

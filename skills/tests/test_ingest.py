@@ -30,7 +30,7 @@ def test_add_fund_success(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
         return [
             ("2025-03", -0.0051, _rolling(-0.0051)),
             ("2025-04", 0.0068, _rolling(0.0068)),
@@ -75,7 +75,7 @@ def test_add_fund_gate_fail_not_ingested(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"  # 缺 04
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
         return [
             ("2025-03", 0.005, _rolling(0.005)),
             ("2025-05", 0.005, _rolling(0.005)),
@@ -130,7 +130,7 @@ def test_add_fund_extraction_failure_isolation(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
         return [
             ("2025-03", 0.005, _rolling(0.005)),
             ("2025-04", None, {"1mo": None, "3mo": None, "6mo": None,
@@ -351,9 +351,15 @@ def test_add_fund_from_plotly_html_compound_mismatch_blocks(tmp_path, monkeypatc
 from lib.strategies import DiscoveryReport
 from lib.ingest import ingest_discovery
 from lib.db import list_confirmed_gaps, list_pending_review
+from lib.extract import ExtractedReturn
 
 _PE = {"1mo": None, "3mo": None, "6mo": None, "12mo": None,
        "inception": None, "parse_error": True}
+
+
+def _er(v, ambiguous=False):
+    """构造 ExtractedReturn(测试用,source_quote 空)。"""
+    return ExtractedReturn(value=v, source_quote="", ambiguous=ambiguous)
 
 
 def _disc_report(fund_id="disc_fund", links=None, records=None, gaps=None,
@@ -386,11 +392,11 @@ def test_ingest_discovery_success(monkeypatch, tmp_path):
                ("2025-04", "https://x/apr.pdf")],
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
-        return [("2025-02", 0.005, _PE), ("2025-03", 0.006, _PE), ("2025-04", 0.004, _PE)]
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
+        return [("2025-02", _er(0.005), _PE), ("2025-03", _er(0.006), _PE), ("2025-04", _er(0.004), _PE)]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
-    result = ingest_discovery(report, "Disc Fund", db_path=db_path)
+    result = ingest_discovery(report, "Disc Fund", db_path=db_path, extractor_name="bentham")
     assert result["gate_pass"] is True
     assert result["months"] == 3
     conn = get_connection(db_path)
@@ -413,11 +419,11 @@ def test_ingest_discovery_gaps_to_confirmed_gaps(monkeypatch, tmp_path):
         gaps=["2025-03"],
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
-        return [("2025-02", 0.005, _PE), ("2025-04", 0.004, _PE)]
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
+        return [("2025-02", _er(0.005), _PE), ("2025-04", _er(0.004), _PE)]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
-    result = ingest_discovery(report, "Gap Fund", db_path=db_path)
+    result = ingest_discovery(report, "Gap Fund", db_path=db_path, extractor_name="bentham")
     assert result["gate_pass"] is True  # 缺口非 fail
     assert result["months"] == 2
     assert result["gaps"] == ["2025-03"]
@@ -439,15 +445,15 @@ def test_ingest_discovery_over_threshold_to_pending(monkeypatch, tmp_path):
                ("2025-04", "https://x/apr.pdf")],
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
         return [
-            ("2025-02", 0.005, _PE),
-            ("2025-03", 0.6, _PE),   # 60% 超限 -> pending
-            ("2025-04", 0.004, _PE),
+            ("2025-02", _er(0.005), _PE),
+            ("2025-03", _er(0.6), _PE),   # 60% 超限 -> pending
+            ("2025-04", _er(0.004), _PE),
         ]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
-    result = ingest_discovery(report, "Ovr Fund", db_path=db_path)
+    result = ingest_discovery(report, "Ovr Fund", db_path=db_path, extractor_name="bentham")
     assert result["gate_pass"] is True  # 超限不 fail,进 pending
     assert result["months"] == 2  # 02,04 入库(03 进 pending)
     assert result["pending_review_count"] == 1
@@ -469,7 +475,7 @@ def test_ingest_discovery_html_records_payload(tmp_path):
     db_path = str(tmp_path / "test.db")
     records = [("2025-01-31", 0.005), ("2025-02-28", 0.006), ("2025-03-31", 0.004)]
     report = _disc_report(records=records)
-    result = ingest_discovery(report, "HTML Disc Fund", db_path=db_path)
+    result = ingest_discovery(report, "HTML Disc Fund", db_path=db_path, extractor_name="bentham")
     assert result["gate_pass"] is True
     assert result["months"] == 3
     conn = get_connection(db_path)
@@ -488,12 +494,12 @@ def test_ingest_discovery_fabrication_fail_not_ingested(monkeypatch, tmp_path):
                ("2025-03", "https://x/mar.pdf"), ("2025-04", "https://x/apr.pdf")],
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
-        return [("2025-01", 0.00657, _PE), ("2025-02", 0.00657, _PE),
-                ("2025-03", 0.00657, _PE), ("2025-04", 0.005, _PE)]
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
+        return [("2025-01", _er(0.00657), _PE), ("2025-02", _er(0.00657), _PE),
+                ("2025-03", _er(0.00657), _PE), ("2025-04", _er(0.005), _PE)]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
-    result = ingest_discovery(report, "Fab Fund", db_path=db_path)
+    result = ingest_discovery(report, "Fab Fund", db_path=db_path, extractor_name="bentham")
     assert result["gate_pass"] is False
     assert any("ANTI-FABRICATION" in e for e in result["errors"])
     conn = get_connection(db_path)
@@ -527,12 +533,13 @@ def test_update_fund_new_months(monkeypatch, tmp_path):
     archive_md = ("[Feb 2025](https://x/feb.pdf)\n[Mar 2025](https://x/mar.pdf)\n"
                   "[Apr 2025](https://x/apr.pdf)")
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
-        return [("2025-02", 0.005, _PE), ("2025-03", 0.006, _PE), ("2025-04", 0.004, _PE)]
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
+        return [("2025-02", _er(0.005), _PE), ("2025-03", _er(0.006), _PE), ("2025-04", _er(0.004), _PE)]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
     result = update_fund("upd_fund", db_path=db_path,
-                         archive_markdown=archive_md, latest_month="2025-04")
+                         archive_markdown=archive_md, latest_month="2025-04",
+                         extractor_name="bentham")
     assert result["updated"] is True
     assert result["new_months"] == 1  # 04 是新月(02,03 已有)
     assert "stale_pending_reviews" in result
@@ -573,7 +580,7 @@ def test_update_fund_stale_pending_report(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None, return_full=False):
         return [("2025-02", 0.005, _PE)]
 
     monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
