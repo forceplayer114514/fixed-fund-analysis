@@ -26,6 +26,28 @@ def test_list_anomalies(client, db_session):
     assert len(body) >= 1
     assert body[0]["fund_name"] == "Fund One"
     assert body[0]["value"] == pytest.approx(0.5)
+    assert body[0]["type"] == "return_outlier"
+
+
+@pytest.mark.unit
+def test_list_anomalies_includes_rba_missing(client, db_session):
+    """RBA 缺失月：recompute 后 GET /api/anomalies 出现 type=rba_missing，
+    monthly_return_id=None（纠错无意义）、数值字段 None（修正4 验证点）。"""
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-01-31", net_return=0.01, nav=1.0))
+    # 故意不写 RBA 利率
+    db_session.commit()
+    client.post("/api/funds/f1/recompute")
+
+    resp = client.get("/api/anomalies")
+    assert resp.status_code == 200
+    rba = [a for a in resp.json() if a["type"] == "rba_missing"]
+    assert len(rba) == 1
+    assert rba[0]["date"] == "2026-01-31"
+    assert rba[0]["reason"] is not None
+    assert rba[0]["monthly_return_id"] is None  # 禁用纠错
+    assert rba[0]["value"] is None  # 数值字段为 None
 
 
 @pytest.mark.unit

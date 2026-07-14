@@ -39,7 +39,10 @@ def _recompute_for_slice(session: Session, fund_id: str, period: str,
     gaps = _find_month_gaps(d_slice)
     if gaps:
         raise ValueError(f"基金 {fund_id} 切片后月份存在缺口: {gaps}")
-    rf = resolve_rf_rates(session, d_slice)
+    # RBA 缺失：scoped 例外（PDD 1.7 / 决策1），剔除该月于超额序列 + 继续。
+    # 切片路径不写 rba_missing 异常（R1）：切片可见的 RBA 缺失月必为 full 历史子集，
+    # full 路径的 compute_and_store_metrics 已写库覆盖一切切片场景。
+    rf, _missing = resolve_rf_rates(session, d_slice)
     metrics = compute_all_metrics(r_slice, rf, fund_name=fund_id)
     metrics["fund_id"] = fund_id
     metrics["date_period"] = d_slice[-1][:7]
@@ -92,7 +95,8 @@ def compare(fund_ids: str = Query(...),
         fund = get_fund(session, fid)
         m_dict["fund_name"] = fund.fund_name if fund else None
         # 布尔字段统一转 bool（FundMetric 是 Integer 0/1，time-series 返回 bool）
-        for bk in ("is_short_history_warning", "is_geltner_applied", "is_q_significant"):
+        for bk in ("is_short_history_warning", "is_geltner_applied", "is_q_significant",
+                   "orig_dd_recovered", "un_dd_recovered"):
             if m_dict.get(bk) is not None:
                 m_dict[bk] = bool(m_dict[bk])
         results.append(m_dict)

@@ -72,45 +72,49 @@ def recompute_nav(session: Session, fund_id: str) -> None:
     session.commit()
 
 
-def resolve_rf_rates(session: Session, dates: list[str]) -> list[float]:
-    """按月份从 rba_cash_rates 表查年化利率。缺失月份抛 ValueError（零容忍）。
+def resolve_rf_rates(session: Session, dates: list[str]) -> tuple[list[float | None], list[str]]:
+    """按月份从 rba_cash_rates 表查年化利率。
 
-    CLAUDE.md 第一条：数据缺失必须明确报错并停止计算，不允许用估算值/回退值
-    填补。RBA 缺失会扭曲超额收益类指标，必须先抓取再计算。
+    Returns:
+        (rates, missing_dates): rates 与 dates 等长，RBA 缺失位为 None；
+        missing_dates 为 RBA 缺失的基金日期列表（供 pipeline 写 rba_missing 异常）。
+
+    Scoped 例外（PDD 1.7 / 决策1）：RBA 基准缺失不抛错，交由 pipeline 剔除该月于
+    超额序列 + 写异常审计 + 继续计算。基金自身月度缺口仍由 _find_month_gaps 零容忍。
+    RBA 缺失会扭曲超额收益类指标，故剔除而非填充（禁插值/回填，CLAUDE.md 第一条）。
     """
-    rates = []
-    missing = []
+    rates: list[float | None] = []
+    missing: list[str] = []
     for d in dates:
         month_key = d[:7]  # YYYY-MM
         rba = session.get(RbaCashRate, month_key)
         if rba is None:
-            missing.append(month_key)
-            continue
-        rates.append(rba.rate)
-    if missing:
-        raise ValueError(
-            f"RBA 利率缺失月份: {missing}。拒绝计算（数据缺口零容忍）。"
-            f"请先调用 POST /api/rba/refresh 抓取 RBA 利率后重试。"
-        )
-    return rates
+            missing.append(d)
+            rates.append(None)
+        else:
+            rates.append(rba.rate)
+    return rates, missing
 
 
 def replace_anomalies(session: Session, fund_id: str, anomalies: list[dict]) -> None:
-    """清空并重写某基金的异常记录。
+    """清空并重写某基金的异常记录（return_outlier + rba_missing 两类）。
 
-    显式映射字段（忽略 detect_anomalies 返回的 commentary_truth，
-    因为 Anomaly 表不存储此字段--它属于 monthly_returns 表）。
+    每条 dict 需含 date, type；return_outlier 另含 value/z_score/threshold_sigma/
+    mean/stdev；rba_missing 另含 reason，数值字段缺省写 None（Anomaly 表这些列已 nullable）。
+    忽略 detect_anomalies 返回的 commentary_truth（属 monthly_returns 表，不存于此）。
     """
     session.query(Anomaly).filter_by(fund_id=fund_id).delete()
     for a in anomalies:
         session.add(Anomaly(
             fund_id=fund_id,
             date=a["date"],
-            value=a["value"],
-            z_score=a["z_score"],
-            threshold_sigma=a["threshold_sigma"],
-            mean=a["mean"],
-            stdev=a["stdev"],
+            type=a.get("type", "return_outlier"),
+            reason=a.get("reason"),
+            value=a.get("value"),
+            z_score=a.get("z_score"),
+            threshold_sigma=a.get("threshold_sigma"),
+            mean=a.get("mean"),
+            stdev=a.get("stdev"),
         ))
     session.commit()
 

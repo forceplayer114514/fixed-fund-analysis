@@ -1,5 +1,21 @@
 import { useState, useMemo } from 'react'
 import { useStore } from '../store/useStore'
+import type { Anomaly } from '../types'
+
+function typeBadge(a: Anomaly) {
+  if (a.type === 'rba_missing') {
+    return (
+      <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">
+        基准缺失
+      </span>
+    )
+  }
+  return (
+    <span className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded-full font-medium">
+      离群点
+    </span>
+  )
+}
 
 export default function AnomalyTable() {
   const anomalies = useStore(s => s.anomalies)
@@ -73,77 +89,88 @@ export default function AnomalyTable() {
           <thead>
             <tr className="border-b-2 border-gray-100">
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">基金</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">类型</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">日期</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">收益率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">Z-Score</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">阈值</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">中位数</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">标准差</th>
-              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">操作</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">操作/原因</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map(a => (
-              <tr key={a.id} className="border-b border-gray-50 hover:bg-gray-50">
-                <td className="py-2.5 px-3">{a.fund_name ?? a.fund_id}</td>
-                <td className="py-2.5 px-3">{a.date}</td>
-                <td className="py-2.5 px-3">{(a.value * 100).toFixed(2)}%</td>
-                <td
-                  className={`py-2.5 px-3 font-medium ${
-                    Math.abs(a.z_score) >= 3 ? 'text-red-600' : Math.abs(a.z_score) >= 2.5 ? 'text-orange-500' : ''
-                  }`}
-                >
-                  {a.z_score.toFixed(2)}
-                </td>
-                <td className="py-2.5 px-3">{a.threshold_sigma}</td>
-                <td className="py-2.5 px-3">{(a.mean * 100).toFixed(2)}%</td>
-                <td className="py-2.5 px-3">{(a.stdev * 100).toFixed(2)}%</td>
-                <td className="py-2.5 px-3">
-                  {editingId === a.monthly_return_id ? (
-                    <span className="flex gap-1 items-center">
-                      <input
-                        className="w-20 text-xs border border-gray-200 rounded px-1.5 py-0.5"
-                        type="number"
-                        step="0.01"
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value)}
-                        placeholder="5.00"
-                      />
-                      <span className="text-xs text-gray-400">%</span>
+            {filtered.map(a => {
+              const isRba = a.type === 'rba_missing'
+              return (
+                <tr key={a.id} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="py-2.5 px-3">{a.fund_name ?? a.fund_id}</td>
+                  <td className="py-2.5 px-3">{typeBadge(a)}</td>
+                  <td className="py-2.5 px-3">{a.date}</td>
+                  <td className="py-2.5 px-3">{a.value != null ? `${(a.value * 100).toFixed(2)}%` : '-'}</td>
+                  <td
+                    className={`py-2.5 px-3 font-medium ${
+                      a.z_score != null && Math.abs(a.z_score) >= 3
+                        ? 'text-red-600'
+                        : a.z_score != null && Math.abs(a.z_score) >= 2.5
+                          ? 'text-orange-500'
+                          : ''
+                    }`}
+                  >
+                    {a.z_score != null ? a.z_score.toFixed(2) : '-'}
+                  </td>
+                  <td className="py-2.5 px-3">{a.threshold_sigma != null ? a.threshold_sigma : '-'}</td>
+                  <td className="py-2.5 px-3">{a.mean != null ? `${(a.mean * 100).toFixed(2)}%` : '-'}</td>
+                  <td className="py-2.5 px-3">{a.stdev != null ? `${(a.stdev * 100).toFixed(2)}%` : '-'}</td>
+                  <td className="py-2.5 px-3">
+                    {isRba ? (
+                      <span className="text-xs text-gray-500">{a.reason ?? 'RBA 基准缺失'}</span>
+                    ) : editingId === a.monthly_return_id ? (
+                      <span className="flex gap-1 items-center">
+                        <input
+                          className="w-20 text-xs border border-gray-200 rounded px-1.5 py-0.5"
+                          type="number"
+                          step="0.01"
+                          value={editValue}
+                          onChange={e => setEditValue(e.target.value)}
+                          placeholder="5.00"
+                        />
+                        <span className="text-xs text-gray-400">%</span>
+                        <button
+                          className="text-xs text-white bg-blue-500 rounded px-2 py-0.5"
+                          onClick={() => a.monthly_return_id != null && handleEdit(a.monthly_return_id)}
+                        >
+                          确认
+                        </button>
+                        <button
+                          className="text-xs text-gray-500"
+                          onClick={() => { setEditingId(null); setEditError('') }}
+                        >
+                          取消
+                        </button>
+                        {editError && <span className="text-xs text-red-500">{editError}</span>}
+                      </span>
+                    ) : (
                       <button
-                        className="text-xs text-white bg-blue-500 rounded px-2 py-0.5"
-                        onClick={() => a.monthly_return_id != null && handleEdit(a.monthly_return_id)}
+                        className="text-xs text-gray-500 border border-gray-200 rounded px-2 py-0.5 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={a.monthly_return_id == null}
+                        onClick={() => {
+                          if (a.monthly_return_id == null) return
+                          setEditingId(a.monthly_return_id)
+                          setEditValue(a.value != null ? (a.value * 100).toFixed(4) : '')
+                          setEditError('')
+                        }}
                       >
-                        确认
+                        纠错
                       </button>
-                      <button
-                        className="text-xs text-gray-500"
-                        onClick={() => { setEditingId(null); setEditError('') }}
-                      >
-                        取消
-                      </button>
-                      {editError && <span className="text-xs text-red-500">{editError}</span>}
-                    </span>
-                  ) : (
-                    <button
-                      className="text-xs text-gray-500 border border-gray-200 rounded px-2 py-0.5 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                      disabled={a.monthly_return_id == null}
-                      onClick={() => {
-                        if (a.monthly_return_id == null) return
-                        setEditingId(a.monthly_return_id)
-                        setEditValue((a.value * 100).toFixed(4))
-                        setEditError('')
-                      }}
-                    >
-                      纠错
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={8} className="py-8 text-center text-gray-400">
+                <td colSpan={9} className="py-8 text-center text-gray-400">
                   暂无异常数据
                 </td>
               </tr>

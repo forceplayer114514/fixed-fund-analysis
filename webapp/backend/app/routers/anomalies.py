@@ -25,15 +25,20 @@ def list_anomalies(session: Session = Depends(get_db)):
     out = []
     for a in rows:
         fund = session.get(Fund, a.fund_id)
-        # 按 (fund_id, date) 精确定位对应的 monthly_returns 行主键
-        mr = (session.query(MonthlyReturn)
-              .filter_by(fund_id=a.fund_id, date=a.date).first())
+        # return_outlier：按 (fund_id, date) 精确定位对应的 monthly_returns 行主键供纠错
+        # rba_missing：基金该月收益本身存在（缺的是 RBA），纠错无意义，monthly_return_id=None
+        mr_id = None
+        if a.type != "rba_missing":
+            mr = (session.query(MonthlyReturn)
+                  .filter_by(fund_id=a.fund_id, date=a.date).first())
+            mr_id = mr.id if mr else None
         out.append(AnomalyResponse(
-            id=a.id, fund_id=a.fund_id, date=a.date, value=a.value,
-            z_score=a.z_score, threshold_sigma=a.threshold_sigma,
+            id=a.id, fund_id=a.fund_id, date=a.date,
+            type=a.type, reason=a.reason,
+            value=a.value, z_score=a.z_score, threshold_sigma=a.threshold_sigma,
             mean=a.mean, stdev=a.stdev,
             fund_name=fund.fund_name if fund else None,
-            monthly_return_id=mr.id if mr else None,
+            monthly_return_id=mr_id,
         ))
     return out
 

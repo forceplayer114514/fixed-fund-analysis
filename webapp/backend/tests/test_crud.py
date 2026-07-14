@@ -77,31 +77,38 @@ def test_recompute_nav_after_mid_insertion(db_session):
 
 @pytest.mark.unit
 def test_resolve_rf_rates(db_session):
-    """按月份查 RBA 利率，缺失月份抛 ValueError（零容忍，CLAUDE.md 第一条）。"""
+    """按月份查 RBA 利率：缺失月返回 None + missing_dates（scoped 例外 PDD 1.7 / 决策1）。"""
     db_session.add(RbaCashRate(date_period="2026-03", rate=0.0435))
     db_session.add(RbaCashRate(date_period="2026-04", rate=0.0410))
     db_session.commit()
 
-    # 缺失月份必须报错，不允许 fallback
+    # 缺失月份：返回 None（不抛错），missing_dates 记录缺失的基金日期
     dates = ["2026-03-31", "2026-04-30", "2026-05-31"]  # 5月缺失
-    with pytest.raises(ValueError) as excinfo:
-        resolve_rf_rates(db_session, dates)
-    assert "2026-05" in str(excinfo.value)
-
-    # 完整月份正常返回
-    rates = resolve_rf_rates(db_session, ["2026-03-31", "2026-04-30"])
+    rates, missing = resolve_rf_rates(db_session, dates)
     assert rates[0] == pytest.approx(0.0435)
     assert rates[1] == pytest.approx(0.0410)
+    assert rates[2] is None
+    assert missing == ["2026-05-31"]
+
+    # 完整月份正常返回，missing 为空
+    rates2, missing2 = resolve_rf_rates(db_session, ["2026-03-31", "2026-04-30"])
+    assert rates2[0] == pytest.approx(0.0435)
+    assert rates2[1] == pytest.approx(0.0410)
+    assert missing2 == []
 
 
 def _minimal_metrics(**overrides) -> dict:
     """构造一份最小合法的 FundMetric 指标 dict（用于 upsert_metrics 测试）。"""
     base = dict(
-        date_period="2026-01", history_months=1, is_short_history_warning=1,
+        date_period="2026-01", history_months=1, excess_sample_months=1,
+        is_short_history_warning=1,
         unsmoothing_coefficient_phi=0.0, is_geltner_applied=0,
+        orig_annualized_return=0.0, un_annualized_return=0.0,
         orig_annualized_excess_return=0.0, un_annualized_excess_return=0.0,
         orig_max_drawdown=0.0, un_max_drawdown=0.0,
-        orig_omega_ratio=1.0, un_omega_ratio=1.0,
+        orig_recovery_months=None, un_recovery_months=None,
+        orig_dd_recovered=1, un_dd_recovered=1,
+        orig_information_ratio=None, un_information_ratio=None,
         orig_excess_win_rate=0.5, un_excess_win_rate=0.5,
         orig_max_underperform_months=1, un_max_underperform_months=1,
         orig_annualized_volatility=0.01, un_annualized_volatility=0.01,
@@ -133,7 +140,7 @@ def test_upsert_metrics_refreshes_updated_at(db_session):
     time.sleep(1.1)
 
     # 第二次：更新（走 setattr 分支，触发 onupdate）
-    upsert_metrics(db_session, "f1", _minimal_metrics(orig_omega_ratio=2.0))
+    upsert_metrics(db_session, "f1", _minimal_metrics(orig_information_ratio=1.5))
     t2 = db_session.get(FundMetric, "f1").updated_at
 
     assert t2 != t1, f"updated_at 在 UPDATE 后未刷新: t1={t1!r} t2={t2!r}"

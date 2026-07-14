@@ -68,17 +68,28 @@ def test_compute_and_store_metrics_uses_db_rba(db_session):
 
 
 @pytest.mark.unit
-def test_compute_and_store_metrics_rba_missing_raises(db_session):
-    """RBA 利率缺失月份时必须报错（零容忍，CLAUDE.md 第一条）。"""
+def test_compute_and_store_metrics_rba_missing_excluded(db_session):
+    """RBA 缺失月：剔除于超额序列 + 写 rba_missing 异常 + 继续计算（PDD 1.7 / 决策1）。
+
+    基金自身月度缺口仍零容忍（见 test_compute_and_store_metrics_gap_detection）。
+    """
     create_fund(db_session, fund_id="f1", fund_name="Fund One",
                 confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
     upsert_monthly_return(db_session, "f1", "2026-01-31", 0.01)
     # 不写入 RBA 利率
     db_session.commit()
 
-    with pytest.raises(ValueError) as excinfo:
-        compute_and_store_metrics(db_session, "f1")
-    assert "2026-01" in str(excinfo.value)
+    metrics = compute_and_store_metrics(db_session, "f1")
+    # 计算继续：基金 1 月，超额有效月数=0（RBA 缺失）
+    assert metrics["history_months"] == 1
+    assert metrics["excess_sample_months"] == 0
+    # rba_missing 异常落库
+    anomalies = db_session.query(Anomaly).filter_by(fund_id="f1").all()
+    assert len(anomalies) == 1
+    assert anomalies[0].type == "rba_missing"
+    assert anomalies[0].reason is not None
+    assert anomalies[0].date == "2026-01-31"
+    assert anomalies[0].value is None  # 数值字段为 None
 
 
 @pytest.mark.unit

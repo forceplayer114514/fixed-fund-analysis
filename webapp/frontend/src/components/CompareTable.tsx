@@ -2,12 +2,18 @@ import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import type { FundMetrics } from '../types'
 
-function rankBy<T extends Record<string, any>>(
+/** 小样本门禁阈值（PDD 1.5）：n < 24 时 IR/胜率名次置灰 + 角标。 */
+const SMALL_SAMPLE_THRESHOLD = 24
+
+function rankBy<T extends FundMetrics>(
   items: T[],
   extract: (item: T) => number | null,
-  asc = false
+  eligible: (item: T) => boolean = () => true,
+  asc = false,
 ): Map<string, number> {
-  const sorted = [...items].sort((a, b) => {
+  // 仅 eligible 项参与 1..k 排序；非 eligible（样本不足）项不占用名次序号（PDD 1.5）。
+  const eligibleItems = items.filter(eligible)
+  const sorted = [...eligibleItems].sort((a, b) => {
     const va = extract(a) ?? (asc ? Infinity : -Infinity)
     const vb = extract(b) ?? (asc ? Infinity : -Infinity)
     return asc ? va - vb : vb - va
@@ -18,7 +24,7 @@ function rankBy<T extends Record<string, any>>(
 }
 
 function fmt(v: number | null, suffix = '', decimals = 2) {
-  if (v == null) return '—'
+  if (v == null) return '-'
   return `${(v * 100).toFixed(decimals)}${suffix}`
 }
 
@@ -34,52 +40,47 @@ export default function CompareTable() {
 
   const rows = useMemo(() => {
     if (!compareData) return []
-    const items = compareData.funds as (FundMetrics & { fund_id: string })[]
+    const items = compareData.funds as FundMetrics[]
+    const isOrig = smoothingMode === 'original'
+    const statEligible = (x: FundMetrics) => (x.excess_sample_months ?? 0) >= SMALL_SAMPLE_THRESHOLD
 
     const rankExcess = rankBy(items, m =>
-      smoothingMode === 'original' ? m.orig_annualized_excess_return : m.un_annualized_excess_return
-    )
-    const rankDD = rankBy(
-      items,
-      m => (smoothingMode === 'original' ? m.orig_max_drawdown : m.un_max_drawdown)
-    )
-    const rankOmega = rankBy(items, m => {
-      const v = smoothingMode === 'original' ? m.orig_omega_ratio : m.un_omega_ratio
-      // Omega 为 null（原 inf，无跑输月=最优）应排首位，而非末名
-      return v == null ? Infinity : v
-    })
+      isOrig ? m.orig_annualized_excess_return : m.un_annualized_excess_return)
+    const rankIR = rankBy(items, m =>
+      isOrig ? m.orig_information_ratio : m.un_information_ratio, statEligible)
+    const rankDD = rankBy(items, m =>
+      isOrig ? m.orig_max_drawdown : m.un_max_drawdown)
     const rankWin = rankBy(items, m =>
-      smoothingMode === 'original' ? m.orig_excess_win_rate : m.un_excess_win_rate
-    )
+      isOrig ? m.orig_excess_win_rate : m.un_excess_win_rate, statEligible)
 
     return items.map(m => {
-      const excess =
-        smoothingMode === 'original'
-          ? m.orig_annualized_excess_return
-          : m.un_annualized_excess_return
-      const dd =
-        smoothingMode === 'original' ? m.orig_max_drawdown : m.un_max_drawdown
-      const omega =
-        smoothingMode === 'original' ? m.orig_omega_ratio : m.un_omega_ratio
-      const winRate =
-        smoothingMode === 'original' ? m.orig_excess_win_rate : m.un_excess_win_rate
-      const run =
-        smoothingMode === 'original'
-          ? m.orig_max_underperform_months
-          : m.un_max_underperform_months
-      const vol =
-        smoothingMode === 'original'
-          ? m.orig_annualized_volatility
-          : m.un_annualized_volatility
+      const isOrigRow = isOrig
+      const dd = isOrigRow ? m.orig_max_drawdown : m.un_max_drawdown
+      const recoveryMonths = isOrigRow ? m.orig_recovery_months : m.un_recovery_months
+      const recovered = isOrigRow ? m.orig_dd_recovered : m.un_dd_recovered
+      // 恢复月数标签（修正3 统一口径：与卡片一致）
+      let recoveryLabel: string
+      if (dd === 0 || recoveryMonths == null) recoveryLabel = '无回撤'
+      else recoveryLabel = recovered
+        ? `恢复${recoveryMonths}个月`
+        : `未恢复(已${recoveryMonths}个月)`
 
       return {
         fund_id: m.fund_id,
-        excess: `${fmt(excess, '%')} (${rankExcess.get(m.fund_id)})`,
-        dd: `${fmt(dd, '%')} (${rankDD.get(m.fund_id)})`,
-        omega: `${omega == null ? '极佳' : omega.toFixed(2)} (${rankOmega.get(m.fund_id)})`,
-        winRate: `${fmt(winRate, '%')} (${rankWin.get(m.fund_id)})`,
-        run: `${run} 个月`,
-        vol: fmt(vol, '%'),
+        annReturn: fmt(isOrigRow ? m.orig_annualized_return : m.un_annualized_return, '%'),
+        excess: fmt(isOrigRow ? m.orig_annualized_excess_return : m.un_annualized_excess_return, '%'),
+        excessRank: rankExcess.get(m.fund_id),
+        ir: isOrigRow ? m.orig_information_ratio : m.un_information_ratio,
+        irRank: rankIR.get(m.fund_id),
+        dd: fmt(dd, '%'),
+        ddRank: rankDD.get(m.fund_id),
+        recoveryLabel,
+        winRate: fmt(isOrigRow ? m.orig_excess_win_rate : m.un_excess_win_rate, '%'),
+        winRank: rankWin.get(m.fund_id),
+        run: `${isOrigRow ? m.orig_max_underperform_months : m.un_max_underperform_months} 个月`,
+        vol: fmt(isOrigRow ? m.orig_annualized_volatility : m.un_annualized_volatility, '%'),
+        small: (m.excess_sample_months ?? 0) < SMALL_SAMPLE_THRESHOLD,
+        n: m.excess_sample_months ?? 0,
       }
     })
   }, [compareData, smoothingMode])
@@ -94,9 +95,10 @@ export default function CompareTable() {
           <thead>
             <tr className="border-b-2 border-gray-100">
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">基金名称</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">年化收益率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">年化超额收益</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">信息比率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">最大回撤</th>
-              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">Omega 比率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">超额胜率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">最长跑输</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">年化波动率</th>
@@ -106,10 +108,26 @@ export default function CompareTable() {
             {rows.map(r => (
               <tr key={r.fund_id} className="border-b border-gray-50 hover:bg-gray-50">
                 <td className="py-2.5 px-3 font-medium max-w-xs truncate" title={fundNameMap.get(r.fund_id) ?? r.fund_id}>{fundNameMap.get(r.fund_id) ?? r.fund_id}</td>
-                <td className="py-2.5 px-3">{r.excess}</td>
-                <td className="py-2.5 px-3">{r.dd}</td>
-                <td className="py-2.5 px-3">{r.omega}</td>
-                <td className="py-2.5 px-3">{r.winRate}</td>
+                {/* 年化收益率：无名次括号（PDD 1.3） */}
+                <td className="py-2.5 px-3">{r.annReturn}</td>
+                <td className="py-2.5 px-3">{r.excess} ({r.excessRank})</td>
+                <td className="py-2.5 px-3">
+                  {r.ir == null ? '-' : r.ir.toFixed(2)}
+                  {r.irRank != null && <span className="text-xs text-gray-400 ml-1">({r.irRank})</span>}
+                  {r.small && (
+                    <span className="ml-1 text-orange-400 cursor-help" title={`样本不足(n=${r.n})，统计指标不可靠`}>⚠</span>
+                  )}
+                </td>
+                <td className="py-2.5 px-3">
+                  {r.dd} ({r.ddRank}) <span className="text-xs text-gray-400">· {r.recoveryLabel}</span>
+                </td>
+                <td className="py-2.5 px-3">
+                  {r.winRate}
+                  {r.winRank != null && <span className="text-xs text-gray-400 ml-1">({r.winRank})</span>}
+                  {r.small && (
+                    <span className="ml-1 text-orange-400 cursor-help" title={`样本不足(n=${r.n})，统计指标不可靠`}>⚠</span>
+                  )}
+                </td>
                 <td className="py-2.5 px-3">{r.run}</td>
                 <td className="py-2.5 px-3">{r.vol}</td>
               </tr>

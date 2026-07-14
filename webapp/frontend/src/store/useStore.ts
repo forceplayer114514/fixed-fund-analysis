@@ -14,6 +14,9 @@ interface AppState {
 
   // 选中
   selectedFundIds: string[]
+  /** 当前展示基金（Phase 1 过渡：卡片与"当前展示"标签同源，修复一致性 bug；
+   *  null 时回退 selectedFundIds[0]。Phase 2 锚定机制将复用此字段） */
+  displayFundId: string | null
   period: Period
   chartMetric: ChartMetric
   smoothingMode: SmoothingMode
@@ -34,6 +37,7 @@ interface AppState {
   fetchTimeSeries: () => Promise<void>
   fetchAnomalies: () => Promise<void>
   toggleFund: (fundId: string) => void
+  setDisplayFundId: (id: string | null) => void
   setPeriod: (period: Period) => void
   setChartMetric: (m: ChartMetric) => void
   setSmoothingMode: (m: SmoothingMode) => void
@@ -48,6 +52,7 @@ export const useStore = create<AppState>((set, get) => ({
   fundsError: null,
 
   selectedFundIds: [],
+  displayFundId: null,
   period: 'full',
   chartMetric: 'nav',
   smoothingMode: 'original',
@@ -131,6 +136,7 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
 
+  setDisplayFundId: (displayFundId: string | null) => { set({ displayFundId }) },
   setPeriod: (period: Period) => { set({ period }) },
   setChartMetric: (chartMetric: ChartMetric) => { set({ chartMetric }) },
   setSmoothingMode: (smoothingMode: SmoothingMode) => { set({ smoothingMode }) },

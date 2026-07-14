@@ -1,12 +1,12 @@
 """基础计算函数测试，断言复用 tests/test_metrics.py 以保证移植精度。"""
 import pytest
-import math
 
 from app.calculations import (
     calculate_annualized_return,
     calculate_annualized_volatility,
     calculate_max_drawdown,
-    calculate_omega_ratio,
+    calculate_max_drawdown_detail,
+    calculate_information_ratio,
     calculate_excess_win_rate,
     calculate_max_consecutive_underperform,
     calculate_autocorrelation,
@@ -41,20 +41,47 @@ def test_calculate_max_drawdown():
 
 
 @pytest.mark.unit
-def test_calculate_omega_ratio():
-    # excess = [0.02, -0.01, 0.03, -0.02]
-    # 正和 = 0.05, 负和绝对值 = 0.03, Omega = 1.6667
-    assert calculate_omega_ratio([0.02, -0.01, 0.03, -0.02]) == pytest.approx(0.05 / 0.03)
-    # 无跑输月份 -> inf
-    assert math.isinf(calculate_omega_ratio([0.02, 0.03, 0.01]))
-    # 全部跑输 -> 分子0, 分母>0 -> 0.0
-    assert calculate_omega_ratio([-0.02, -0.01]) == 0.0
-    # 空列表 -> 0.0
-    assert calculate_omega_ratio([]) == 0.0
+def test_calculate_max_drawdown_detail():
+    # nav=[1.0,1.10,0.95,0.90,1.05,1.12]: 前峰1.10@idx1, 谷底0.90@idx3,
+    # 恢复: idx5=1.12>=1.10 -> recovery_idx=5, months=5-3=2, recovered=True
+    d = calculate_max_drawdown_detail([1.0, 1.10, 0.95, 0.90, 1.05, 1.12], "TestFund")
+    assert d["max_drawdown"] == pytest.approx((0.90 - 1.10) / 1.10)
+    assert d["recovery_months"] == 2
+    assert d["recovered"] is True
+    # 未恢复：谷底后未回到前峰
+    d2 = calculate_max_drawdown_detail([1.0, 1.10, 0.95, 0.90, 0.92, 0.95], "TestFund")
+    assert d2["max_drawdown"] == pytest.approx((0.90 - 1.10) / 1.10)
+    assert d2["recovered"] is False
+    assert d2["recovery_months"] == 5 - 3  # 末月idx - trough idx = 2
+    # 无回撤（单调递增）
+    d3 = calculate_max_drawdown_detail([1.0, 1.05, 1.10, 1.15], "TestFund")
+    assert d3["max_drawdown"] == 0.0
+    assert d3["recovery_months"] is None
+    assert d3["recovered"] is True
+    # 空序列
+    assert calculate_max_drawdown_detail([], "TestFund") == {
+        "max_drawdown": 0.0, "recovery_months": None, "recovered": True}
 
 
 @pytest.mark.unit
-def test_calculate_excess_win_rate():
+def test_calculate_information_ratio():
+    # excess=[0.01,-0.005,0.008,-0.003]: 手工算 mean/std(ddof=1)*sqrt(12)
+    excess = [0.01, -0.005, 0.008, -0.003]
+    n = len(excess)
+    mean_e = sum(excess) / n
+    var = sum((e - mean_e) ** 2 for e in excess) / (n - 1)
+    std_e = var ** 0.5
+    expected = mean_e / std_e * (12.0 ** 0.5)
+    assert calculate_information_ratio(excess) == pytest.approx(expected)
+    # n<2 -> None
+    assert calculate_information_ratio([0.01]) is None
+    assert calculate_information_ratio([]) is None
+    # std=0（全部相同）-> None
+    assert calculate_information_ratio([0.01, 0.01, 0.01]) is None
+
+
+@pytest.mark.unit
+def test_excess_win_rate():
     # [0.02, -0.01, 0.03, 0.0] -> 正数2个 -> 2/4 = 0.5（0.0 不算跑赢）
     assert calculate_excess_win_rate([0.02, -0.01, 0.03, 0.0]) == pytest.approx(0.5)
     assert calculate_excess_win_rate([0.02, 0.03]) == pytest.approx(1.0)
@@ -62,7 +89,7 @@ def test_calculate_excess_win_rate():
 
 
 @pytest.mark.unit
-def test_calculate_max_consecutive_underperform():
+def test_max_consecutive_underperform():
     # excess = [0.02, -0.01, -0.03, 0.04, -0.01, -0.02, -0.01]
     # 连续 <= 0 的块：[-0.01,-0.03]长2, [-0.01,-0.02,-0.01]长3
     assert calculate_max_consecutive_underperform([0.02, -0.01, -0.03, 0.04, -0.01, -0.02, -0.01]) == 3
@@ -70,6 +97,19 @@ def test_calculate_max_consecutive_underperform():
     assert calculate_max_consecutive_underperform([0.02, 0.03]) == 0
     # 空列表 -> 0
     assert calculate_max_consecutive_underperform([]) == 0
+
+
+@pytest.mark.unit
+def test_max_underperform_rba_missing_breaks_streak():
+    """决策5：RBA 缺失月(None)中断跑输 streak，不静默拼接成连续。"""
+    # 跑输、RBA缺失、跑输 -> 压缩会算成连续2，对齐序列正确算成1
+    assert calculate_max_consecutive_underperform([-0.01, None, -0.02]) == 1
+    # 连续两月跑输中间无缺失 -> 2
+    assert calculate_max_consecutive_underperform([-0.01, -0.02, 0.01]) == 2
+    # 全 None -> 0
+    assert calculate_max_consecutive_underperform([None, None]) == 0
+    # 持平(0)算跑输；None 在中间打断
+    assert calculate_max_consecutive_underperform([0.0, None, 0.0]) == 1
 
 
 @pytest.mark.unit
@@ -112,12 +152,15 @@ def test_compute_all_metrics_short_history():
     rf_rates = [0.0435] * 6  # 6个月，恒定 RBA 4.35%
     m = compute_all_metrics(returns, rf_rates, "ShortFund")
     assert m["history_months"] == 6
+    assert m["excess_sample_months"] == 6
     assert m["is_short_history_warning"] == 1
     assert m["is_geltner_applied"] == 0
     # un 指标应等于 orig 指标
     assert m["un_annualized_excess_return"] == pytest.approx(m["orig_annualized_excess_return"])
-    assert m["un_omega_ratio"] == pytest.approx(m["orig_omega_ratio"])
+    assert m["un_information_ratio"] == pytest.approx(m["orig_information_ratio"])
     assert m["un_max_drawdown"] == pytest.approx(m["orig_max_drawdown"])
+    assert m["un_annualized_return"] == pytest.approx(m["orig_annualized_return"])
+    assert m["un_recovery_months"] == m["orig_recovery_months"]
 
 
 @pytest.mark.unit
@@ -141,8 +184,48 @@ def test_compute_all_metrics_win_rate_and_underperform():
     m = compute_all_metrics(returns, rf_rates, "TestFund")
     assert m["orig_excess_win_rate"] == pytest.approx(1.0)
     assert m["orig_max_underperform_months"] == 0
-    # Omega 应为 inf（无跑输月）
-    assert math.isinf(m["orig_omega_ratio"])
+    # IR 可计算（4 个不同正值超额，std>0）
+    assert m["orig_information_ratio"] is not None
+
+
+@pytest.mark.unit
+def test_ir_validation_anchor():
+    """PDD 1.1 校验锚点：IR 分子*12 ≈ 年化超额收益（算术 vs 几何年化 <0.3pp）。"""
+    returns = [0.003, 0.004, 0.005, 0.004, 0.003, 0.006] * 6  # 36 个月
+    rf_rates = [0.0435] * 36
+    m = compute_all_metrics(returns, rf_rates, "AnchorFund")
+    excess = [r - 0.0435 / 12.0 for r in returns]
+    mean_e = sum(excess) / len(excess)
+    arithmetic_annualized_excess = mean_e * 12  # IR 分子*12
+    assert abs(arithmetic_annualized_excess - m["orig_annualized_excess_return"]) < 0.003
+    assert m["orig_information_ratio"] is not None
+
+
+@pytest.mark.unit
+def test_compute_all_metrics_rba_missing():
+    """RBA 缺失月从超额序列剔除：excess_sample_months 减少；基金口径用全序列；
+    年化超额用 n_excess；最长跑输在未压缩序列上 None 中断。"""
+    returns = [0.005, 0.006, 0.004, 0.007, 0.005, 0.006]
+    rf_rates = [0.0435, 0.0435, None, 0.0435, 0.0435, 0.0435]  # 第3月 RBA 缺失
+    m = compute_all_metrics(returns, rf_rates, "RbaMissingFund")
+    assert m["history_months"] == 6
+    assert m["excess_sample_months"] == 5  # 剔除1月
+    # 基金口径年化收益率用全6月
+    comp_raw = 1.0
+    for r in returns:
+        comp_raw *= (1.0 + r)
+    assert m["orig_annualized_return"] == pytest.approx(comp_raw ** (12.0 / 6) - 1)
+    # 年化超额用压缩序列 + n_excess=5
+    excess_comp = [r - 0.0435 / 12.0 for r, rf in zip(returns, rf_rates) if rf is not None]
+    expected_excess_ann = 1.0
+    for e in excess_comp:
+        expected_excess_ann *= (1.0 + e)
+    expected_excess_ann = expected_excess_ann ** (12.0 / 5) - 1
+    assert m["orig_annualized_excess_return"] == pytest.approx(expected_excess_ann)
+    # IR 可计算（5 个有效月，std>0）
+    assert m["orig_information_ratio"] is not None
+    # 最长跑输：第3月 RBA 缺失，未压缩序列在该位 None 中断（此处全跑赢，仅验证不报错且为0）
+    assert m["orig_max_underperform_months"] == 0
 
 
 @pytest.mark.unit

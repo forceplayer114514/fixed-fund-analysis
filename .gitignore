@@ -15,3 +15,6 @@ data/*.db
 node_modules/
 webapp/frontend/node_modules/
 dist/
+
+# Phase 1 迁移备份
+data/*.db.bak-*

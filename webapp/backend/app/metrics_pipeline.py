@@ -55,7 +55,7 @@ def compute_and_store_metrics(
     returns = [dp["net_return"] for dp in time_series]
     dates = [dp["date"] for dp in time_series]
 
-    # 数据缺口零容忍（CLAUDE.md 第一条）：月度序列必须连续，否则拒绝计算
+    # 数据缺口零容忍（CLAUDE.md 第一条）：基金月度序列必须连续，否则拒绝计算
     gaps = _find_month_gaps(dates)
     if gaps:
         raise ValueError(
@@ -63,16 +63,22 @@ def compute_and_store_metrics(
             f"拒绝计算（数据缺口零容忍）。"
         )
 
-    rf_rates = resolve_rf_rates(session, dates)
+    # RBA 基准缺失：scoped 例外（PDD 1.7 / 决策1）--不抛错，剔除该月于超额序列 + 写异常 + 继续
+    rf_rates, missing_rba_dates = resolve_rf_rates(session, dates)
 
-    # 计算5维指标
+    # 计算5维指标（rf_rates 含 None 的月份在 compute_all_metrics 内部剔除于超额序列）
     metrics = compute_all_metrics(returns, rf_rates, fund_name=fund_id)
 
     # 记录数据截止月份（最近月份），FundMetric 必需字段
     metrics["date_period"] = dates[-1][:7]
 
-    # 检测异常并写入
+    # 检测异常并写入：MAD 离群点（type=return_outlier）+ RBA 缺失（type=rba_missing）
     anomalies = detect_anomalies(time_series, threshold_sigma=3.0)
+    anomalies.extend([
+        {"date": d, "type": "rba_missing",
+         "reason": "RBA 现金利率缺失，该月已从超额序列剔除"}
+        for d in missing_rba_dates
+    ])
     replace_anomalies(session, fund_id, anomalies)
 
     # 写入指标

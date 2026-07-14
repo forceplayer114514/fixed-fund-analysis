@@ -45,6 +45,7 @@ def detect_anomalies(time_series: list[dict], threshold_sigma: float = 3.0) -> l
         if abs(mad_score) >= threshold_sigma:
             anomalies.append({
                 "date": dp["date"],
+                "type": "return_outlier",
                 "value": ret,
                 "z_score": mad_score,
                 "threshold_sigma": threshold_sigma,

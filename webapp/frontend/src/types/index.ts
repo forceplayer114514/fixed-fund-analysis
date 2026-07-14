@@ -17,19 +17,31 @@ export interface FundMetrics {
   fund_name: string | null
   date_period: string
   history_months: number
+  excess_sample_months: number
   is_short_history_warning: boolean
   unsmoothing_coefficient_phi: number
   is_geltner_applied: boolean
+  // 维度1：进攻（年化收益率=基金口径几何年化；年化超额=超额口径复利年化）
+  orig_annualized_return: number
+  un_annualized_return: number
   orig_annualized_excess_return: number
   un_annualized_excess_return: number | null
+  // 维度2：防守（最大回撤 + 恢复月数；recovery_months=null 表示无回撤）
   orig_max_drawdown: number
   un_max_drawdown: number
-  orig_omega_ratio: number | null
-  un_omega_ratio: number | null
+  orig_recovery_months: number | null
+  un_recovery_months: number | null
+  orig_dd_recovered: boolean
+  un_dd_recovered: boolean
+  // 维度3：性价比（信息比率；n<2 或 std=0 时为 null）
+  orig_information_ratio: number | null
+  un_information_ratio: number | null
+  // 维度4：体感与煎熬度
   orig_excess_win_rate: number
   un_excess_win_rate: number
   orig_max_underperform_months: number
   un_max_underperform_months: number
+  // 维度5：真实性辅助
   orig_annualized_volatility: number
   un_annualized_volatility: number
   ljung_box_q: number
@@ -63,13 +75,17 @@ export interface Anomaly {
   id: number
   fund_id: string
   date: string
-  value: number
-  z_score: number
-  threshold_sigma: number
-  mean: number
-  stdev: number
+  /** 'return_outlier' = MAD 离群点；'rba_missing' = RBA 基准缺失（PDD 1.7） */
+  type: string
+  reason: string | null
+  /** 以下数值字段仅 return_outlier 有值；rba_missing 行为 null */
+  value: number | null
+  z_score: number | null
+  threshold_sigma: number | null
+  mean: number | null
+  stdev: number | null
   fund_name: string | null
-  /** 对应 monthly_returns 行主键，人工纠错 PATCH 用（非 anomalies.id） */
+  /** 对应 monthly_returns 行主键，人工纠错 PATCH 用（非 anomalies.id）。rba_missing 为 null */
   monthly_return_id: number | null
 }
 

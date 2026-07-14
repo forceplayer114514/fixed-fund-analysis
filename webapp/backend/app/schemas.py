@@ -54,14 +54,19 @@ class AnomalyResponse(BaseModel):
     id: int
     fund_id: str
     date: str
-    value: float
-    z_score: float
-    threshold_sigma: float
-    mean: float
-    stdev: float
+    # 类型：return_outlier=MAD 离群点；rba_missing=RBA 基准缺失（PDD 1.7）
+    type: str = "return_outlier"
+    reason: Optional[str] = None
+    # 以下数值字段仅 return_outlier 有值；rba_missing 行为 None
+    value: Optional[float] = None
+    z_score: Optional[float] = None
+    threshold_sigma: Optional[float] = None
+    mean: Optional[float] = None
+    stdev: Optional[float] = None
     fund_name: Optional[str] = None
     # 该异常点对应的 monthly_returns 行主键，供前端人工纠错 PATCH 定位。
     # 不能用 anomalies.id（独立自增序列），否则会改写无关基金的月度数据。
+    # rba_missing 行不提供（基金该月收益本身存在，纠错无意义，应修 RBA）。
     monthly_return_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
@@ -70,8 +75,9 @@ class AnomalyResponse(BaseModel):
 def sanitize_for_json(obj):
     """递归把 inf/NaN float 转为 None（JSON 标准不支持无穷大/NaN）。
 
-    Omega 比率在无跑输月时为 inf，需转 None 供前端显示为"极佳/无跑输"。
-    compare/time-series/recompute 等返回 metrics 的端点统一使用。
+    信息比率在 std=0 或 n<2 时已由 calculate_information_ratio 返回 None（Omega 已
+    移除，不再有 inf 场景）。compare/time-series/recompute 等返回 metrics 的端点统一
+    使用，作为通用防御保留。
     """
     if isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}

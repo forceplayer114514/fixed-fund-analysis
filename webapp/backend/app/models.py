@@ -50,11 +50,15 @@ class Anomaly(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), nullable=False)
     date: Mapped[str] = mapped_column(String, nullable=False)
-    value: Mapped[float] = mapped_column(Float, nullable=False)
-    z_score: Mapped[float] = mapped_column(Float, nullable=False)
-    threshold_sigma: Mapped[float] = mapped_column(Float, nullable=False)
-    mean: Mapped[float] = mapped_column(Float, nullable=False)
-    stdev: Mapped[float] = mapped_column(Float, nullable=False)
+    # 类型区分：return_outlier=MAD 离群点；rba_missing=RBA 基准缺失（PDD 1.7，该月已从超额序列剔除）
+    type: Mapped[str] = mapped_column(String, nullable=False, default="return_outlier")
+    reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # 以下数值字段仅 return_outlier 有意义；rba_missing 行为 None
+    value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    z_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    threshold_sigma: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stdev: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     fund: Mapped["Fund"] = relationship(back_populates="anomalies")
 
@@ -75,18 +79,25 @@ class FundMetric(Base):
     fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), primary_key=True)
     date_period: Mapped[str] = mapped_column(String, nullable=False)
     history_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    excess_sample_months: Mapped[int] = mapped_column(Integer, nullable=False)
     is_short_history_warning: Mapped[int] = mapped_column(Integer, nullable=False)
     unsmoothing_coefficient_phi: Mapped[float] = mapped_column(Float, nullable=False)
     is_geltner_applied: Mapped[int] = mapped_column(Integer, nullable=False)
-    # 维度1：进攻
+    # 维度1：进攻（年化收益率=基金口径几何年化；年化超额收益=超额口径复利年化）
+    orig_annualized_return: Mapped[float] = mapped_column(Float, nullable=False)
+    un_annualized_return: Mapped[float] = mapped_column(Float, nullable=False)
     orig_annualized_excess_return: Mapped[float] = mapped_column(Float, nullable=False)
     un_annualized_excess_return: Mapped[float] = mapped_column(Float, nullable=False)
-    # 维度2：防守
+    # 维度2：防守（最大回撤 + 恢复月数；recovery_months 为 None 表示无回撤）
     orig_max_drawdown: Mapped[float] = mapped_column(Float, nullable=False)
     un_max_drawdown: Mapped[float] = mapped_column(Float, nullable=False)
-    # 维度3：性价比
-    orig_omega_ratio: Mapped[float] = mapped_column(Float, nullable=False)
-    un_omega_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    orig_recovery_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    un_recovery_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    orig_dd_recovered: Mapped[int] = mapped_column(Integer, nullable=False)
+    un_dd_recovered: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 维度3：性价比（信息比率；n<2 或 std=0 时为 None）
+    orig_information_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    un_information_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # 维度4：体感与煎熬度
     orig_excess_win_rate: Mapped[float] = mapped_column(Float, nullable=False)
     un_excess_win_rate: Mapped[float] = mapped_column(Float, nullable=False)
