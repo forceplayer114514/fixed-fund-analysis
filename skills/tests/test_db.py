@@ -10,11 +10,19 @@ import sqlite3
 import pytest
 
 from lib.db import (
+    add_pending_review,
     create_fund,
     ensure_tables,
+    get_connection,
     get_fund,
     get_monthly_returns,
+    list_confirmed_gaps,
     list_funds,
+    list_pending_review,
+    list_stale_pending_reviews,
+    promote_pending,
+    record_confirmed_gap,
+    remove_confirmed_gap,
     recompute_nav,
     upsert_monthly_return,
 )
@@ -181,3 +189,181 @@ def test_cascade_delete(db_conn):
         "SELECT * FROM monthly_returns WHERE fund_id = ?", ("F001",)
     ).fetchall()
     assert len(rows) == 0
+
+
+# ---------- M2: inception 列 + confirmed_gaps + pending_review ----------
+
+
+def test_ensure_tables_creates_confirmed_gaps_and_pending_review(db_conn):
+    names = {
+        r["name"]
+        for r in db_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "confirmed_gaps" in names
+    assert "pending_review" in names
+
+
+def test_funds_has_inception_columns(db_conn):
+    cols = [r["name"] for r in db_conn.execute("PRAGMA table_info(funds)").fetchall()]
+    assert "inception_date" in cols
+    assert "inception_assumed" in cols
+
+
+def test_ensure_tables_migrates_old_funds_table(tmp_path):
+    """旧库 funds 表无 inception/shareclass 列时,ensure_tables 幂等补加。"""
+    conn = get_connection(str(tmp_path / "old.db"))
+    # 手建旧式 funds(cdddabd 前旧库,无 shareclass_prefix / inception 列)
+    conn.executescript(
+        """
+        CREATE TABLE funds (
+            fund_id TEXT PRIMARY KEY,
+            fund_name TEXT NOT NULL UNIQUE,
+            apir_code TEXT UNIQUE,
+            confirmed_url TEXT NOT NULL,
+            fetch_method TEXT NOT NULL,
+            url_type TEXT NOT NULL,
+            max_pdf_pages INTEGER,
+            verified_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE monthly_returns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            net_return REAL NOT NULL,
+            nav REAL NOT NULL,
+            commentary_truth REAL,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
+            UNIQUE(fund_id, date)
+        );
+        """
+    )
+    conn.commit()
+    ensure_tables(conn)
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(funds)").fetchall()]
+    assert "shareclass_prefix" in cols
+    assert "inception_date" in cols
+    assert "inception_assumed" in cols
+    names = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "confirmed_gaps" in names
+    assert "pending_review" in names
+    conn.close()
+
+
+def test_create_fund_with_inception(db_conn):
+    create_fund(db_conn, fund_id="F001", fund_name="Inc Fund",
+                confirmed_url="u", fetch_method="pdf", url_type="pdf",
+                inception_date="2019-06-30", inception_assumed=1)
+    f = get_fund(db_conn, "F001")
+    assert f["inception_date"] == "2019-06-30"
+    assert f["inception_assumed"] == 1
+
+
+def test_create_fund_inception_defaults(db_conn):
+    create_fund(db_conn, fund_id="F001", fund_name="Def Fund",
+                confirmed_url="u", fetch_method="pdf", url_type="pdf")
+    f = get_fund(db_conn, "F001")
+    assert f["inception_date"] is None
+    assert f["inception_assumed"] == 0
+
+
+def test_record_list_confirmed_gaps(db_conn):
+    _make_fund(db_conn)
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-06",
+                         exhausted_levels="L0,L1,L2,L3")
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-07",
+                         exhausted_levels="L0,L1,L2,L3")
+    gaps = list_confirmed_gaps(db_conn, "F001")
+    assert [g["missing_month"] for g in gaps] == ["2023-06", "2023-07"]
+    assert gaps[0]["exhausted_levels"] == "L0,L1,L2,L3"
+
+
+def test_record_confirmed_gap_upsert(db_conn):
+    _make_fund(db_conn)
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-06",
+                         exhausted_levels="L0,L1")
+    # 重复同月 -> 更新 exhausted_levels,不新增行
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-06",
+                         exhausted_levels="L0,L1,L2,L3")
+    gaps = list_confirmed_gaps(db_conn, "F001")
+    assert len(gaps) == 1
+    assert gaps[0]["exhausted_levels"] == "L0,L1,L2,L3"
+
+
+def test_remove_confirmed_gap(db_conn):
+    _make_fund(db_conn)
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-06",
+                         exhausted_levels="L0,L1,L2,L3")
+    remove_confirmed_gap(db_conn, "F001", "2023-06")
+    assert list_confirmed_gaps(db_conn, "F001") == []
+
+
+def test_add_and_list_pending_review(db_conn):
+    _make_fund(db_conn)
+    rid = add_pending_review(db_conn, fund_id="F001", date="2024-01-31",
+                             net_return=0.012, source_quote="returned 1.2%",
+                             extract_method="llm",
+                             gate_result="abs_return_exceeds_threshold",
+                             review_reason="abs_return_exceeds_threshold")
+    assert rid is not None
+    rows = list_pending_review(db_conn, "F001")
+    assert len(rows) == 1
+    assert rows[0]["net_return"] == pytest.approx(0.012)
+    assert rows[0]["extract_method"] == "llm"
+    assert rows[0]["review_state"] == "pending"
+    assert rows[0]["review_reason"] == "abs_return_exceeds_threshold"
+
+
+def test_promote_pending_inserts_monthly_and_marks_approved(db_conn):
+    _make_fund(db_conn)
+    rid = add_pending_review(db_conn, fund_id="F001", date="2024-01-31",
+                             net_return=0.012, extract_method="llm")
+    promote_pending(db_conn, rid)
+    rows = get_monthly_returns(db_conn, "F001")
+    assert len(rows) == 1
+    assert rows[0]["net_return"] == pytest.approx(0.012)
+    # promote 后 pending 列表空,approved 列表 1
+    assert list_pending_review(db_conn, "F001", state="pending") == []
+    assert len(list_pending_review(db_conn, "F001", state="approved")) == 1
+
+
+def test_promote_pending_missing_id_raises(db_conn):
+    with pytest.raises(KeyError):
+        promote_pending(db_conn, 9999)
+
+
+def test_list_stale_pending_reviews(db_conn):
+    _make_fund(db_conn)
+    add_pending_review(db_conn, fund_id="F001", date="2024-01-31",
+                       net_return=0.012, extract_method="llm")
+    # 手动把 created_at 改到 20 天前,模拟滞留
+    db_conn.execute(
+        "UPDATE pending_review SET created_at = datetime('now','-20 days')"
+    )
+    db_conn.commit()
+    stale = list_stale_pending_reviews(db_conn, days=14)
+    assert len(stale) == 1
+    assert stale[0]["date"] == "2024-01-31"
+    # 再加一条 created_at=now,不应进滞留列表
+    add_pending_review(db_conn, fund_id="F001", date="2024-02-29",
+                       net_return=0.01, extract_method="llm")
+    assert len(list_stale_pending_reviews(db_conn, days=14)) == 1
+
+
+def test_cascade_delete_removes_gaps_and_pending(db_conn):
+    _make_fund(db_conn)
+    record_confirmed_gap(db_conn, fund_id="F001", missing_month="2023-06",
+                         exhausted_levels="L0,L1,L2,L3")
+    add_pending_review(db_conn, fund_id="F001", date="2024-01-31",
+                       net_return=0.012, extract_method="llm")
+    db_conn.execute("DELETE FROM funds WHERE fund_id = ?", ("F001",))
+    db_conn.commit()
+    assert list_confirmed_gaps(db_conn, "F001") == []
+    assert list_pending_review(db_conn, "F001", state=None) == []

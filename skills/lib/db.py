@@ -51,10 +51,13 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """CREATE TABLE IF NOT EXISTS(幂等)。建立 funds 与 monthly_returns。
+    """CREATE TABLE IF NOT EXISTS(幂等)。建立 funds / monthly_returns /
+    confirmed_gaps / pending_review。
 
-    对已存在的旧库做幂等迁移：funds 表加 shareclass_prefix 列（SQLite 无
-    ADD COLUMN IF NOT EXISTS，先 PRAGMA table_info 查列是否存在）。
+    对已存在的旧库做幂等迁移：funds 表补 shareclass_prefix / inception_date /
+    inception_assumed 列（SQLite 无 ADD COLUMN IF NOT EXISTS，先 PRAGMA
+    table_info 查列是否存在）。confirmed_gaps / pending_review 对旧库由
+    CREATE IF NOT EXISTS 自动补建。
     """
     conn.executescript(
         """
@@ -68,7 +71,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             max_pdf_pages INTEGER,
             verified_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            shareclass_prefix TEXT
+            shareclass_prefix TEXT,
+            inception_date TEXT,
+            inception_assumed INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS monthly_returns (
@@ -81,16 +86,41 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
             UNIQUE(fund_id, date)
         );
+
+        CREATE TABLE IF NOT EXISTS confirmed_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            missing_month TEXT NOT NULL,
+            exhausted_levels TEXT,
+            checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
+            UNIQUE(fund_id, missing_month)
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            net_return REAL NOT NULL,
+            source_quote TEXT,
+            extract_method TEXT NOT NULL,
+            gate_result TEXT,
+            review_state TEXT NOT NULL DEFAULT 'pending',
+            review_reason TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE
+        );
         """
     )
-    # 幂等迁移：旧库 funds 表无 shareclass_prefix 列时补加。新库 CREATE 已含此列，
-    # PRAGMA 查不到才 ALTER，避免重复加列报错。
-    cols = [
-        r["name"]
-        for r in conn.execute("PRAGMA table_info(funds)").fetchall()
-    ]
+    # 幂等迁移：旧库 funds 表缺列时补加。新库 CREATE 已含，PRAGMA 查不到才 ALTER，
+    # 避免重复加列报错。
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(funds)").fetchall()]
     if "shareclass_prefix" not in cols:
         conn.execute("ALTER TABLE funds ADD COLUMN shareclass_prefix TEXT")
+    if "inception_date" not in cols:
+        conn.execute("ALTER TABLE funds ADD COLUMN inception_date TEXT")
+    if "inception_assumed" not in cols:
+        conn.execute("ALTER TABLE funds ADD COLUMN inception_assumed INTEGER DEFAULT 0")
     conn.commit()
 
 
@@ -106,24 +136,30 @@ def create_fund(
     max_pdf_pages: Optional[int] = None,
     verified_at: Optional[str] = None,
     shareclass_prefix: Optional[str] = None,
+    inception_date: Optional[str] = None,
+    inception_assumed: int = 0,
 ) -> None:
     """插入一只基金(纯 INSERT,不 upsert)。
 
     fund_name / apir_code 的 UNIQUE 冲突抛 sqlite3.IntegrityError;
     重复注册应报错而非静默覆盖。shareclass_prefix 存入 funds 表供 audit 读取
     （B 组跨份额类校验的前缀，None 表示单份额类/不参与跨份额类校验）。
+    inception_date 为基金成立日(YYYY-MM-DD);无精确日时由调用方标
+    inception_assumed=1 并以全链最早可得月作下界(见 strategies expected_range)。
     """
     _require_write_token()
     conn.execute(
         """
         INSERT INTO funds
             (fund_id, fund_name, apir_code, confirmed_url, fetch_method,
-             url_type, max_pdf_pages, verified_at, shareclass_prefix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             url_type, max_pdf_pages, verified_at, shareclass_prefix,
+             inception_date, inception_assumed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             fund_id, fund_name, apir_code, confirmed_url, fetch_method,
             url_type, max_pdf_pages, verified_at, shareclass_prefix,
+            inception_date, inception_assumed,
         ),
     )
     conn.commit()
@@ -202,5 +238,162 @@ def get_monthly_returns(conn: sqlite3.Connection, fund_id: str) -> list[dict]:
         "SELECT date, net_return, nav, commentary_truth "
         "FROM monthly_returns WHERE fund_id = ? ORDER BY date",
         (fund_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------- confirmed_gaps:穷尽后正常产出的缺口记录 ----------
+
+
+def record_confirmed_gap(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    missing_month: str,
+    exhausted_levels: Optional[str] = None,
+) -> None:
+    """记录某月为已穷尽缺口(UPSERT)。missing_month 格式 'YYYY-MM'。
+
+    exhausted_levels 为逗号分隔字符串(如 'L0,L1,L2,L3'),记录穷尽到哪一级。
+    重复记录同月 -> 更新 exhausted_levels + 刷新 checked_at,不新增行。
+    """
+    _require_write_token()
+    conn.execute(
+        """
+        INSERT INTO confirmed_gaps (fund_id, missing_month, exhausted_levels)
+        VALUES (?, ?, ?)
+        ON CONFLICT(fund_id, missing_month) DO UPDATE SET
+            exhausted_levels = excluded.exhausted_levels,
+            checked_at = CURRENT_TIMESTAMP
+        """,
+        (fund_id, missing_month, exhausted_levels),
+    )
+    conn.commit()
+
+
+def list_confirmed_gaps(conn: sqlite3.Connection, fund_id: str) -> list[dict]:
+    """返回该基金已记录的缺口(missing_month/exhausted_levels/checked_at),
+    按 missing_month 升序。"""
+    rows = conn.execute(
+        "SELECT missing_month, exhausted_levels, checked_at "
+        "FROM confirmed_gaps WHERE fund_id = ? ORDER BY missing_month",
+        (fund_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def remove_confirmed_gap(
+    conn: sqlite3.Connection, fund_id: str, missing_month: str
+) -> None:
+    """补录该月后从 confirmed_gaps 移除。无该行则无操作(幂等)。"""
+    _require_write_token()
+    conn.execute(
+        "DELETE FROM confirmed_gaps WHERE fund_id = ? AND missing_month = ?",
+        (fund_id, missing_month),
+    )
+    conn.commit()
+
+
+# ---------- pending_review:LLM 兜底提取 / |r|<0.5 超限值,待人工裁决 ----------
+
+
+def add_pending_review(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    date: str,
+    net_return: float,
+    source_quote: Optional[str] = None,
+    extract_method: str,
+    gate_result: Optional[str] = None,
+    review_reason: Optional[str] = None,
+) -> int:
+    """写一条待人工审核记录,返回自增 id。
+
+    extract_method: 'code'(代码提取超限)或 'llm'(LLM 兜底提取)。
+    review_state 默认 'pending',永不直通 monthly_returns -- 过同一 gate_check
+    仅获准入审核队列,promote_pending 后才入库(修正3.1.2)。
+    """
+    _require_write_token()
+    cur = conn.execute(
+        """
+        INSERT INTO pending_review
+            (fund_id, date, net_return, source_quote, extract_method,
+             gate_result, review_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (fund_id, date, net_return, source_quote, extract_method,
+         gate_result, review_reason),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_pending_review(
+    conn: sqlite3.Connection,
+    fund_id: Optional[str] = None,
+    state: Optional[str] = "pending",
+) -> list[dict]:
+    """列出待审核记录。fund_id=None 列全部;state=None 列全部状态(默认 pending)。"""
+    sql = (
+        "SELECT id, fund_id, date, net_return, source_quote, extract_method, "
+        "gate_result, review_state, review_reason, created_at FROM pending_review"
+    )
+    clauses: list[str] = []
+    params: list = []
+    if fund_id is not None:
+        clauses.append("fund_id = ?")
+        params.append(fund_id)
+    if state is not None:
+        clauses.append("review_state = ?")
+        params.append(state)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def promote_pending(conn: sqlite3.Connection, review_id: int) -> dict:
+    """人工审核通过:把 pending_review 行的 net_return 入 monthly_returns,
+    并标记 review_state='approved'。返回 {fund_id, date}。
+
+    走与代码提取同一条 upsert_monthly_return(含 NAV 重算),保证人工 promote
+    的数据与自动入库走完全相同的复利路径,无旁路。
+    """
+    _require_write_token()
+    row = conn.execute(
+        "SELECT fund_id, date, net_return FROM pending_review WHERE id = ?",
+        (review_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"pending_review id={review_id} 不存在")
+    upsert_monthly_return(
+        conn,
+        fund_id=row["fund_id"],
+        date=row["date"],
+        net_return=row["net_return"],
+    )
+    conn.execute(
+        "UPDATE pending_review SET review_state='approved' WHERE id=?",
+        (review_id,),
+    )
+    conn.commit()
+    return {"fund_id": row["fund_id"], "date": row["date"]}
+
+
+def list_stale_pending_reviews(
+    conn: sqlite3.Connection, days: int = 14
+) -> list[dict]:
+    """滞留报告:review_state='pending' 且 created_at 早于 N 天前。
+
+    防 pending_review 变静默坟场:update 每次跑完输出此清单(M6)。
+    created_at 为 UTC CURRENT_TIMESTAMP,datetime('now',-Nd) 同基准比较。
+    """
+    rows = conn.execute(
+        "SELECT id, fund_id, date, net_return, source_quote, extract_method, "
+        "gate_result, review_reason, created_at FROM pending_review "
+        "WHERE review_state='pending' AND created_at < datetime('now', ?)",
+        (f"-{days} days",),
     ).fetchall()
     return [dict(r) for r in rows]
