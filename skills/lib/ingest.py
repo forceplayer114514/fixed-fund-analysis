@@ -22,7 +22,12 @@ from lib.db import (
     create_fund,
     ensure_tables,
     get_connection,
+    get_fund,
+    get_monthly_returns,
+    list_confirmed_gaps,
+    list_stale_pending_reviews,
     record_confirmed_gap,
+    remove_confirmed_gap,
     upsert_monthly_return,
 )
 from lib.extract import (
@@ -510,6 +515,145 @@ def ingest_discovery(
     }
 
 
+def _collect_records(report, dest_dir=None, extractor=None, max_workers=None):
+    """从 report.per_level_payload 收集 records(L1/L2 links 下载提取,L3 records
+    直接,L0 local 跳过)。返回 (records, rolling_per_month, failed_months)。
+    去重 by date,低 level 优先。"""
+    import tempfile
+    records: list[tuple[str, float]] = []
+    rolling_per_month: dict = {}
+    seen_dates: set = set()
+    failed_months: list = []
+    for level_key, payload in report.per_level_payload.items():
+        if not payload or payload.get("fetch_method") == "local":
+            continue
+        if "links" in payload:
+            if dest_dir is None:
+                dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
+            results = download_and_extract_parallel(
+                payload["links"], dest_dir,
+                max_workers=max_workers, extractor=extractor,
+            )
+            for ym, commentary, rolling in results:
+                if commentary is None:
+                    failed_months.append(ym)
+                    continue
+                date = _ym_to_month_end(ym)
+                if date is None:
+                    failed_months.append(ym)
+                    continue
+                if date in seen_dates:
+                    continue
+                seen_dates.add(date)
+                records.append((date, commentary))
+                rolling_per_month[ym] = rolling
+        elif "records" in payload:
+            for date_str, ret in payload["records"]:
+                if date_str in seen_dates:
+                    continue
+                seen_dates.add(date_str)
+                records.append((date_str, ret))
+    return records, rolling_per_month, failed_months
+
+
+def update_fund(
+    fund_id: str,
+    *,
+    db_path: Optional[str] = None,
+    archive_markdown: Optional[str] = None,
+    latest_month: Optional[str] = None,
+    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
+    max_workers: Optional[int] = None,
+    dest_dir: Optional[str] = None,
+) -> dict:
+    """update 侧:增量复查最新月 + confirmed_gaps 复查 + inception 重探 + 滞留报告(M6)。
+
+    archive_markdown 为 None 时 curl 抓 confirmed_url(生产);测试可直接传入。
+    latest_month 为 None 时用当前月-2(≤2 自然月滞后不算缺口)。
+
+    读 fund 配置 + 现有月 + confirmed_gaps -> run_discovery(集合差驱动,L0 读
+    现有月 + L1 抓归档页 + L2 CDX 补洞;inception_assumed 时 L2 查更早快照重探
+    下界,补3)-> _collect_records -> 新月 upsert(|r|>=0.5 进 pending_review)
+    -> confirmed_gaps 增删(新补录的原 gap 移除,report.gaps 写入)
+    -> pending_review 滞留报告(review_state='pending' 且 >14 天)。
+
+    Returns: {'updated','new_months','pending_review_count','gaps','failed_months',
+              'stale_pending_reviews','inception_assumed'}
+    """
+    from lib.strategies import run_discovery
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        fund = get_fund(conn, fund_id)
+        if fund is None:
+            return {"updated": False, "errors": [f"基金 {fund_id} 未注册"]}
+        existing_rows = get_monthly_returns(conn, fund_id)
+        existing_months = {r["date"][:7] for r in existing_rows}
+        existing_gaps = {g["missing_month"] for g in list_confirmed_gaps(conn, fund_id)}
+        confirmed_url = fund["confirmed_url"]
+        if archive_markdown is None:
+            import subprocess
+            r = subprocess.run(
+                ["curl", "-sL", "--max-time", "60", confirmed_url],
+                capture_output=True, text=True, timeout=70,
+            )
+            archive_markdown = r.stdout if r.returncode == 0 and r.stdout else ""
+        fund_info = {
+            "fund_id": fund_id, "confirmed_url": confirmed_url,
+            "archive_markdown": archive_markdown,
+            "inception_date": fund["inception_date"],
+            "inception_assumed": bool(fund["inception_assumed"]),
+            "latest_month": latest_month,
+            "db_path": db_path,
+        }
+        report = run_discovery(fund_info)
+        records, _rolling, failed_months = _collect_records(
+            report, dest_dir=dest_dir, extractor=extractor, max_workers=max_workers)
+
+        new_records = [(d, r) for d, r in records if d[:7] not in existing_months]
+        upserted = 0
+        pending_count = 0
+        newly_filled: set = set()
+        for date, r in new_records:
+            if abs(r) >= 0.5:
+                add_pending_review(
+                    conn, fund_id=fund_id, date=date, net_return=r,
+                    extract_method="code",
+                    gate_result="abs_return_exceeds_threshold",
+                    review_reason="abs_return_exceeds_threshold",
+                )
+                pending_count += 1
+            else:
+                upsert_monthly_return(
+                    conn, fund_id=fund_id, date=date,
+                    net_return=r, commentary_truth=r,
+                )
+                upserted += 1
+                if date[:7] in existing_gaps:
+                    newly_filled.add(date[:7])
+        # confirmed_gaps 增删:report.gaps 写入;新补录的原 gap 移除
+        exhausted = ",".join(report.per_level_contribution.keys()) or "L0,L1,L2,L3"
+        for gap_ym in report.gaps:
+            record_confirmed_gap(
+                conn, fund_id=fund_id, missing_month=gap_ym,
+                exhausted_levels=exhausted,
+            )
+        for gap_ym in newly_filled:
+            remove_confirmed_gap(conn, fund_id, gap_ym)
+        audit_all_funds(conn)
+        stale = list_stale_pending_reviews(conn, days=14)
+        return {
+            "updated": True, "new_months": upserted,
+            "pending_review_count": pending_count,
+            "gaps": sorted(set(report.gaps)),
+            "failed_months": failed_months,
+            "stale_pending_reviews": stale,
+            "inception_assumed": bool(fund["inception_assumed"]),
+        }
+    finally:
+        conn.close()
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description="skills 全自动入库流水线")
     parser.add_argument(
@@ -553,6 +697,9 @@ def _cli() -> int:
     disc_p.add_argument("--apir", default=None)
     disc_p.add_argument("--verified-at", default=None)
     disc_p.add_argument("--db-path", default=None)
+    upd_p = sub.add_parser("update", help="增量复查最新月+confirmed_gaps 复查+pending_review 滞留报告")
+    upd_p.add_argument("--fund-id", required=True)
+    upd_p.add_argument("--db-path", default=None)
     args = parser.parse_args()
 
     if args.write_token is not None:
@@ -614,6 +761,10 @@ def _cli() -> int:
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["gate_pass"] else 1
+    if args.command == "update":
+        result = update_fund(args.fund_id, db_path=args.db_path)
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=list))
+        return 0
     return 1
 
 

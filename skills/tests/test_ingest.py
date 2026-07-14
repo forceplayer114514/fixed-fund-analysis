@@ -502,3 +502,84 @@ def test_ingest_discovery_fabrication_fail_not_ingested(monkeypatch, tmp_path):
         assert get_fund(conn, "disc_fund") is None
     finally:
         conn.close()
+
+
+# --- update_fund(增量复查 + confirmed_gaps 复查 + 滞留报告,M6)---
+
+from lib.ingest import update_fund
+from lib.db import create_fund as _create_fund, upsert_monthly_return as _upsert
+
+
+@pytest.mark.unit
+def test_update_fund_new_months(monkeypatch, tmp_path):
+    """update_fund 增量复查:现有 02,03 + 归档页含 04 -> 新月 04 入库。"""
+    db_path = str(tmp_path / "test.db")
+    conn = get_connection(db_path)
+    ensure_tables(conn)
+    _create_fund(conn, fund_id="upd_fund", fund_name="Upd Fund",
+                 confirmed_url="https://example.com/archive",
+                 fetch_method="pdf", url_type="archive_page",
+                 inception_date="2025-02-28")
+    _upsert(conn, fund_id="upd_fund", date="2025-02-28", net_return=0.005, commentary_truth=0.005)
+    _upsert(conn, fund_id="upd_fund", date="2025-03-31", net_return=0.006, commentary_truth=0.006)
+    conn.close()
+
+    archive_md = ("[Feb 2025](https://x/feb.pdf)\n[Mar 2025](https://x/mar.pdf)\n"
+                  "[Apr 2025](https://x/apr.pdf)")
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [("2025-02", 0.005, _PE), ("2025-03", 0.006, _PE), ("2025-04", 0.004, _PE)]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = update_fund("upd_fund", db_path=db_path,
+                         archive_markdown=archive_md, latest_month="2025-04")
+    assert result["updated"] is True
+    assert result["new_months"] == 1  # 04 是新月(02,03 已有)
+    assert "stale_pending_reviews" in result
+    conn = get_connection(db_path)
+    try:
+        rows = get_monthly_returns(conn, "upd_fund")
+        assert len(rows) == 3  # 02,03,04
+        assert [r["date"] for r in rows] == ["2025-02-28", "2025-03-31", "2025-04-30"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.unit
+def test_update_fund_unregistered(tmp_path):
+    """未注册基金 -> updated=False。"""
+    db_path = str(tmp_path / "test.db")
+    result = update_fund("nope", db_path=db_path, archive_markdown="")
+    assert result["updated"] is False
+    assert any("未注册" in e for e in result["errors"])
+
+
+@pytest.mark.unit
+def test_update_fund_stale_pending_report(tmp_path, monkeypatch):
+    """pending_review 滞留报告:update_fund 输出 >14 天 pending 条目(改3 落地)。"""
+    db_path = str(tmp_path / "test.db")
+    conn = get_connection(db_path)
+    ensure_tables(conn)
+    _create_fund(conn, fund_id="stale_fund", fund_name="Stale Fund",
+                 confirmed_url="https://example.com/archive",
+                 fetch_method="pdf", url_type="archive_page",
+                 inception_date="2025-02-28")
+    _upsert(conn, fund_id="stale_fund", date="2025-02-28", net_return=0.005, commentary_truth=0.005)
+    # 注入一条滞留 >14 天的 pending_review
+    from lib.db import add_pending_review
+    add_pending_review(conn, fund_id="stale_fund", date="2025-03-31", net_return=0.6,
+                       extract_method="code", review_reason="abs_return_exceeds_threshold")
+    conn.execute("UPDATE pending_review SET created_at = datetime('now','-20 days')")
+    conn.commit()
+    conn.close()
+
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
+        return [("2025-02", 0.005, _PE)]
+
+    monkeypatch.setattr("lib.ingest.download_and_extract_parallel", fake_parallel)
+    result = update_fund("stale_fund", db_path=db_path,
+                         archive_markdown="Feb 2025: https://x/feb.pdf",
+                         latest_month="2025-02")
+    assert result["updated"] is True
+    assert len(result["stale_pending_reviews"]) == 1
+    assert result["stale_pending_reviews"][0]["date"] == "2025-03-31"
