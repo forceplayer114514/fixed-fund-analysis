@@ -3,7 +3,8 @@ import { api } from '../api/client'
 import type { Fund, Anomaly, CompareResponse, TimeSeriesResponse } from '../types'
 
 export type Period = 'full' | '3y' | '1y' | 'common'
-export type ChartMetric = 'nav' | 'excess_return'
+/** 图表类型：累计 NAV | 滚动12月超额（删月收益率折线，PDD 2.7） */
+export type ChartMetric = 'nav' | 'rolling_excess'
 export type SmoothingMode = 'original' | 'unsmoothed'
 
 interface AppState {
@@ -14,10 +15,11 @@ interface AppState {
 
   // 选中
   selectedFundIds: string[]
-  /** 当前展示基金（Phase 1 过渡：卡片与"当前展示"标签同源，修复一致性 bug；
-   *  null 时回退 selectedFundIds[0]。Phase 2 锚定机制将复用此字段） */
-  displayFundId: string | null
   period: Period
+  /** 锚定基金（Phase 2 状态机 C）：非 null 时 period 置灰、图表拼接 rebase、卡片/热力图联动 */
+  anchorFundId: string | null
+  /** 进入锚定前的 period，取消锚定时恢复 */
+  prevPeriod: Period
   chartMetric: ChartMetric
   smoothingMode: SmoothingMode
 
@@ -37,8 +39,8 @@ interface AppState {
   fetchTimeSeries: () => Promise<void>
   fetchAnomalies: () => Promise<void>
   toggleFund: (fundId: string) => void
-  setDisplayFundId: (id: string | null) => void
   setPeriod: (period: Period) => void
+  setAnchor: (id: string | null) => void
   setChartMetric: (m: ChartMetric) => void
   setSmoothingMode: (m: SmoothingMode) => void
   patchMonthlyReturn: (id: number, netReturn: number) => Promise<void>
@@ -52,8 +54,9 @@ export const useStore = create<AppState>((set, get) => ({
   fundsError: null,
 
   selectedFundIds: [],
-  displayFundId: null,
   period: 'full',
+  anchorFundId: null,
+  prevPeriod: 'full',
   chartMetric: 'nav',
   smoothingMode: 'original',
 
@@ -73,28 +76,32 @@ export const useStore = create<AppState>((set, get) => ({
       const prev = get().selectedFundIds
       let selectedFundIds: string[]
       if (prev.length === 0) {
-        // 首次加载：默认全选
         selectedFundIds = funds.map(f => f.fund_id)
       } else {
-        // 后续：保留已选（剔除已删除基金），新基金默认不选
         const validIds = new Set(funds.map(f => f.fund_id))
         selectedFundIds = prev.filter(id => validIds.has(id))
       }
-      set({ funds, fundsLoading: false, selectedFundIds })
+      // 锚定基金若被删除/取消选中，清除锚定（状态机 1.2）
+      const anchor = get().anchorFundId
+      const nextAnchor = anchor && selectedFundIds.includes(anchor) ? anchor : null
+      set({ funds, fundsLoading: false, selectedFundIds,
+            anchorFundId: nextAnchor })
     } catch (e: unknown) {
       set({ fundsError: (e as Error).message, fundsLoading: false })
     }
   },
 
   fetchCompare: async () => {
-    const { selectedFundIds, period } = get()
+    const { selectedFundIds, period, anchorFundId } = get()
     if (selectedFundIds.length === 0) {
       set({ compareData: null, compareError: null })
       return
     }
+    // 修正A：锚定模式下 compare 用 full（卡片/表格/图表同口径=锚定完整历史）
+    const effPeriod = anchorFundId ? 'full' : period
     set({ compareLoading: true, compareError: null })
     try {
-      const data = await api.compare(selectedFundIds, period)
+      const data = await api.compare(selectedFundIds, effPeriod)
       set({ compareData: data, compareLoading: false })
     } catch (e: unknown) {
       set({ compareLoading: false, compareError: (e as Error).message, compareData: null })
@@ -102,14 +109,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   fetchTimeSeries: async () => {
-    const { selectedFundIds, period } = get()
+    const { selectedFundIds } = get()
     if (selectedFundIds.length === 0) {
       set({ timeSeriesData: null, timeSeriesError: null })
       return
     }
     set({ timeSeriesLoading: true, timeSeriesError: null })
     try {
-      const data = await api.timeSeries(selectedFundIds, period)
+      // 方案a：永远 full，period/anchor 切换纯前端重算（滚动超额需窗口前数据）
+      const data = await api.timeSeries(selectedFundIds, 'full')
       set({ timeSeriesData: data, timeSeriesLoading: false })
     } catch (e: unknown) {
       set({ timeSeriesLoading: false, timeSeriesError: (e as Error).message, timeSeriesData: null })
@@ -132,14 +140,27 @@ export const useStore = create<AppState>((set, get) => ({
       const next = exists
         ? state.selectedFundIds.filter(id => id !== fundId)
         : [...state.selectedFundIds, fundId]
-      return { selectedFundIds: next }
+      // 取消选中锚定基金 -> 清除锚定（状态机 1.2）
+      const anchor = state.anchorFundId
+      const nextAnchor = anchor && next.includes(anchor) ? anchor : null
+      return { selectedFundIds: next, anchorFundId: nextAnchor }
     })
   },
 
-  setDisplayFundId: (displayFundId: string | null) => { set({ displayFundId }) },
-  setPeriod: (period: Period) => { set({ period }) },
-  setChartMetric: (chartMetric: ChartMetric) => { set({ chartMetric }) },
-  setSmoothingMode: (smoothingMode: SmoothingMode) => { set({ smoothingMode }) },
+  setPeriod: (period) => { set({ period }) },
+
+  setAnchor: (id) => set(state => {
+    if (id === null) return { anchorFundId: null }              // 显式清除
+    if (state.anchorFundId === id) return { anchorFundId: null } // 再次点击同一曲线 -> 取消锚定
+    const entering = state.anchorFundId === null                // 首次进入 C：存 prevPeriod
+    return {
+      anchorFundId: id,
+      prevPeriod: entering ? state.period : state.prevPeriod,
+    }
+  }),
+
+  setChartMetric: (chartMetric) => { set({ chartMetric }) },
+  setSmoothingMode: (smoothingMode) => { set({ smoothingMode }) },
 
   patchMonthlyReturn: async (id: number, netReturn: number) => {
     await api.patchMonthlyReturn(id, { net_return: netReturn })
@@ -160,8 +181,8 @@ export const useStore = create<AppState>((set, get) => ({
     set(state => ({
       funds: state.funds.filter(f => f.fund_id !== fundId),
       selectedFundIds: state.selectedFundIds.filter(id => id !== fundId),
+      anchorFundId: state.anchorFundId === fundId ? null : state.anchorFundId,
     }))
-    // 刷新对比/时序（删除的基金已不在选中）
     if (get().selectedFundIds.length > 0) {
       get().fetchCompare()
       get().fetchTimeSeries()

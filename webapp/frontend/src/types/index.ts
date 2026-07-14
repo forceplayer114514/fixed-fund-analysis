@@ -59,6 +59,10 @@ export interface FundSeries {
   fund_id: string
   fund_name: string
   dates: string[]
+  /** 逐月原始收益（对齐 dates）；Phase 2 图表 rebase/回撤/滚动超额/热力图由此计算 */
+  returns: number[]
+  /** 去平滑逐月收益；未触发 Geltner 为 null */
+  unsm_returns: number[] | null
   orig_nav: number[]
   unsm_nav: number[] | null
   is_geltner_applied: boolean
@@ -67,6 +71,8 @@ export interface FundSeries {
 export interface TimeSeriesResponse {
   period: string
   months: string[]
+  /** 全局 RBA 月利率，对齐 months，缺失月为 null（PDD 1.7 scoped） */
+  rba: (number | null)[]
   series: FundSeries[]
 }
 

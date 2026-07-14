@@ -82,6 +82,12 @@ def test_time_series_returns_aligned_nav(client, db_session):
     # 3 个月 < 36，不应去平滑
     assert s["is_geltner_applied"] is False
     assert s["unsm_nav"] is None
+    # Phase 2 新字段：逐月 returns + 全局 rba（对齐 months）
+    assert s["returns"] == pytest.approx([0.01, 0.02, 0.03])
+    assert s["unsm_returns"] is None
+    assert "rba" in body
+    assert len(body["rba"]) == 3
+    assert body["rba"][0] == pytest.approx(0.0435)  # _seed_fund_with_data 写入 0.0435
 
 
 @pytest.mark.unit
@@ -97,6 +103,21 @@ def test_time_series_common_aligns_two_funds(client, db_session):
     assert len(body["series"]) == 2
     # f1 在共同区间的 orig_nav: 从 2026-02 起重新基数为 1.0 -> [1.02, 1.02*1.03]
     assert body["series"][0]["orig_nav"] == pytest.approx([1.02, 1.02 * 1.03], rel=1e-5)
+
+
+@pytest.mark.unit
+def test_time_series_rba_null_for_missing_month(client, db_session):
+    """RBA 缺失月：time-series 的 rba 数组对应位为 null（不抛错，PDD 1.7 scoped）。"""
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-01-31", net_return=0.01, nav=1.0))
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-02-28", net_return=0.02, nav=1.0))
+    # 只写 2026-01 的 RBA，2026-02 缺失
+    db_session.add(RbaCashRate(date_period="2026-01", rate=0.0435))
+    db_session.commit()
+    resp = client.get("/api/metrics/time-series", params={"fund_ids": "f1", "period": "full"})
+    assert resp.status_code == 200
+    assert resp.json()["rba"] == [pytest.approx(0.0435), None]
 
 
 @pytest.mark.unit

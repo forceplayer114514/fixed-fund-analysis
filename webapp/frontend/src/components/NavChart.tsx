@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
+import { LineChart, ScatterChart } from 'echarts/charts'
 import {
   GridComponent,
   TooltipComponent,
@@ -9,126 +9,206 @@ import {
   DataZoomComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { useStore } from '../store/useStore'
+import { useStore, type Period } from '../store/useStore'
+import type { FundReturns } from '../lib/rebase'
+import {
+  rebasePlain, rebaseAnchored, drawdownSeries, type RebasedSeries,
+} from '../lib/rebase'
+import RollingExcessChart from './RollingExcessChart'
 
-echarts.use([
-  LineChart,
-  GridComponent,
-  TooltipComponent,
-  LegendComponent,
-  DataZoomComponent,
-  CanvasRenderer,
-])
+echarts.use([LineChart, ScatterChart, GridComponent, TooltipComponent,
+  LegendComponent, DataZoomComponent, CanvasRenderer])
 
 const COLORS = ['#4fc3f7', '#7c4dff', '#ff7043', '#66bb6a', '#ffca28', '#ec407a', '#26c6da', '#ab47bc']
+
+/** 按状态算 x 轴月份：A=full，B=窗口(前端裁剪 full)，C=[t_A, max 末月]（修正2） */
+function computeAxisMonths(
+  months: string[], funds: FundReturns[], period: Period, anchorFundId: string | null,
+): string[] {
+  if (anchorFundId) {
+    const anchor = funds.find(f => f.fund_id === anchorFundId)
+    if (!anchor) return months
+    const tA = anchor.dates[0].slice(0, 7)
+    const end = funds.map(f => f.dates[f.dates.length - 1].slice(0, 7)).sort().pop()!
+    return months.filter(m => m >= tA && m <= end)
+  }
+  if (period === 'full') return months
+  if (period === '1y') return months.slice(-12)
+  if (period === '3y') return months.slice(-36)
+  // common：选中基金月份交集
+  const sets = funds.map(f => new Set(f.dates.map(d => d.slice(0, 7))))
+  let common = sets[0] ?? new Set<string>()
+  for (const s of sets.slice(1)) common = new Set([...common].filter(m => s.has(m)))
+  return months.filter(m => common.has(m))
+}
 
 export default function NavChart() {
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const selectedFundIds = useStore(s => s.selectedFundIds)
-  const chartMetric = useStore(s => s.chartMetric)
+  const period = useStore(s => s.period)
+  const anchorFundId = useStore(s => s.anchorFundId)
   const smoothingMode = useStore(s => s.smoothingMode)
+  const chartMetric = useStore(s => s.chartMetric)
   const setChartMetric = useStore(s => s.setChartMetric)
+  const setAnchor = useStore(s => s.setAnchor)
 
   const option = useMemo(() => {
     if (!timeSeriesData || timeSeriesData.series.length === 0) return null
+    const isOrig = smoothingMode === 'original'
+    const funds: FundReturns[] = timeSeriesData.series
+      .filter(s => selectedFundIds.includes(s.fund_id))
+      .map(s => ({
+        fund_id: s.fund_id,
+        fund_name: s.fund_name,
+        dates: s.dates,
+        returns: (isOrig ? s.returns : (s.unsm_returns ?? s.returns)),
+      }))
+    if (funds.length === 0) return null
 
-    const allMonths = timeSeriesData.months
-    const series = timeSeriesData.series.map((s, i) => {
-      // 建立 month -> nav 查找表，按 allMonths 对齐
-      const navByMonth = new Map<string, number>()
-      const navData = smoothingMode === 'unsmoothed' && s.unsm_nav ? s.unsm_nav : s.orig_nav
-      s.dates.forEach((date, j) => {
-        const month = date.slice(0, 7)
-        navByMonth.set(month, navData[j])
-      })
+    const axisMonths = computeAxisMonths(timeSeriesData.months, funds, period, anchorFundId)
 
-      const isSelected = selectedFundIds.includes(s.fund_id)
+    // NAV rebase：A/B 用 plain，C 用 anchored 拼接
+    const rebased: RebasedSeries[] = anchorFundId
+      ? rebaseAnchored(funds, axisMonths, anchorFundId)
+      : funds.map(f => rebasePlain(f, axisMonths))
+    // 回撤永远走 rebasePlain（各基金自身序列，非拼接；PDD 2.4）
+    const drawdowns = funds.map(f => drawdownSeries(rebasePlain(f, axisMonths).nav))
 
-      let data: (number | null)[]
-      if (chartMetric === 'nav') {
-        data = allMonths.map(m => navByMonth.get(m) ?? null)
-      } else {
-        // 月收益率：按基金自身日期序列算 NAV 环比增长
-        const retByMonth = new Map<string, number>()
-        navData.forEach((v, j) => {
-          if (j === 0) { retByMonth.set(s.dates[j].slice(0, 7), 0); return }
-          const prev = navData[j - 1]
-          retByMonth.set(s.dates[j].slice(0, 7), prev !== 0 ? (v - prev) / prev : 0)
-        })
-        data = allMonths.map(m => retByMonth.get(m) ?? null)
-      }
+    // NAV y 轴：可见曲线 [min,max] ±5%，永不锚 0
+    const navVals = rebased.flatMap(r => r.nav.filter((v): v is number => v != null))
+    const navMin = navVals.length ? Math.min(...navVals) : 0
+    const navMax = navVals.length ? Math.max(...navVals) : 1
+    const navRange = navMax - navMin || 1
+    const ddVals = drawdowns.flat().filter((v): v is number => v != null)
+    const ddMin = ddVals.length ? Math.min(...ddVals, 0) : 0
 
-      return {
-        name: s.fund_name,
-        type: 'line',
-        data,
-        smooth: true,
-        symbol: 'none',
-        lineStyle: {
-          width: isSelected ? 3 : 1.5,
-          opacity: isSelected ? 1 : 0.25,
+    const inC = anchorFundId != null
+    const navSeries = rebased.map((r, i) => ({
+      id: `nav:${r.fund_id}`,
+      name: r.fund_name,
+      type: 'line' as const,
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      data: r.nav,
+      connectNulls: false,
+      symbol: 'none',
+      smooth: false,
+      lineStyle: {
+        width: inC ? (r.isAnchor ? 2.5 : 1.5) : 1.5,
+        opacity: inC ? (r.isAnchor ? 1 : 0.35) : 1,
+      },
+      itemStyle: { color: COLORS[i % COLORS.length] },
+      z: r.isAnchor ? 10 : 2,
+    }))
+    const ddSeries = rebased.map((r, i) => ({
+      id: `dd:${r.fund_id}`,
+      name: r.fund_name,
+      type: 'line' as const,
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: drawdowns[i],
+      connectNulls: false,
+      symbol: 'none',
+      smooth: false,
+      lineStyle: { width: 1, opacity: inC ? (r.isAnchor ? 1 : 0.35) : 0.85 },
+      itemStyle: { color: COLORS[i % COLORS.length] },
+      areaStyle: { opacity: 0.12 },
+      z: r.isAnchor ? 10 : 2,
+    }))
+    // 拼接点空心圆（C 态后发基金首点）
+    const splicePoints = rebased
+      .filter(r => r.splicePoint)
+      .map(r => ({
+        type: 'scatter' as const,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        name: r.fund_name,
+        data: [[r.splicePoint!.month, r.splicePoint!.value]],
+        symbolSize: 10,
+        itemStyle: { color: 'transparent', borderColor: '#555', borderWidth: 1.5 },
+        tooltip: {
+          formatter: () =>
+            `自 ${r.splicePoint!.month} 起加入对比，承接锚定基金上月累计值`,
         },
-        itemStyle: { color: COLORS[i % COLORS.length] },
-      }
-    })
+        z: 20,
+      }))
 
     return {
       tooltip: {
         trigger: 'axis',
+        axisPointer: { link: [{ xAxisIndex: 'all' }] },
         formatter: (params: any[]) => {
           if (!params || params.length === 0) return ''
           const date = params[0]?.axisValue ?? ''
           const lines = params
-            .sort((a: any, b: any) => (b.data ?? 0) - (a.data ?? 0))
-            .map(
-              (p: any, idx: number) =>
-                `${p.marker} ${p.seriesName}: ${p.data == null ? '-' : p.data.toFixed(4)} <span style="color:#999">(${idx + 1})</span>`
-            )
+            .filter((p: any) => p.seriesType === 'line' && p.seriesId?.startsWith('nav:'))
+            .sort((a: any, b: any) => (b.data ?? -Infinity) - (a.data ?? -Infinity))
+            .map((p: any) => `${p.marker} ${p.seriesName}: ${p.data == null ? '无数据' : p.data.toFixed(4)}`)
           return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.join('<br/>')}`
         },
       },
       legend: { bottom: 0, textStyle: { fontSize: 12 } },
-      grid: { left: 60, right: 20, top: 20, bottom: 50 },
-      xAxis: {
-        type: 'category',
-        data: allMonths,
-        axisLabel: { fontSize: 11, color: '#999' },
-        axisLine: { show: false },
-        axisTick: { show: false },
-      },
-      yAxis: {
-        type: 'value',
-        axisLabel: {
-          fontSize: 11,
-          color: '#999',
-          formatter: (v: number) =>
-            chartMetric === 'excess_return' ? `${(v * 100).toFixed(1)}%` : v.toFixed(2),
-        },
-        splitLine: { lineStyle: { color: '#f0f0f0' } },
-      },
-      dataZoom: [{ type: 'inside', start: 0, end: 100 }],
-      series,
+      grid: [
+        { left: 60, right: 20, top: 20, height: 300 },
+        { left: 60, right: 20, top: 350, height: 150 },
+      ],
+      xAxis: [
+        { type: 'category', data: axisMonths, gridIndex: 0,
+          axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
+        { type: 'category', data: axisMonths, gridIndex: 1,
+          axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
+      ],
+      yAxis: [
+        { type: 'value', gridIndex: 0, min: navMin - navRange * 0.05, max: navMax + navRange * 0.05,
+          axisLabel: { fontSize: 10, color: '#999', formatter: (v: number) => v.toFixed(3) },
+          splitLine: { lineStyle: { color: '#f0f0f0' } } },
+        { type: 'value', gridIndex: 1, max: 0, min: ddMin - Math.abs(ddMin) * 0.05 - 0.001,
+          axisLabel: { fontSize: 10, color: '#999', formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
+          splitLine: { lineStyle: { color: '#f0f0f0' } } },
+      ],
+      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }],
+      series: [...navSeries, ...ddSeries, ...splicePoints],
     }
-  }, [timeSeriesData, selectedFundIds, chartMetric, smoothingMode])
+  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode])
+
+  const onEvents = useMemo(() => ({
+    click: (params: any) => {
+      const sid: string | undefined = params?.seriesId
+      if (sid && sid.startsWith('nav:')) setAnchor(sid.slice(4))
+      else if (sid && sid.startsWith('dd:')) setAnchor(sid.slice(3))
+    },
+  }), [setAnchor])
 
   return (
     <div className="bg-white rounded-lg p-5 shadow-sm mb-5">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-sm text-gray-400">月走势图</h3>
+        <h3 className="text-sm text-gray-400">{chartMetric === 'nav' ? '累计 NAV / 回撤' : '滚动 12 月超额'}</h3>
         <select
           className="text-sm border border-gray-200 rounded px-3 py-1.5 bg-white"
           value={chartMetric}
           onChange={e => setChartMetric(e.target.value as any)}
         >
           <option value="nav">累计 NAV</option>
-          <option value="excess_return">月收益率</option>
+          <option value="rolling_excess">滚动12月超额</option>
         </select>
       </div>
-      {option ? (
-        <ReactEChartsCore echarts={echarts} option={option} style={{ height: 400 }} />
+      {chartMetric === 'rolling_excess' ? (
+        <RollingExcessChart />
+      ) : option ? (
+        <ReactEChartsCore
+          echarts={echarts}
+          option={option}
+          notMerge
+          lazyUpdate
+          onEvents={onEvents}
+          style={{ height: 520 }}
+        />
       ) : (
-        <div className="h-80 flex items-center justify-center text-gray-400 text-sm">
-          加载中...
+        <div className="h-80 flex items-center justify-center text-gray-400 text-sm">加载中...</div>
+      )}
+      {anchorFundId && (
+        <div className="text-xs text-gray-400 mt-2">
+          锚定模式下展示锚定基金完整历史 · 再次点击曲线取消锚定
         </div>
       )}
     </div>

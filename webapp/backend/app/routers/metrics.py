@@ -144,25 +144,33 @@ def time_series(fund_ids: str = Query(...),
 
     all_months = sorted({d[:7] for info in sliced.values() for d in info["dates"]})
 
+    # 全局 RBA 月利率，对齐 all_months，缺失月为 None（PDD 1.7 scoped 例外）。
+    # 前端热力图/滚动超额/超额序列共用。all_months 为 YYYY-MM，resolve_rf_rates 的 d[:7] 兼容。
+    rba_rates, _rba_missing = resolve_rf_rates(session, all_months)
+
     series = []
     for fid in ids:
         info = sliced[fid]
         r_slice = info["returns"]
         orig_nav = _build_nav_series(r_slice)[1:]  # 去掉起点 1.0
         unsm_nav = None
+        unsm_returns = None
         is_geltner = False
         if len(r_slice) >= 2:
             phi, q = calculate_autocorrelation(r_slice, fund_name=fid)
             is_geltner = should_apply_geltner(len(r_slice), phi, q)
             if is_geltner:
-                unsm = unsmooth_returns(r_slice, phi, fund_name=fid)
-                unsm_nav = _build_nav_series(unsm)[1:]
+                unsm_returns = unsmooth_returns(r_slice, phi, fund_name=fid)
+                unsm_nav = _build_nav_series(unsm_returns)[1:]
         series.append({
             "fund_id": fid,
             "fund_name": info["name"],
             "dates": info["dates"],
+            "returns": r_slice,
+            "unsm_returns": unsm_returns,
             "orig_nav": orig_nav,
             "unsm_nav": unsm_nav,
             "is_geltner_applied": is_geltner,
         })
-    return {"period": period, "months": all_months, "series": sanitize_for_json(series)}
+    return {"period": period, "months": all_months, "rba": sanitize_for_json(rba_rates),
+            "series": sanitize_for_json(series)}
