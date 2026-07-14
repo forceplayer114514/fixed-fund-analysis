@@ -697,6 +697,8 @@ def _cli() -> int:
     disc_p.add_argument("--apir", default=None)
     disc_p.add_argument("--verified-at", default=None)
     disc_p.add_argument("--db-path", default=None)
+    disc_p.add_argument("--extractor", default=None, choices=["stake", "bentham"],
+                        help="PDF 提取器口径(stake=gross 默认,bentham=net)")
     upd_p = sub.add_parser("update", help="增量复查最新月+confirmed_gaps 复查+pending_review 滞留报告")
     upd_p.add_argument("--fund-id", required=True)
     upd_p.add_argument("--db-path", default=None)
@@ -755,9 +757,13 @@ def _cli() -> int:
             "db_path": args.db_path,
         }
         report = run_discovery(fund_info)
+        extractor = None
+        if args.extractor == "bentham":
+            from lib.extract import extract_pdf_one_bentham
+            extractor = extract_pdf_one_bentham
         result = ingest_discovery(
             report, args.name, db_path=args.db_path,
-            apir=args.apir, verified_at=args.verified_at,
+            apir=args.apir, verified_at=args.verified_at, extractor=extractor,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["gate_pass"] else 1
