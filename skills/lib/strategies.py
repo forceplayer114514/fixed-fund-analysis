@@ -148,17 +148,30 @@ def probe_official_evergreen(fund_info: dict) -> StrategyResult:
     except Exception as e:
         return StrategyResult(strategy="official_evergreen", tried=True, found=False,
                               evidence=f"parse_pdf_text 失败: {e}")
-    if _pdf_has_monthly_table(text):
+    has_table = _pdf_has_monthly_table(text)
+    commentary = ex.extract_commentary_return(text)
+    if has_table:
         return StrategyResult(
             strategy="official_evergreen", tried=True, found=True,
             months_count=fund_info.get("official_estimated_months", 0),
-            evidence="PDF 含 Year×Month 逐月历史表",
+            evidence="PDF 含 Year×Month 逐月历史表（单 PDF 即足）",
+            ingest_entry="add", fetch_method="pdf",
+            confirmed_url=url or f"file:{path}",
+        )
+    if commentary is not None:
+        # 单月 Commentary 路径（常态）：PDF 给当月收益，须归档页全量月 PDF 合成。
+        # months_count 未知（取决于归档页链接数），用 official_estimated_months（主会话
+        # 从归档页链接计数回填）或保守 1。found=True 表示多 PDF 合成可行。
+        return StrategyResult(
+            strategy="official_evergreen", tried=True, found=True,
+            months_count=fund_info.get("official_estimated_months", 1),
+            evidence=f"PDF 含 Commentary 当月收益 {commentary}（单月路径，须归档页多 PDF 合成）",
             ingest_entry="add", fetch_method="pdf",
             confirmed_url=url or f"file:{path}",
         )
     return StrategyResult(
         strategy="official_evergreen", tried=True, found=False,
-        evidence="PDF 仅滚动收益无逐月表（搜 Monthly/History/Jan-Dec 未命中）",
+        evidence="PDF 无 Year×Month 逐月表且无 Commentary 当月收益（搜 Monthly/History/Jan-Dec + extract_commentary_return 均未命中）",
         confirmed_url=url or "",
     )
 

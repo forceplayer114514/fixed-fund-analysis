@@ -16,7 +16,7 @@ import datetime
 import os
 import re
 from decimal import Decimal
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -347,6 +347,87 @@ def extract_perf_rolling(text: str) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Bentham Global Income Fund 提取（多 PDF 合成逐月 total return）
+# 数据完整性：Commentary "had a total return (after fees) of X%" 提 net（非
+# gross）；rolling 从 "Total return (after fees)" 表行提 1mo/3mo/6mo/12mo
+# （累计值，与月度复利可比）；不提 inception（p.a. 与月度复利不可比，会误触发
+# consistency_check _check_compound inception 块）。
+# 2026-07 回测：extract_commentary_return 的 returned\s+X% 对 Bentham 取到
+# gross（before fees），字段口径错误，须用本专属提取器。
+# ---------------------------------------------------------------------------
+
+_BENTHAM_NET_RE = re.compile(
+    r"had a total return\s*\(after fees\*?\)\s*of\s*([+-]?\d+\.\d+)\s*(?:%|percent)",
+    re.IGNORECASE,
+)
+
+
+def extract_bentham_net_return(text: str) -> Optional[float]:
+    """Bentham Commentary net total return (after fees)，返回小数。
+
+    匹配 "had a total return (after fees[*]) of X[%|percent]"，捕获 net 值。
+    区别于 extract_commentary_return（returned\\s+X% 对 Bentham 取 gross
+    before-fees，字段口径错误）。支持 2017 旧版 "percent"+"after fees*" 与
+    2022+ "%"+"after fees"。无匹配返回 None（不猜测）。
+    """
+    if not text:
+        return None
+    m = _BENTHAM_NET_RE.search(text)
+    if not m:
+        return None
+    return _pct_to_decimal(m.group(1))
+
+
+def extract_bentham_rolling(text: str) -> dict:
+    """Bentham performance 表 "Total return (after fees)" 行滚动收益。
+
+    提 1mo/3mo/6mo/12mo（累计值，与月度复利可比）。不提 inception（p.a.，
+    与月度复利不可比）。定位 "Total return (after fees)" 行标签 -> 取至下一行
+    标签（Benchmark/Active return）间数值 token。token 数 < 4 -> parse_error。
+    旧版 PDF（2017 等无此表）-> parse_error（gate 跳过复利，不致命）。
+    """
+    result = {"1mo": None, "3mo": None, "6mo": None,
+              "12mo": None, "inception": None, "parse_error": False}
+    if not text:
+        result["parse_error"] = True
+        return result
+    m = re.search(r"Total return\s*\(after fees\)", text)
+    if not m:
+        result["parse_error"] = True
+        return result
+    after = text[m.end():]
+    end = len(after)
+    for label in ("Benchmark", "Active return", "Risk Characteristics"):
+        idx = after.find(label)
+        if 0 < idx < end:
+            end = idx
+    tokens = re.findall(r"[+-]?\d+\.\d+", after[:end])
+    if len(tokens) < 4:
+        result["parse_error"] = True
+        return result
+    result["1mo"] = _pct_to_decimal(tokens[0])
+    result["3mo"] = _pct_to_decimal(tokens[1])
+    result["6mo"] = _pct_to_decimal(tokens[2])
+    result["12mo"] = _pct_to_decimal(tokens[3])
+    return result
+
+
+def extract_pdf_one_bentham(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[float], dict]:
+    """Bentham 单 PDF 提取：parse_pdf_text -> net return + rolling。
+
+    同 extract_pdf_one 接口，但用 Bentham 专属提取器（net 非 gross）。
+    """
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_bentham_net_return(text), extract_bentham_rolling(text))
+
+
 def extract_pdf_one(
     pdf_path: str, max_pages: Optional[int] = None
 ) -> tuple[Optional[float], dict]:
@@ -429,17 +510,22 @@ def download_and_extract_parallel(
     links: list[tuple[str, str]],
     dest_dir: str,
     max_workers: Optional[int] = None,
+    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
 ) -> list[tuple[str, Optional[float], dict]]:
     """ThreadPool pipeline：每 worker 下载一个 PDF 后立即提取。
 
     IO 下载与 CPU 提取重叠，无 barrier（比"下载并发->提取并发"两阶段更快）。
     max_workers 默认 min(16, os.cpu_count())（M5 满核 10-16）。
+    extractor 默认 extract_pdf_one（Stake 口径）；Bentham 等基金专属口径
+    传 extract_pdf_one_bentham。
     返回 [(ym, commentary_return, rolling), ...]，按 ym 升序排序。
     失败隔离：单 PDF 下载/提取失败 -> (ym, None, {'parse_error':True})，不中断其他。
     复用 download_file + extract_pdf_one。
     """
     if max_workers is None:
         max_workers = min(16, os.cpu_count() or 8)
+    if extractor is None:
+        extractor = extract_pdf_one
 
     def _failed_rolling() -> dict:
         return {"1mo": None, "3mo": None, "6mo": None,
@@ -448,7 +534,7 @@ def download_and_extract_parallel(
     def _worker(ym: str, url: str) -> tuple[Optional[float], dict]:
         filepath = os.path.join(dest_dir, f"{ym}.pdf")
         download_file(url, filepath)
-        return extract_pdf_one(filepath)
+        return extractor(filepath)
 
     results: list[tuple[str, Optional[float], dict]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:

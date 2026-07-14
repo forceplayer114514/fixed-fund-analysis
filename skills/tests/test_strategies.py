@@ -260,3 +260,69 @@ def test_strategies_tried_exact_not_len():
     # 不允许只断言 len
     assert len(report.strategies_tried) == len(STRATEGY_LIST)
     assert set(report.strategies_tried) == set(STRATEGY_LIST)
+
+
+# ---- probe_official_evergreen 真实函数测试（单月 Commentary 检测，2026-07-14）----
+# 回测：Bentham GIF 单月 PDF 无 Year×Month 表但有 Commentary 当月收益，旧逻辑
+# 仅判 _pdf_has_monthly_table -> found=False，浪费 9 分钟找逐月表才转单月合成。
+# 新逻辑：无逐月表时调 extract_commentary_return，命中即 found=True（多 PDF 合成）。
+
+@pytest.mark.unit
+def test_probe_official_evergreen_single_month_commentary(tmp_path, monkeypatch):
+    """单月 Commentary PDF（无 Year×Month 表）-> found=True, add（多 PDF 合成）。"""
+    from lib.strategies import probe_official_evergreen
+    pdf = tmp_path / "report.pdf"
+    pdf.write_text("fake")  # 存在即可，parse_pdf_text 被 mock
+    # 无 Monthly/History/<6 month tokens，但 Commentary 有当月收益
+    text = "The fund returned 0.53% in May. On a before fees basis returned 0.59%."
+    monkeypatch.setattr("lib.extract.parse_pdf_text", lambda p: text)
+
+    result = probe_official_evergreen({"official_pdf_path": str(pdf)})
+    assert result.found is True
+    assert result.ingest_entry == "add"
+    assert result.fetch_method == "pdf"
+    assert "Commentary" in result.evidence or "单月" in result.evidence
+
+
+@pytest.mark.unit
+def test_probe_official_evergreen_year_month_table(tmp_path, monkeypatch):
+    """Year×Month 逐月表 PDF -> found=True, add（单 PDF，罕见路径回归锁）。"""
+    from lib.strategies import probe_official_evergreen
+    pdf = tmp_path / "report.pdf"
+    pdf.write_text("fake")
+    # 含 Monthly + >=6 month tokens -> _pdf_has_monthly_table 命中
+    text = ("Monthly Performance History\n"
+            "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec\n"
+            "0.5 0.6 0.7 0.8 0.9 1.0 1.1 1.2 1.3 1.4 1.5 1.6\n"
+            "Total return (after fees)")
+    monkeypatch.setattr("lib.extract.parse_pdf_text", lambda p: text)
+
+    result = probe_official_evergreen({"official_pdf_path": str(pdf)})
+    assert result.found is True
+    assert result.ingest_entry == "add"
+    assert "Year×Month" in result.evidence or "逐月历史表" in result.evidence
+
+
+@pytest.mark.unit
+def test_probe_official_evergreen_neither_table_nor_commentary(tmp_path, monkeypatch):
+    """无逐月表且无 Commentary 当月收益（仅滚动收益）-> found=False。"""
+    from lib.strategies import probe_official_evergreen
+    pdf = tmp_path / "report.pdf"
+    pdf.write_text("fake")
+    # 无 Monthly/History/month tokens 集合，无 "returned X%"
+    text = ("Performance\n1 month 3 months 6 months 12 months since inception\n"
+            "Class A 0.51% 1.53% 2.08% 2.08% 2.08%\n")
+    monkeypatch.setattr("lib.extract.parse_pdf_text", lambda p: text)
+
+    result = probe_official_evergreen({"official_pdf_path": str(pdf)})
+    assert result.found is False
+    assert "无 Commentary" in result.evidence or "均未命中" in result.evidence
+
+
+@pytest.mark.unit
+def test_probe_official_evergreen_no_url_no_path():
+    """fund_info 无 official_pdf_url/path -> found=False，提示主会话回填。"""
+    from lib.strategies import probe_official_evergreen
+    result = probe_official_evergreen({})
+    assert result.found is False
+    assert "official_pdf_url" in result.evidence or "回填" in result.evidence

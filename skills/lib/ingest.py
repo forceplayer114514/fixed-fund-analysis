@@ -13,7 +13,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from lib.audit import audit_all_funds
 from lib.consistency import consistency_check
@@ -26,6 +26,7 @@ from lib.db import (
 from lib.extract import (
     download_and_extract_parallel,
     extract_pdf_links_from_archive,
+    extract_pdf_one_bentham,
     extract_perf_rolling,
     gate_check,
     gate_check_table,
@@ -63,8 +64,12 @@ def add_fund(
     db_path: Optional[str] = None,
     max_workers: Optional[int] = None,
     shareclass_prefix: Optional[str] = None,
+    extractor: Optional[Callable[[str], tuple[Optional[float], dict]]] = None,
 ) -> dict:
     """全自动流水线。
+
+    extractor 默认 None -> extract_pdf_one（Stake 口径）；Bentham 等专属口径
+    传 extract_pdf_one_bentham。
 
     Returns:
         {'months','start','end','gaps','gate_pass','errors',
@@ -86,7 +91,9 @@ def add_fund(
     dest_dir = os.path.join(
         os.path.dirname(os.path.abspath(archive_html_path)), f"{fund_id}_pdfs"
     )
-    results = download_and_extract_parallel(links, dest_dir, max_workers=max_workers)
+    results = download_and_extract_parallel(
+        links, dest_dir, max_workers=max_workers, extractor=extractor
+    )
 
     # 4. 组装 records + rolling_per_month（排除提取失败项）
     records: list[tuple[str, float]] = []

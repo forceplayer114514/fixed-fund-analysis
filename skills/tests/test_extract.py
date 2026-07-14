@@ -190,6 +190,8 @@ from lib.extract import (
     extract_perf_rolling,
     extract_pdf_one,
     extract_pdf_links_from_archive,
+    extract_bentham_net_return,
+    extract_bentham_rolling,
 )
 
 
@@ -564,3 +566,70 @@ def test_download_and_extract_parallel_failure_isolation(monkeypatch, tmp_path):
     # 失败项：commentary=None, parse_error=True
     assert by_ym["2025-02"][1] is None
     assert by_ym["2025-02"][2]["parse_error"] is True
+
+
+# --- 14. extract_bentham_net_return ---
+def test_bentham_net_modern_percent_sign():
+    """2022+ 版：% + after fees（无星号）。net -0.02% -> -0.0002。"""
+    text = (
+        "The Bentham Global Income Fund had a total return (after fees) "
+        "of -0.02% in the month of September, underperforming the benchmark."
+    )
+    assert extract_bentham_net_return(text) == -0.0002
+
+
+def test_bentham_net_legacy_percent_word():
+    """2017 旧版：percent + after fees*（星号）。1.18 percent -> 0.0118。"""
+    text = (
+        "The Bentham Wholesale Global Income Fund had a total return "
+        "(after fees*) of 1.18 percent in the month of January."
+    )
+    assert extract_bentham_net_return(text) == 0.0118
+
+
+def test_bentham_net_not_gross():
+    """关键：不取 gross before-fees。Commentary 同时给 net 与 gross（before fees），
+    extract_commentary_return 的 returned\\s+X% 会取 gross，本提取器须取 net。"""
+    text = (
+        "had a total return (after fees) of -0.02% in the month of September. "
+        "On a before fees basis the fund returned -0.01% for the month."
+    )
+    assert extract_bentham_net_return(text) == -0.0002
+
+
+def test_bentham_net_no_match():
+    """无匹配返回 None。"""
+    assert extract_bentham_net_return("No Bentham commentary here.") is None
+
+
+# --- 15. extract_bentham_rolling ---
+def test_bentham_rolling_normal():
+    """2022+ 表：Total return (after fees) 行 1mo/3mo/6mo/12mo 累计值。
+    不提 inception（p.a. 与月度复利不可比）。"""
+    text = (
+        "Total return (after fees)1\n-0.02\n-0.40\n1.29\n2.17\n5.91\n"
+        "4.79\n3.66\n4.53\n6.14\n5.99\n6.18\n"
+        "Benchmark\n0.20\n0.66\n"
+    )
+    r = extract_bentham_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == -0.0002
+    assert r["3mo"] == -0.004
+    assert r["6mo"] == 0.0129
+    assert r["12mo"] == 0.0217
+    assert r["inception"] is None
+
+
+def test_bentham_rolling_old_format_no_table():
+    """2017 旧版无 performance 表 -> parse_error=True（gate 跳过复利，不致命）。"""
+    text = "Monthly Distribution Returns History (%)\nFinancial Year\nJul\nAug\n"
+    r = extract_bentham_rolling(text)
+    assert r["parse_error"] is True
+    assert r["1mo"] is None
+
+
+def test_bentham_rolling_insufficient_tokens():
+    """行标签后 token < 4 -> parse_error。"""
+    text = "Total return (after fees)1\n-0.02\n-0.40\nBenchmark\n"
+    r = extract_bentham_rolling(text)
+    assert r["parse_error"] is True

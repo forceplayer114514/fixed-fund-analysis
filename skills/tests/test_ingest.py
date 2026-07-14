@@ -30,7 +30,7 @@ def test_add_fund_success(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
         return [
             ("2025-03", -0.0051, _rolling(-0.0051)),
             ("2025-04", 0.0068, _rolling(0.0068)),
@@ -75,7 +75,7 @@ def test_add_fund_gate_fail_not_ingested(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"  # 缺 04
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
         return [
             ("2025-03", 0.005, _rolling(0.005)),
             ("2025-05", 0.005, _rolling(0.005)),
@@ -130,7 +130,7 @@ def test_add_fund_extraction_failure_isolation(monkeypatch, tmp_path):
         "May 2025: https://example.com/may-2025.pdf\n"
     )
 
-    def fake_parallel(links, dest_dir, max_workers=None):
+    def fake_parallel(links, dest_dir, max_workers=None, extractor=None):
         return [
             ("2025-03", 0.005, _rolling(0.005)),
             ("2025-04", None, {"1mo": None, "3mo": None, "6mo": None,
