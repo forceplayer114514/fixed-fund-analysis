@@ -721,3 +721,16 @@ def test_extract_archive_links_dedup_parsed():
     al = extract_archive_links(md)
     assert len(al.parsed) == 1
     assert len({ym for ym, _ in al.parsed}) == 1
+
+
+def test_extract_archive_links_html_anchor():
+    """HTML <a href> 归档页链接(curl 抓 HTML,非 markdown;3.1 工具隔离)。"""
+    html = (
+        '<a href="https://example.com/2025-04-report.pdf">April 2025 Report</a>\n'
+        '<a href="https://example.com/undated.pdf">Mystery</a>'
+    )
+    al = extract_archive_links(html)
+    assert ("2025-04", "https://example.com/2025-04-report.pdf") in al.parsed
+    assert len(al.unparseable) == 1
+    assert al.unparseable[0]["raw_text"] == "Mystery"
+    assert al.unparseable[0]["url"] == "https://example.com/undated.pdf"

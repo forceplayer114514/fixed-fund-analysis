@@ -1,17 +1,28 @@
-"""skills 候选数据源策略探测层。
+"""skills 候选数据源策略探测层(集合差驱动 fallback 链)。
 
-遍历候选策略清单，结构化报告"部分成功+缺口"，区分真无解(exhausted)
-vs 过早退出(premature_exit=bug)。纯探测层，不入库--主会话拿 DiscoveryReport
-后调 lib.ingest 入库。
+L0 local_cache -> L1 official_evergreen -> L2 wayback_cdx -> L3 fundmonitors,
+每级输入 gap_set 只补洞,榨干(新增 0 或连 3 失败)才降级,gap 空早停。
+**无 target 阈值**(36 是下游去平滑准入条件,爬取层禁知,修正 3.2.1)。
 
-第一性原理：目标是拿逐月数据，单一路径失败≠数据不存在。
-数据完整性原则同 extract.py：探测失败返回 found=False + evidence，绝不合成数据。
+缺口非失败(修正 3.2.4):穷尽后 gap 非空入 confirmed_gaps,仅 obtained 空集
+才 human_intervention。
+
+下界单向向更早收敛(★重点1 / 补3):发现更早月 -> 下界前移 -> expected_range
+扩展 -> gap_set 立即重算(新暴露早期月入队)。禁后缩(=静默删缺口)。
+
+L2 CDX 单月快照上限(补1):每个缺失月份最多试时间戳最近 3 个快照,防 15 分钟
+问题大规模复发。
+
+纯探测层,不入库 -- 主会话拿 DiscoveryReport 后调 lib.ingest 入库(obtained ->
+monthly_returns,gaps -> confirmed_gaps,pending_input -> LLM 补料重入)。
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
@@ -19,56 +30,108 @@ from typing import Callable, Optional
 from lib import db as dbmod
 from lib import extract as ex
 
-# 候选策略清单（有序，适配用户约束 a-g，本地缓存最先做）
-# g: human_intervention 是兜底标记，非策略
-STRATEGY_LIST = [
-    "local_cache",          # f: 本地已有数据（DB）最先做
-    "official_evergreen",   # a: 官网 evergreen PDF/HTML
-    "fundmonitors",         # c: featured/non-featured 判定
-    "wayback_cdx",          # d: Wayback CDX 历史快照
-    "distributions",        # b: 官网 Distributions 分红（辅助，不替代 total return）
-    "third_party_rolling",  # e: 第三方滚动收益（验证/补充）
+# fallback 链级别(有序;删 distributions / third_party_rolling 占位)
+LEVELS = [
+    ("L0", "local_cache"),
+    ("L1", "official_evergreen"),
+    ("L2", "wayback_cdx"),
+    ("L3", "fundmonitors"),
 ]
+# 兼容:策略名有序列表(供外部断言遍历完整性)
+STRATEGY_LIST = [name for _, name in LEVELS]
 
-DEFAULT_FULL_COVERAGE_THRESHOLD = 36
+# L2 CDX 单月快照上限(补1):每个缺失月份最多试时间戳最近 3 个快照。
+CDX_SNAPSHOTS_PER_MONTH = 3
+# 连续失败降级阈值(本级新增 0 累计达此值仍继续降级,非强制停)
+FAIL_STREAK_THRESHOLD = 3
 
 
 @dataclass
-class StrategyResult:
-    strategy: str
-    tried: bool = False
-    found: bool = False
-    months_count: int = 0
-    gaps: list = field(default_factory=list)
+class ProbeResult:
+    """单级 probe 结果(集合差驱动)。
+
+    new_months: 本级新增的 (year, month) 集合(去重,不含已 obtained)。
+    pending_input: 缺输入(如 L1 归档页 URL / L3 fundmonitors FundID)时挂起,
+        LLM 补料后重跑(断点续跑);非 None 表示本级因缺输入无法 probe。
+    failures: 本级失败计数(probe 自报,run_discovery 另用 new 空判断 fail_streak)。
+    evidence: 证据描述。
+    unparseable: 本级解析失败链接日志(转 DiscoveryReport,不静默消失,★重点2)。
+    ingest_payload: 入库载荷(confirmed_url/links/records/fetch_method),供 ingest
+        按 best level 入库;本级无贡献时 None。
+    """
+    new_months: set = field(default_factory=set)
+    pending_input: Optional[dict] = None
+    failures: int = 0
     evidence: str = ""
-    paywall_hit: bool = False
-    ingest_entry: Optional[str] = None  # "add" / "add-table" / None
-    fetch_method: str = ""              # "pdf" / "html"
-    confirmed_url: str = ""
-    skip_reason: str = ""               # 早停填 "full_coverage"
+    unparseable: list = field(default_factory=list)
+    ingest_payload: Optional[dict] = None
 
 
 @dataclass
 class DiscoveryReport:
     fund_id: str
-    strategies_tried: list = field(default_factory=list)
-    strategies_skipped: list = field(default_factory=list)
-    strategies_succeeded: list = field(default_factory=list)
-    best_strategy: Optional[str] = None
-    total_months_obtainable: int = 0
-    gaps: list = field(default_factory=list)
-    coverage: str = "none"              # "full" | "partial" | "none"
-    exhausted: bool = False             # 穷尽清单或满覆盖早停
-    premature_exit: bool = False        # bug：partial/none 时未遍历完
-    human_intervention_needed: bool = False
+    inception_date: Optional[str] = None          # YYYY-MM-DD
+    inception_assumed: bool = False
+    obtained: list = field(default_factory=list)  # sorted ["YYYY-MM", ...]
+    gaps: list = field(default_factory=list)      # sorted ["YYYY-MM", ...] 穷尽后正常产出
+    per_level_contribution: dict = field(default_factory=dict)  # {"L0": n, ...}
+    unparseable_links: list = field(default_factory=list)
+    pending_input: Optional[dict] = None          # 缺输入挂起(断点续跑)
+    human_intervention_needed: bool = False       # 仅 obtained 空集 True
     evidence_log: list = field(default_factory=list)
 
 
-ProbeFn = Callable[[dict], StrategyResult]
+ProbeFn = Callable[[dict, set], ProbeResult]
+
+
+# ---------------------------------------------------------------------------
+# 工具:月份集合运算
+# ---------------------------------------------------------------------------
+
+def _ym_to_str(y: int, m: int) -> str:
+    return f"{y}-{m:02d}"
+
+
+def _parse_ym(s: str) -> Optional[tuple]:
+    """'YYYY-MM' 或 'YYYY-MM-DD' -> (year, month)。失败 None(不猜测)。"""
+    if not s:
+        return None
+    m = re.match(r"(\d{4})-(\d{2})", s)
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    if 1 <= mo <= 12:
+        return (y, mo)
+    return None
+
+
+def _month_range(lower: tuple, upper: tuple) -> set:
+    """lower..upper(含)所有 (year, month)。"""
+    months: set = set()
+    y, m = lower
+    while (y, m) <= upper:
+        months.add((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return months
+
+
+def _recent_published_month() -> tuple:
+    """最近已发布报告月(距今 ≤2 自然月算正常滞后,不计缺口):当前月 -2。"""
+    today = datetime.date.today()
+    y, m = today.year, today.month
+    for _ in range(2):
+        m -= 1
+        if m < 1:
+            m = 12
+            y -= 1
+    return (y, m)
 
 
 def _curl(url: str, timeout: int = 60) -> Optional[str]:
-    """bash curl 兜底抓取（走系统网络绕 MCP 代理拦）。返回 stdout 或 None。"""
+    """bash curl 兜底抓取(走系统网络绕 MCP 代理拦)。返回 stdout 或 None。"""
     try:
         r = subprocess.run(
             ["curl", "-sL", "--max-time", str(timeout), url],
@@ -90,22 +153,12 @@ def _curl_download(url: str, dest: str, timeout: int = 60) -> bool:
         return False
 
 
-_MONTH_TOKENS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+# ---------------------------------------------------------------------------
+# probe 实现:L0-L3(集合差驱动,输入 gap_set 只补洞)
+# ---------------------------------------------------------------------------
 
-
-def _pdf_has_monthly_table(text: str) -> bool:
-    """搜 Monthly/History/Jan-Dec 判断 PDF 是否含 Year×Month 逐月历史表。"""
-    if not text:
-        return False
-    if "Monthly" in text or "History" in text:
-        return True
-    hits = sum(1 for m in _MONTH_TOKENS if m in text)
-    return hits >= 6
-
-
-def probe_local_cache(fund_info: dict) -> StrategyResult:
-    """查本地 DB 是否已有该基金月度数据（应最先做）。"""
+def probe_local_cache(fund_info: dict, gap_set: set) -> ProbeResult:
+    """L0:查本地 DB 已有月份。返回 DB 全量已得月(供确立/收敛下界)。"""
     fund_id = fund_info.get("fund_id", "")
     db_path = fund_info.get("db_path")
     try:
@@ -113,248 +166,328 @@ def probe_local_cache(fund_info: dict) -> StrategyResult:
         rows = dbmod.get_monthly_returns(conn, fund_id)
         conn.close()
     except Exception as e:
-        return StrategyResult(strategy="local_cache", tried=True, found=False,
-                              evidence=f"DB 查询失败: {e}")
-    if rows:
-        return StrategyResult(strategy="local_cache", tried=True, found=True,
-                              months_count=len(rows),
-                              evidence=f"DB 已有 {len(rows)} 月数据",
-                              confirmed_url="local:sqlite")
-    return StrategyResult(strategy="local_cache", tried=True, found=False,
-                          evidence="DB 无该基金数据")
-
-
-def probe_official_evergreen(fund_info: dict) -> StrategyResult:
-    """官网 evergreen PDF/HTML。fund_info 可含 official_pdf_url 或 official_pdf_path。"""
-    url = fund_info.get("official_pdf_url")
-    path = fund_info.get("official_pdf_path")
-    if not url and not path:
-        return StrategyResult(
-            strategy="official_evergreen", tried=True, found=False,
-            evidence="fund_info 未提供 official_pdf_url/path，需主会话 mcp__search__search 探测官网后回填",
-        )
-    if path and os.path.exists(path):
-        pdf_path = path
-    elif url:
-        pdf_path = "/tmp/_strat_official.pdf"
-        if not _curl_download(url, pdf_path):
-            return StrategyResult(strategy="official_evergreen", tried=True, found=False,
-                                  evidence=f"curl 下载失败: {url}")
-    else:
-        return StrategyResult(strategy="official_evergreen", tried=True, found=False,
-                              evidence="无 URL/path 可用")
-    try:
-        text = ex.parse_pdf_text(pdf_path)
-    except Exception as e:
-        return StrategyResult(strategy="official_evergreen", tried=True, found=False,
-                              evidence=f"parse_pdf_text 失败: {e}")
-    has_table = _pdf_has_monthly_table(text)
-    commentary = ex.extract_commentary_return(text)
-    if has_table:
-        return StrategyResult(
-            strategy="official_evergreen", tried=True, found=True,
-            months_count=fund_info.get("official_estimated_months", 0),
-            evidence="PDF 含 Year×Month 逐月历史表（单 PDF 即足）",
-            ingest_entry="add", fetch_method="pdf",
-            confirmed_url=url or f"file:{path}",
-        )
-    if commentary is not None:
-        # 单月 Commentary 路径（常态）：PDF 给当月收益，须归档页全量月 PDF 合成。
-        # months_count 未知（取决于归档页链接数），用 official_estimated_months（主会话
-        # 从归档页链接计数回填）或保守 1。found=True 表示多 PDF 合成可行。
-        return StrategyResult(
-            strategy="official_evergreen", tried=True, found=True,
-            months_count=fund_info.get("official_estimated_months", 1),
-            evidence=f"PDF 含 Commentary 当月收益 {commentary}（单月路径，须归档页多 PDF 合成）",
-            ingest_entry="add", fetch_method="pdf",
-            confirmed_url=url or f"file:{path}",
-        )
-    return StrategyResult(
-        strategy="official_evergreen", tried=True, found=False,
-        evidence="PDF 无 Year×Month 逐月表且无 Commentary 当月收益（搜 Monthly/History/Jan-Dec + extract_commentary_return 均未命中）",
-        confirmed_url=url or "",
+        return ProbeResult(failures=1, evidence=f"DB 查询失败: {e}")
+    if not rows:
+        return ProbeResult(failures=1, evidence="DB 无该基金数据")
+    months: set = set()
+    for r in rows:
+        ym = _parse_ym(r["date"])
+        if ym:
+            months.add(ym)
+    return ProbeResult(
+        new_months=months,
+        evidence=f"DB 已有 {len(months)} 月数据",
+        ingest_payload={"fetch_method": "local", "confirmed_url": "local:sqlite"},
     )
 
 
-def probe_fundmonitors(fund_info: dict) -> StrategyResult:
-    """fundmonitors Full Profile AJAX。fund_info 需含 fundmonitors_html_path（主会话 mcp 预抓）。"""
-    path = fund_info.get("fundmonitors_html_path")
-    if not path or not os.path.exists(path):
-        return StrategyResult(
-            strategy="fundmonitors", tried=True, found=False,
-            evidence="fund_info 未提供 fundmonitors_html_path，需主会话 stealthy_fetch 抓 fund-profile.php?IsAjax=1 后回填路径",
+def probe_official_evergreen(fund_info: dict, gap_set: set) -> ProbeResult:
+    """L1:官网归档页。fund_info 需含 confirmed_url(已验证归档页 URL,3.1.3)或
+    archive_markdown(已抓取归档页 HTML/markdown)。
+
+    抓归档页 -> extract_archive_links 提月份 PDF 链接 -> new_months(月份集合)
+    + ingest_payload(links)。单 PDF Commentary/逐月表的下载与提取在 ingest(M4),
+    本级只探测可得月份范围(分离探测与提取)。
+    """
+    archive = fund_info.get("archive_markdown")
+    url = fund_info.get("confirmed_url")
+    if not archive and not url:
+        return ProbeResult(
+            pending_input={"need": "confirmed_url",
+                           "reason": "L1 需已验证归档页 URL(主会话定位后回填)"},
+            evidence="fund_info 未提供 confirmed_url/archive_markdown",
         )
-    try:
-        with open(path, encoding="utf-8") as f:
-            md = f.read()
-    except Exception as e:
-        return StrategyResult(strategy="fundmonitors", tried=True, found=False,
-                              evidence=f"读取失败: {e}")
-    low = md.lower()
-    if "must be logged in" in low or "premium" in low:
-        return StrategyResult(
-            strategy="fundmonitors", tried=True, found=False,
-            paywall_hit=True,
-            evidence="fundmonitors 付费墙/登录墙（non-featured），立即跳过不提供账号",
+    if not archive:
+        archive = _curl(url, timeout=60)
+        if not archive:
+            return ProbeResult(failures=1, evidence=f"curl 抓归档页失败: {url}")
+    al = ex.extract_archive_links(archive)
+    months: set = set()
+    for ym_str, _pdf_url in al.parsed:
+        ym = _parse_ym(ym_str)
+        if ym:
+            months.add(ym)
+    if not months:
+        return ProbeResult(
+            failures=1,
+            evidence="归档页无解析出月份的 PDF 链接",
+            unparseable=al.unparseable,
         )
-    records, _ytd = ex.parse_html_monthly_table(md)
-    if records:
-        return StrategyResult(
-            strategy="fundmonitors", tried=True, found=True,
-            months_count=len(records),
-            evidence=f"含 Historical Performance 逐月表 {len(records)} 月",
-            ingest_entry="add-table", fetch_method="html",
-            confirmed_url=fund_info.get("fundmonitors_url", ""),
-        )
-    return StrategyResult(
-        strategy="fundmonitors", tried=True, found=False,
-        evidence="无 Historical Performance 逐月表（或为 N/A 摘要页）",
+    return ProbeResult(
+        new_months=months,
+        evidence=f"归档页解析出 {len(months)} 月 PDF 链接",
+        unparseable=al.unparseable,
+        ingest_payload={
+            "fetch_method": "pdf",
+            "confirmed_url": url or "",
+            "links": al.parsed,  # [(YYYY-MM, url), ...] 供 ingest 下载提取
+        },
     )
 
 
-def probe_wayback_cdx(fund_info: dict) -> StrategyResult:
-    """Wayback CDX API 查 evergreen URL 历史快照。fund_info 需含 issuer_domain + slug 变体。"""
+def probe_wayback_cdx(fund_info: dict, gap_set: set) -> ProbeResult:
+    """L2:Wayback CDX 历史快照,补 gap_set 中的洞。
+
+    gap_set 非空:查 domain 下快照,从 original URL 提月份(extract_month_prefix),
+    匹配 gap_set 的补;每缺失月至多 CDX_SNAPSHOTS_PER_MONTH 个快照(补1)。
+    gap_set 空(范围未定):粗扫 domain 归档页模式快照计数(不知具体月份)。
+    """
     domain = fund_info.get("issuer_domain")
-    slugs = fund_info.get("wayback_slugs", [])
     if not domain:
-        return StrategyResult(strategy="wayback_cdx", tried=True, found=False,
-                              evidence="fund_info 未提供 issuer_domain，无法查 CDX")
+        return ProbeResult(failures=1, evidence="fund_info 未提供 issuer_domain")
+    if gap_set:
+        return _cdx_fill_gaps(domain, gap_set)
+    return _cdx_scan_domain(domain)
+
+
+def _cdx_fill_gaps(domain: str, gap_set: set) -> ProbeResult:
+    """对 gap_set 每月,查 CDX 快照从 original URL 提月份补洞;每月至多 3 快照(补1)。"""
+    patterns = [f"{domain}/*", f"{domain}/wp-content/uploads/*"]
+    new_months: set = set()
+    month_snap_count: dict = {}
+    for pat in patterns:
+        api = (
+            f"http://web.archive.org/cdx/search/cdx?url={pat}"
+            f"&output=json&fl=timestamp,original,statuscode"
+            f"&filter=statuscode:200&limit=500"
+        )
+        out = _curl(api, timeout=30)
+        if not out:
+            continue
+        try:
+            arr = json.loads(out)
+        except Exception:
+            continue
+        for row in arr[1:]:  # 首行表头跳过
+            original = row[1] if len(row) > 1 else ""
+            ym = ex.extract_month_prefix(original)
+            if not ym:
+                continue
+            ym_t = _parse_ym(ym)
+            if ym_t is None or ym_t not in gap_set:
+                continue
+            if month_snap_count.get(ym_t, 0) >= CDX_SNAPSHOTS_PER_MONTH:
+                continue  # 补1:该月已达快照上限,不再计入
+            month_snap_count[ym_t] = month_snap_count.get(ym_t, 0) + 1
+            new_months.add(ym_t)
+    if new_months:
+        return ProbeResult(
+            new_months=new_months,
+            evidence=f"CDX 补洞 {len(new_months)} 月(每月至多{CDX_SNAPSHOTS_PER_MONTH}快照,补1)",
+            ingest_payload={"fetch_method": "pdf", "confirmed_url": "web.archive.org"},
+        )
+    return ProbeResult(failures=1, evidence="CDX 补洞零命中(无 gap_set 月份的快照)")
+
+
+def _cdx_scan_domain(domain: str) -> ProbeResult:
+    """范围未定时扫 domain 归档页模式快照(粗扫,仅标记可得,不知具体月份)。"""
     patterns = [f"{domain}/performance*", f"{domain}/wp-content/uploads/*"]
-    for s in slugs:
-        patterns.append(f"{domain}/performance-pdf-{s}*")
-        patterns.append(f"{domain}/performance-report-{s}*")
     total = 0
     for pat in patterns:
         api = (
             f"http://web.archive.org/cdx/search/cdx?url={pat}"
-            f"&output=json&fl=timestamp,original,statuscode&filter=statuscode:200&limit=200"
+            f"&output=json&fl=timestamp,original,statuscode"
+            f"&filter=statuscode:200&limit=200"
         )
         out = _curl(api, timeout=30)
         if out:
             try:
                 arr = json.loads(out)
-                total += max(0, len(arr) - 1)  # 首行是表头
+                total += max(0, len(arr) - 1)
             except Exception:
                 pass
     if total > 0:
-        return StrategyResult(
-            strategy="wayback_cdx", tried=True, found=True,
-            months_count=min(total, fund_info.get("target_months", DEFAULT_FULL_COVERAGE_THRESHOLD)),
-            evidence=f"CDX 命中 {total} 个 200 快照（可多 PDF 合成逐月）",
-            ingest_entry="add", fetch_method="pdf",
-            confirmed_url="web.archive.org",
+        return ProbeResult(
+            new_months=set(),  # 粗扫不知具体月份,仅标记可得
+            evidence=f"CDX 命中 {total} 快照(范围未定,粗扫)",
+            ingest_payload={"fetch_method": "pdf", "confirmed_url": "web.archive.org"},
         )
-    return StrategyResult(
-        strategy="wayback_cdx", tried=True, found=False,
-        evidence=f"CDX 零快照（查了 {len(patterns)} 个 URL 模式：归档页+slug变体+wp-content）",
-    )
+    return ProbeResult(failures=1, evidence="CDX 零快照")
 
 
-def probe_distributions(fund_info: dict) -> StrategyResult:
-    """官网 Distributions 分红历史。辅助字段，不替代 total return。"""
-    path = fund_info.get("distributions_html_path")
-    if not path or not os.path.exists(path):
-        return StrategyResult(
-            strategy="distributions", tried=True, found=False,
-            evidence="fund_info 未提供 distributions_html_path；分红仅辅助不可替代 total return",
+def probe_fundmonitors(fund_info: dict, gap_set: set) -> ProbeResult:
+    """L3:fundmonitors Full Profile AJAX 逐月表。
+
+    fund_info 需含 fundmonitors_html_path(已抓取存文件)或 fundmonitors_url(代码
+    curl 抓 AJAX)。缺输入 -> pending_input 挂起(LLM 补料重入)。付费墙 -> 跳过。
+    """
+    path = fund_info.get("fundmonitors_html_path")
+    url = fund_info.get("fundmonitors_url")
+    if not path and not url:
+        return ProbeResult(
+            pending_input={"need": "fundmonitors_url",
+                           "reason": "L3 需 fundmonitors fund-profile URL(主会话定位后回填)"},
+            evidence="fund_info 未提供 fundmonitors_html_path/url",
         )
-    return StrategyResult(
-        strategy="distributions", tried=True, found=False,
-        evidence="Distributions 仅分红历史，非月度 total return，不可作主数据源",
-    )
-
-
-def probe_third_party_rolling(fund_info: dict) -> StrategyResult:
-    """第三方聚合站滚动收益。仅验证/补充，不主源。"""
-    return StrategyResult(
-        strategy="third_party_rolling", tried=True, found=False,
-        evidence="第三方滚动收益仅区间值非逐月，且多为付费墙，跳过作主源",
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                md = f.read()
+        except Exception as e:
+            return ProbeResult(failures=1, evidence=f"读取失败: {e}")
+    else:
+        md = _curl(url, timeout=60)
+        if not md:
+            return ProbeResult(failures=1, evidence=f"curl 抓 fundmonitors 失败: {url}")
+    low = md.lower()
+    if "must be logged in" in low or "premium" in low:
+        return ProbeResult(
+            failures=1,
+            evidence="fundmonitors 付费墙/登录墙,立即跳过不提供账号",
+        )
+    records, _ytd = ex.parse_html_monthly_table(md)
+    if not records:
+        return ProbeResult(failures=1, evidence="无 Historical Performance 逐月表")
+    months: set = set()
+    for date_str, _ret in records:
+        ym = _parse_ym(date_str)
+        if ym:
+            months.add(ym)
+    return ProbeResult(
+        new_months=months,
+        evidence=f"fundmonitors 逐月表 {len(months)} 月",
+        ingest_payload={"fetch_method": "html", "confirmed_url": url or "",
+                        "records": records},
     )
 
 
 DEFAULT_PROBES: dict = {
     "local_cache": probe_local_cache,
     "official_evergreen": probe_official_evergreen,
-    "fundmonitors": probe_fundmonitors,
     "wayback_cdx": probe_wayback_cdx,
-    "distributions": probe_distributions,
-    "third_party_rolling": probe_third_party_rolling,
+    "fundmonitors": probe_fundmonitors,
 }
 
 
+# ---------------------------------------------------------------------------
+# run_discovery:集合差驱动主循环(★重点1 下界收敛)
+# ---------------------------------------------------------------------------
+
 def run_discovery(
     fund_info: dict,
+    expected_range: Optional[set] = None,
     probes: Optional[dict] = None,
-    full_coverage_threshold: int = DEFAULT_FULL_COVERAGE_THRESHOLD,
 ) -> DiscoveryReport:
-    """遍历候选策略清单。
+    """遍历 fallback 链 L0->L3,集合差驱动。
 
-    满 coverage(>=target) 早停(剩余 tried=False skip_reason=full_coverage)。
-    partial/none 必须遍历完整个 STRATEGY_LIST，否则 premature_exit=True(视为 bug)。
+    expected_range: set[(year,month)] 期望月份范围。None 时从 fund_info 推:
+      下界 = inception_date 月(无精确日 inception_assumed=True 时不信,待 probe
+      确定最早月);上界 = latest_month 或当前月-2(≤2 自然月滞后不算缺口)。
+    下界单向向更早收敛(★重点1):发现更早月 -> 下界前移 -> expected_range 扩展
+      -> gap_set 重算(新暴露早期月入队)。禁后缩。
+    降级:本级 new 空 或 连3失败 -> 下一级。早停:expected 非空且 gap 空。
+    L3 缺输入 -> pending_input 挂起(断点续跑)。
+    缺口非失败:穷尽后 gap 非空入 gaps;仅 obtained 空集 -> human_intervention。
     """
     probes = probes if probes is not None else DEFAULT_PROBES
-    target = fund_info.get("target_months", full_coverage_threshold)
-    report = DiscoveryReport(fund_id=fund_info.get("fund_id", ""))
-    for name in STRATEGY_LIST:
-        if report.total_months_obtainable >= target:
-            result = StrategyResult(strategy=name, tried=False, skip_reason="full_coverage")
-            report.strategies_skipped.append(name)
-        else:
-            result = probes[name](fund_info)
-            result.strategy = name
-            report.strategies_tried.append(name)
-            if result.found:
-                report.strategies_succeeded.append(name)
-                if result.months_count > report.total_months_obtainable:
-                    report.total_months_obtainable = result.months_count
-                if report.best_strategy is None:
-                    report.best_strategy = name
-        report.evidence_log.append(asdict(result))
-    visited = len(report.strategies_tried) + len(report.strategies_skipped)
-    if report.total_months_obtainable >= target:
-        report.coverage = "full"
-        report.exhausted = True
-    elif report.total_months_obtainable > 0:
-        report.coverage = "partial"
-        report.exhausted = visited == len(STRATEGY_LIST)
-        if not report.exhausted:
-            report.premature_exit = True
+    fund_id = fund_info.get("fund_id", "")
+    inception_date = fund_info.get("inception_date")
+    inception_assumed = bool(fund_info.get("inception_assumed", False))
+
+    upper = _parse_ym(fund_info.get("latest_month")) or _recent_published_month()
+    if expected_range is not None:
+        expected = set(expected_range)
+        lower = min(expected) if expected else None
+    elif inception_date and not inception_assumed:
+        lower = _parse_ym(inception_date)
+        expected = _month_range(lower, upper) if lower else set()
     else:
-        report.coverage = "none"
-        report.exhausted = visited == len(STRATEGY_LIST)
-        if not report.exhausted:
-            report.premature_exit = True
-        report.human_intervention_needed = True
-    return report
+        # 无 inception_date 或 inception_assumed(无精确日):下界待 probe 确定最早月
+        lower = None
+        expected = set()
+
+    obtained: set = set()
+    unparseable_all: list = []
+    per_level: dict = {}
+    evidence_log: list = []
+    pending_input: Optional[dict] = None
+    fail_streak = 0
+
+    for level_key, name in LEVELS:
+        gap_set = expected - obtained
+        # 早停:expected 非空且 gap 空 -> skip 本级(continue 让后续级也 skip,
+        # 保证剩余级别全部记 skip_reason=gap_empty;expected 空时仍需 probe 确定范围)
+        if expected and not gap_set:
+            evidence_log.append({"level": level_key, "strategy": name,
+                                 "tried": False, "skip_reason": "gap_empty"})
+            continue
+        probe_fn = probes.get(name)
+        if probe_fn is None:
+            continue
+        result = probe_fn(fund_info, gap_set)
+        new = set(result.new_months or set())
+        evidence_log.append({
+            "level": level_key, "strategy": name, "tried": True,
+            "new_count": len(new), "evidence": result.evidence,
+            "pending_input": result.pending_input is not None,
+        })
+        if result.unparseable:
+            unparseable_all.extend(result.unparseable)
+        if result.pending_input:
+            pending_input = result.pending_input
+        obtained |= new
+        per_level[level_key] = len(new)
+
+        # ★重点1:下界单向向更早收敛(禁后缩)
+        if new:
+            new_min = min(new)
+            if lower is None or new_min < lower:
+                lower = new_min
+                if lower is not None:
+                    expected = _month_range(lower, upper)
+
+        # 降级计数(本级无新增 -> fail_streak++)
+        if new:
+            fail_streak = 0
+        else:
+            fail_streak += 1
+
+        # fail_streak >= FAIL_STREAK_THRESHOLD 仍继续下一级(降级,不强制停);
+        # gap 空的早停在循环开头 skip_reason=gap_empty 处理(continue 让后续级全 skip)
+
+    gaps = expected - obtained if expected else set()
+    human = len(obtained) == 0
+    return DiscoveryReport(
+        fund_id=fund_id,
+        inception_date=inception_date,
+        inception_assumed=inception_assumed,
+        obtained=sorted(_ym_to_str(y, m) for y, m in obtained),
+        gaps=sorted(_ym_to_str(y, m) for y, m in gaps),
+        per_level_contribution=per_level,
+        unparseable_links=unparseable_all,
+        pending_input=pending_input,
+        human_intervention_needed=human,
+        evidence_log=evidence_log,
+    )
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="skills 候选数据源策略探测")
+    parser = argparse.ArgumentParser(description="skills 候选数据源策略探测(集合差驱动)")
     sub = parser.add_subparsers(dest="command", required=True)
-    p = sub.add_parser("probe", help="探测候选数据源策略")
+    p = sub.add_parser("probe", help="跑 fallback 链探测")
     p.add_argument("--fund-id", required=True)
-    p.add_argument("--name", required=True)
-    p.add_argument("--apir", default=None)
+    p.add_argument("--inception-date", default=None, help="YYYY-MM-DD")
+    p.add_argument("--inception-assumed", action="store_true")
+    p.add_argument("--latest-month", default=None, help="YYYY-MM")
+    p.add_argument("--confirmed-url", default=None, help="L1 已验证归档页 URL")
     p.add_argument("--issuer-domain", default=None)
-    p.add_argument("--official-pdf-url", default=None)
-    p.add_argument("--fundmonitors-html", default=None)
-    p.add_argument("--target-months", type=int, default=None)
+    p.add_argument("--fundmonitors-url", default=None)
     p.add_argument("--db-path", default=None)
     args = parser.parse_args()
 
     fund_info = {
         "fund_id": args.fund_id,
-        "name": args.name,
-        "apir": args.apir,
+        "inception_date": args.inception_date,
+        "inception_assumed": args.inception_assumed,
+        "latest_month": args.latest_month,
+        "confirmed_url": args.confirmed_url,
         "issuer_domain": args.issuer_domain,
-        "official_pdf_url": args.official_pdf_url,
-        "fundmonitors_html_path": args.fundmonitors_html,
-        "target_months": args.target_months or DEFAULT_FULL_COVERAGE_THRESHOLD,
+        "fundmonitors_url": args.fundmonitors_url,
         "db_path": args.db_path,
     }
     report = run_discovery(fund_info)
-    print(json.dumps(asdict(report), indent=2, ensure_ascii=False))
-    return 0 if not report.premature_exit else 1
+    print(json.dumps(asdict(report), indent=2, ensure_ascii=False, default=list))
+    return 0
 
 
 if __name__ == "__main__":

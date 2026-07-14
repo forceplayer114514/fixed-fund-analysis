@@ -106,6 +106,14 @@ def extract_month_prefix(filename: str) -> Optional[str]:
         month = MONTH_MAP[m.group(2).lower()]
         return f"{year}-{month:02d}"
 
+    # 4. YYYY-MM(带连字符,如 perf-2023-01.pdf / 2023-01-report.pdf)
+    m = re.search(r"(\d{4})-(\d{2})", filename)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year}-{month:02d}"
+
     return None
 
 
@@ -560,6 +568,24 @@ def extract_archive_links(markdown: str) -> ArchiveLinks:
     seen: set[tuple[str, str]] = set()
     unparseable: list[dict] = []
 
+    # 0. HTML <a href="url.pdf">text</a>(归档页 curl 抓的 HTML;计划禁 reader-mode
+    #    提链接,代码抓原始 HTML 提链接,3.1 工具隔离)
+    html_pattern = re.compile(
+        r'<a[^>]+href=["\'](https?://[^"\'\s]+\.pdf[^"\'\s]*)["\'][^>]*>([^<]+)</a>',
+        re.IGNORECASE,
+    )
+    for m in html_pattern.finditer(markdown):
+        url, text = m.group(1), m.group(2)
+        ym = _text_to_ym(text) or extract_month_prefix(url)
+        if ym is None:
+            unparseable.append({"url": url, "raw_text": text,
+                                "reason": "month_not_parsed"})
+            continue
+        key = (ym, url)
+        if key not in seen:
+            seen.add(key)
+            parsed.append(key)
+
     # 1. markdown 链接 [text](url.pdf):优先从 text 提月份,回退 url
     link_pattern = re.compile(
         r"\[([^\]]+)\]\((https?://[^\s\)]+\.pdf[^\s\)]*)\)", re.IGNORECASE
@@ -579,7 +605,7 @@ def extract_archive_links(markdown: str) -> ArchiveLinks:
     # 2. 裸 url.pdf(无链接文本):从 url 提月份。排除已处理(parsed ∪ unparseable)
     # 的 url,避免同一 url 被 markdown 链接与裸 url 正则双重收集进 unparseable。
     linked_urls = {url for _, url in parsed} | {u["url"] for u in unparseable}
-    for url in re.findall(r"https?://[^\s\)]+\.pdf[^\s\)]*", markdown, re.IGNORECASE):
+    for url in re.findall(r"https?://[^\s\)\"'<>]+\.pdf[^\s\)\"'>]*", markdown, re.IGNORECASE):
         if url in linked_urls:
             continue
         ym = extract_month_prefix(url)
@@ -624,7 +650,7 @@ def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
 
     # 2. 裸 url.pdf（无链接文本）：从 url 提月份
     linked_urls = {url for _, url in results}
-    for url in re.findall(r"https?://[^\s\)]+\.pdf[^\s\)]*", markdown, re.IGNORECASE):
+    for url in re.findall(r"https?://[^\s\)\"'<>]+\.pdf[^\s\)\"'>]*", markdown, re.IGNORECASE):
         if url in linked_urls:
             continue
         ym = extract_month_prefix(url)
