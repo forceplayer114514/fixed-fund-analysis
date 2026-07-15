@@ -108,3 +108,19 @@ def test_recompute_no_data_returns_400(client):
                  "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
     resp = client.post("/api/funds/f1/recompute")
     assert resp.status_code == 400
+
+
+@pytest.mark.unit
+def test_list_funds_returns_gap_count(client, db_session):
+    """GET /api/funds 透出 gap_count（confirmed_gaps 表行数，数据完整性标记）。"""
+    from app.models import ConfirmedGap
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    client.post("/api/funds", json={"fund_id": "f2", "fund_name": "Gap Fund",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    db_session.add(ConfirmedGap(fund_id="f2", missing_month="2026-02"))
+    db_session.add(ConfirmedGap(fund_id="f2", missing_month="2026-05"))
+    db_session.commit()
+    funds = {f["fund_id"]: f for f in client.get("/api/funds").json()}
+    assert funds["f1"]["gap_count"] == 0
+    assert funds["f2"]["gap_count"] == 2

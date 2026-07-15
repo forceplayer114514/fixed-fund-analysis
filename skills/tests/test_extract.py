@@ -4,11 +4,13 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import os
 import tempfile
 
 import pytest
+import requests
 
 from lib.extract import (
     MONTH_MAP,
@@ -579,6 +581,93 @@ def test_download_and_extract_parallel_failure_isolation(monkeypatch, tmp_path):
     assert by_ym["2025-02"][2]["parse_error"] is True
 
 
+def test_download_and_extract_parallel_default_max_workers(monkeypatch, tmp_path):
+    """默认 max_workers 按 IO 并发算(cpu_count*2 封顶24)，不卡在物理核数。"""
+    seen_workers = {}
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class _SpyExecutor(real_executor):
+        def __init__(self, max_workers=None, *a, **kw):
+            seen_workers["value"] = max_workers
+            super().__init__(max_workers=max_workers, *a, **kw)
+
+    monkeypatch.setattr("lib.extract.os.cpu_count", lambda: 10)
+    monkeypatch.setattr(
+        "lib.extract.concurrent.futures.ThreadPoolExecutor", _SpyExecutor
+    )
+    monkeypatch.setattr(
+        "lib.extract.download_file",
+        lambda url, filepath, headers=None: open(filepath, "wb").write(b"x"),
+    )
+    monkeypatch.setattr(
+        "lib.extract.extract_pdf_one",
+        lambda pdf_path, max_pages=None: (
+            0.01, {"1mo": 0.01, "3mo": None, "6mo": None,
+                   "12mo": None, "inception": None, "parse_error": False},
+        ),
+    )
+    download_and_extract_parallel(
+        [("2025-01", "https://example.com/a.pdf")], str(tmp_path)
+    )
+    # cpu_count=10 -> min(24, 10*2) = 20，而非旧公式 min(16,10)=10
+    assert seen_workers["value"] == 20
+
+
+# --- 14b. download_file 重试 ---
+def test_download_file_retries_once_on_timeout(monkeypatch, tmp_path):
+    """超时/连接错误重试 1 次，第二次成功则正常写文件。"""
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        content = b"pdf-bytes"
+
+    def fake_get(url, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.Timeout("slow")
+        return _FakeResp()
+
+    monkeypatch.setattr("lib.extract.requests.get", fake_get)
+    filepath = str(tmp_path / "f.pdf")
+    download_file("https://example.com/f.pdf", filepath)
+    assert calls["n"] == 2
+    with open(filepath, "rb") as f:
+        assert f.read() == b"pdf-bytes"
+
+
+def test_download_file_raises_after_retry_exhausted(monkeypatch, tmp_path):
+    """连续 2 次超时/连接错误直接抛出，不无限重试。"""
+    def fake_get(url, headers=None, timeout=None):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr("lib.extract.requests.get", fake_get)
+    filepath = str(tmp_path / "f.pdf")
+    with pytest.raises(requests.exceptions.ConnectionError):
+        download_file("https://example.com/f.pdf", filepath)
+
+
+def test_download_file_http_error_not_retried(monkeypatch, tmp_path):
+    """HTTP 4xx/5xx 状态由 raise_for_status 抛出，不属于重试范围，只请求 1 次。"""
+    calls = {"n": 0}
+
+    class _FakeResp:
+        def raise_for_status(self):
+            raise requests.exceptions.HTTPError("404")
+
+    def fake_get(url, headers=None, timeout=None):
+        calls["n"] += 1
+        return _FakeResp()
+
+    monkeypatch.setattr("lib.extract.requests.get", fake_get)
+    filepath = str(tmp_path / "f.pdf")
+    with pytest.raises(requests.exceptions.HTTPError):
+        download_file("https://example.com/f.pdf", filepath)
+    assert calls["n"] == 1
+
+
 # --- 14. extract_bentham_net_return ---
 def test_bentham_net_modern_percent_sign():
     """2022+ 版：% + after fees（无星号）。net -0.02% -> -0.0002。"""
@@ -706,6 +795,42 @@ def test_extract_archive_links_parsed_and_unparseable():
     assert al.unparseable[0]["raw_text"] == "Doc"
     # parsed 不含 unparseable 的 url
     assert all("no-date-here" not in u for _, u in al.parsed)
+
+
+# --- 18. KKR KKC Extractor ---
+from lib.extract import (
+    extract_kkc_net_return_full,
+    extract_pdf_one_kkc_full,
+)
+
+
+def test_extract_kkc_net_return_full_patterns():
+    # Pattern 1: Total Return (Net) +0.77%
+    t1 = "Fund Performance Total Return (Net)\n+0.77%\n+0.25%"
+    r1 = extract_kkc_net_return_full(t1)
+    assert r1.value == 0.0077
+    assert "Total Return (Net) +0.77%" in r1.source_quote
+
+    # Pattern 1b: Total Returns (Net) -0.18%
+    t1b = "Fund Performance Total Returns (Net)\n-0.18%\n-0.51%"
+    r1b = extract_kkc_net_return_full(t1b)
+    assert r1b.value == -0.0018
+    assert "Total Returns (Net) -0.18%" in r1b.source_quote
+
+    # Pattern 2: Net Return Based on NTA (%) -0.42%
+    t2 = "Net Return Based on NTA (%)\n-0.42%\n-"
+    r2 = extract_kkc_net_return_full(t2)
+    assert r2.value == -0.0042
+    assert "Net Return Based on NTA (%) -0.42%" in r2.source_quote
+
+    # Pattern 3: returned 0.53%
+    t3 = "The fund returned 0.53% for the month of January."
+    r3 = extract_kkc_net_return_full(t3)
+    assert r3.value == 0.0053
+    assert "returned 0.53%" in r3.source_quote
+
+    # No match
+    assert extract_kkc_net_return_full("no return info here") is None
 
 
 def test_extract_archive_links_unparseable_bare_url():

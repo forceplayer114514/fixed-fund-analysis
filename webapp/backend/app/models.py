@@ -124,3 +124,17 @@ class AiReport(Base):
     report_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))
+
+
+class ConfirmedGap(Base):
+    """skills 侧建的 confirmed_gaps 表只读映射（数据缺口终态记录）。
+
+    webapp 不写此表，仅读计数以在 /funds 列表标记数据完整性。
+    """
+    __tablename__ = "confirmed_gaps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), nullable=False)
+    missing_month: Mapped[str] = mapped_column(String, nullable=False)
+    exhausted_levels: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    checked_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))

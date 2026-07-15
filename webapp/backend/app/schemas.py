@@ -40,6 +40,7 @@ class FundResponse(BaseModel):
     max_pdf_pages: Optional[int] = None
     data_cutoff_month: Optional[str] = None  # 来自 fund_metrics.date_period 或最新 monthly_return
     has_metrics: bool = False
+    gap_count: int = 0  # confirmed_gaps 表该基金行数（数据完整性标记）
 
     model_config = {"from_attributes": True}
 

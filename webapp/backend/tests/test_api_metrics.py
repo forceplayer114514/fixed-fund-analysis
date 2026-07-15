@@ -139,3 +139,46 @@ def test_time_series_geltner_nav_when_applied(client, db_session):
     assert s["is_geltner_applied"] is True
     assert s["unsm_nav"] is not None
     assert len(s["unsm_nav"]) == len(s["orig_nav"])
+
+
+def _seed_fund_with_gap(client, db_session, fund_id, name):
+    """注册基金 + 写入有缺口的月度数据（缺 2026-02）。"""
+    client.post("/api/funds", json={"fund_id": fund_id, "fund_name": name,
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    for ym, r in [("2026-01-31", 0.01), ("2026-03-31", 0.03)]:
+        db_session.add(MonthlyReturn(fund_id=fund_id, date=ym, net_return=r, nav=1.0))
+        if db_session.get(RbaCashRate, ym[:7]) is None:
+            db_session.add(RbaCashRate(date_period=ym[:7], rate=0.0435))
+    db_session.commit()
+
+
+@pytest.mark.unit
+def test_compare_excludes_fund_with_gap(client, db_session):
+    """缺口基金不拖垮整批：compare 跳过缺口基金进 excluded，其余正常返回（robustness）。"""
+    _seed_fund_with_data(client, db_session, "f1", "Fund One",
+                         [("2026-01-31", 0.01), ("2026-02-28", 0.02), ("2026-03-31", 0.03)])
+    _seed_fund_with_gap(client, db_session, "f2", "Gap Fund")
+    resp = client.get("/api/metrics/compare", params={"fund_ids": "f1,f2", "period": "full"})
+    assert resp.status_code == 200
+    body = resp.json()
+    fund_ids = [f["fund_id"] for f in body["funds"]]
+    assert "f1" in fund_ids
+    assert "f2" not in fund_ids
+    excl = {e["fund_id"] for e in body["excluded"]}
+    assert "f2" in excl
+
+
+@pytest.mark.unit
+def test_time_series_excludes_fund_with_gap(client, db_session):
+    """缺口基金时序也降级：跳过进 excluded，不 422。"""
+    _seed_fund_with_data(client, db_session, "f1", "Fund One",
+                         [("2026-01-31", 0.01), ("2026-02-28", 0.02), ("2026-03-31", 0.03)])
+    _seed_fund_with_gap(client, db_session, "f2", "Gap Fund")
+    resp = client.get("/api/metrics/time-series", params={"fund_ids": "f1,f2", "period": "full"})
+    assert resp.status_code == 200
+    body = resp.json()
+    series_ids = [s["fund_id"] for s in body["series"]]
+    assert "f1" in series_ids
+    assert "f2" not in series_ids
+    excl = {e["fund_id"] for e in body["excluded"]}
+    assert "f2" in excl

@@ -203,13 +203,22 @@ def download_file(url: str, filepath: str, headers: Optional[dict] = None) -> No
     复制自 fetch_web.py download_file 的核心逻辑。默认带 User-Agent header
     （复制自 fetch_web.HEADERS）；可通过 headers 参数覆盖。自动创建父目录。
     网络错误/非 2xx 状态由 requests 抛出 raise_for_status，不吞错。
+    瞬时网络错误（超时/连接失败）重试 1 次，避免并发批次里单个慢请求
+    的长尾拖累整批 as_completed 收尾；HTTP 错误状态（4xx/5xx）不重试，
+    立即抛出。
     """
     dir_path = os.path.dirname(filepath)
     if dir_path:
         os.makedirs(dir_path, exist_ok=True)
 
     final_headers = headers if headers is not None else _DEFAULT_HEADERS
-    resp = requests.get(url, headers=final_headers, timeout=20)
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, headers=final_headers, timeout=20)
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            if attempt == 1:
+                raise
     resp.raise_for_status()
     with open(filepath, "wb") as f:
         f.write(resp.content)
@@ -522,6 +531,99 @@ def extract_pdf_one_bentham(
     return (extract_bentham_net_return(text), extract_bentham_rolling(text))
 
 
+def extract_kkc_net_return_full(text: str) -> Optional[ExtractedReturn]:
+    """KKR Credit Income Fund 专属提取器。
+
+    优先从 Total Return (Net) 或 Net Return Based on NTA 表格行提取当月收益。
+    无匹配时回退到 returned X% 模式。
+    """
+    if not text:
+        return None
+    t = clean_spacing(text)
+    m = re.search(r"Total Returns? \(Net\)\s*([+-]?\d+\.\d+)%", t)
+    if m:
+        return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0), ambiguous=False)
+    m = re.search(r"Net Return Based on NTA\s*\(?%?\)?\s*([+-]?\d+\.\d+)%", t)
+    if m:
+        return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0), ambiguous=False)
+    m = re.search(r"returned\s+([+-]?\d+\.\d+)%", text)
+    if m:
+        return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0), ambiguous=False)
+    return None
+
+
+def extract_pdf_one_kkc_full(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[ExtractedReturn], dict]:
+    """KKC 单 PDF 提取(带 quote):parse_pdf_text -> kkc ExtractedReturn + rolling。"""
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_kkc_net_return_full(text), extract_perf_rolling(text))
+
+
+def extract_gci_net_return_full(text: str) -> Optional[ExtractedReturn]:
+    """GCI 专属 PDF 提取器：提取 NTA Net Return (%) 下的 1 Mth 净回报。"""
+    if not text:
+        return None
+    lines = [clean_spacing(line).strip() for line in text.split("\n") if line.strip()]
+    try:
+        idx = [i for i, l in enumerate(lines) if "NTA Net Return" in l][0]
+        val_str = lines[idx + 1]
+        val = _pct_to_decimal(val_str)
+        return ExtractedReturn(
+            value=val,
+            source_quote=f"NTA Net Return (%): {val_str}%",
+            ambiguous=False,
+        )
+    except Exception:
+        return None
+
+
+def extract_gci_rolling(text: str) -> dict:
+    """GCI 专属滚动收益提取器。"""
+    result = {
+        "1mo": None, "3mo": None, "6mo": None,
+        "12mo": None, "inception": None, "parse_error": False,
+    }
+    if not text:
+        result["parse_error"] = True
+        return result
+    lines = [clean_spacing(line).strip() for line in text.split("\n") if line.strip()]
+    try:
+        idx = [i for i, l in enumerate(lines) if "NTA Net Return" in l][0]
+        vals = []
+        for l in lines[idx + 1:]:
+            if "Distribution" in l or "Target" in l or not re.match(r"^[+-]?\d+\.\d+%?$", l):
+                break
+            vals.append(float(l.replace("%", "")) / 100.0)
+        if len(vals) < 7:
+            result["parse_error"] = True
+            return result
+        result["1mo"] = vals[0]
+        result["3mo"] = vals[1]
+        result["6mo"] = vals[2]
+        result["12mo"] = vals[3]
+        result["inception"] = vals[6]
+    except Exception:
+        result["parse_error"] = True
+    return result
+
+
+def extract_pdf_one_gci_full(
+    pdf_path: str, max_pages: Optional[int] = None
+) -> tuple[Optional[ExtractedReturn], dict]:
+    """GCI 单 PDF 提取(带 quote)。"""
+    try:
+        text = parse_pdf_text(pdf_path, max_pages=max_pages)
+    except Exception:
+        return (None, {"1mo": None, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": True})
+    return (extract_gci_net_return_full(text), extract_gci_rolling(text))
+
+
 def extract_pdf_one_full(
     pdf_path: str, max_pages: Optional[int] = None
 ) -> tuple[Optional[ExtractedReturn], dict]:
@@ -550,6 +652,8 @@ EXTRACTORS = {
     "generic": extract_pdf_one_full,
     "stake": extract_pdf_one_full,
     "bentham": extract_pdf_one_bentham_full,
+    "kkc": extract_pdf_one_kkc_full,
+    "gci": extract_pdf_one_gci_full,
 }
 
 
@@ -722,9 +826,11 @@ def extract_pdf_links_from_archive(markdown: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# 并发下载+提取 pipeline（ThreadPool，M5 满核）
+# 并发下载+提取 pipeline（ThreadPool）
 # 线程安全：fitz C 层释放 GIL，每 worker 独立 fitz.open。不用 ProcessPool
 # （macOS spawn 重新 import fitz 开销 > 15 个小 PDF 收益）。
+# 下载是 IO 等待、提取是短促 CPU 突发，worker 数按 IO 并发（cpu_count*2）
+# 定，不卡在物理核数——等网络回包的线程不占核，可以比核数开得更多。
 # ---------------------------------------------------------------------------
 
 
@@ -738,7 +844,8 @@ def download_and_extract_parallel(
     """ThreadPool pipeline：每 worker 下载一个 PDF 后立即提取。
 
     IO 下载与 CPU 提取重叠，无 barrier（比"下载并发->提取并发"两阶段更快）。
-    max_workers 默认 min(16, os.cpu_count())（M5 满核 10-16）。
+    max_workers 默认 min(24, os.cpu_count()*2)：下载阶段是 IO 等待不占核，
+    按 IO 并发定而非卡在物理核数（10 核机器上默认 20，而非 10）。
     extractor 默认 extract_pdf_one（Stake 口径,返 float）；Bentham 等基金专属口径
     传 extract_pdf_one_bentham。
     return_full=True:extractor 默认 extract_pdf_one_full(返 ExtractedReturn +
@@ -749,7 +856,7 @@ def download_and_extract_parallel(
     (ym, None, {'parse_error':True})，不中断其他。复用 download_file。
     """
     if max_workers is None:
-        max_workers = min(16, os.cpu_count() or 8)
+        max_workers = min(24, (os.cpu_count() or 8) * 2)
     if extractor is None:
         extractor = extract_pdf_one_full if return_full else extract_pdf_one
 

@@ -5,11 +5,15 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from lib.extract import (
     EXTRACTORS,
     ExtractedReturn,
     extract_bentham_net_return_full,
     extract_commentary_return_full,
+    extract_gci_net_return_full,
+    extract_gci_rolling,
     get_extractor,
     is_generic_extractor,
 )
@@ -80,12 +84,14 @@ def test_extractors_registry_contains_generic_stake_bentham():
     assert "generic" in EXTRACTORS
     assert "stake" in EXTRACTORS
     assert "bentham" in EXTRACTORS
+    assert "gci" in EXTRACTORS
 
 
 def test_get_extractor_default_generic():
     assert get_extractor(None) is EXTRACTORS["generic"]
     assert get_extractor("unknown") is EXTRACTORS["generic"]
     assert get_extractor("bentham") is EXTRACTORS["bentham"]
+    assert get_extractor("gci") is EXTRACTORS["gci"]
 
 
 def test_is_generic_extractor():
@@ -93,3 +99,44 @@ def test_is_generic_extractor():
     assert is_generic_extractor("stake") is True
     assert is_generic_extractor(None) is True
     assert is_generic_extractor("bentham") is False
+    assert is_generic_extractor("gci") is False
+
+
+# --- GCI 专属提取器测试 ---
+
+def test_extract_gci_net_return_and_rolling():
+    text = (
+        "FUND PERFORMANCE\n"
+        "1 Mth\n"
+        "3 Mth\n"
+        "6 Mth\n"
+        "1 Yr\n"
+        "3 Yr (Ann)\n"
+        "5 Yr (Ann)\n"
+        "Incep\n"
+        "(Ann)2\n"
+        "NTA Net Return (%)\n"
+        "0.71\n"
+        "2.14\n"
+        "4.53\n"
+        "9.43\n"
+        "7.89\n"
+        "6.67\n"
+        "6.25\n"
+        "Distribution (¢/unit)\n"
+        "1.41\n"
+    )
+    er = extract_gci_net_return_full(text)
+    assert er is not None
+    assert er.value == 0.0071
+    assert er.ambiguous is False
+    assert "NTA Net Return" in er.source_quote
+
+    rolling = extract_gci_rolling(text)
+    assert rolling["parse_error"] is False
+    assert rolling["1mo"] == pytest.approx(0.0071)
+    assert rolling["3mo"] == pytest.approx(0.0214)
+    assert rolling["6mo"] == pytest.approx(0.0453)
+    assert rolling["12mo"] == pytest.approx(0.0943)
+    assert rolling["inception"] == pytest.approx(0.0625)
+

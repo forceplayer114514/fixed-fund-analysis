@@ -100,20 +100,29 @@ export default function FundManagement() {
               <th className="text-left py-3 px-4 text-gray-500 font-medium">基金名称</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">APIR</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据截止</th>
+              <th className="text-left py-3 px-4 text-gray-500 font-medium">数据状态</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
             {funds.map(f => (
-              <tr key={f.fund_id} className="border-b border-gray-50 hover:bg-gray-50">
+              <tr key={f.fund_id} className={`border-b border-gray-50 ${f.gap_count > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
                 <td className="py-3 px-4 text-gray-500 text-xs">{f.fund_id}</td>
                 <td className="py-3 px-4 font-medium">{f.fund_name}</td>
                 <td className="py-3 px-4 text-gray-500">{f.apir_code ?? '—'}</td>
                 <td className="py-3 px-4 text-gray-500">{f.data_cutoff_month ?? '—'}</td>
                 <td className="py-3 px-4">
+                  {f.gap_count > 0 ? (
+                    <span className="text-red-600 text-xs font-medium">缺 {f.gap_count} 月</span>
+                  ) : (
+                    <span className="text-green-600 text-xs">完整</span>
+                  )}
+                </td>
+                <td className="py-3 px-4">
                   <button
                     className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50 disabled:opacity-50"
                     disabled={recomputing === f.fund_id}
+                    title={f.gap_count > 0 ? '该基金有数据缺口，重算将失败' : undefined}
                     onClick={() => handleRecompute(f.fund_id)}
                   >
                     {recomputing === f.fund_id ? '计算中...' : '重算'}
@@ -141,7 +150,7 @@ export default function FundManagement() {
             ))}
             {funds.length === 0 && !fundsLoading && (
               <tr>
-                <td colSpan={5} className="py-10 text-center text-gray-400">
+                <td colSpan={6} className="py-10 text-center text-gray-400">
                   暂无基金数据，请先通过 skills 端添加基金
                 </td>
               </tr>

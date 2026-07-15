@@ -9,6 +9,14 @@ export interface Fund {
   max_pdf_pages: number | null
   data_cutoff_month: string | null
   has_metrics: boolean
+  /** confirmed_gaps 表该基金行数（数据完整性标记，>0 表示有缺口） */
+  gap_count: number
+}
+
+/** 因数据缺口被排除对比的基金（compare/time-series 降级返回） */
+export interface ExcludedFund {
+  fund_id: string
+  reason: string
 }
 
 /** 5 维指标（来自 compare 端点或 recompute 返回） */
@@ -52,6 +60,8 @@ export interface FundMetrics {
 export interface CompareResponse {
   period: string
   funds: FundMetrics[]
+  /** 因数据缺口被跳过的基金（robustness 降级，不拖垮整批） */
+  excluded?: ExcludedFund[]
 }
 
 /** 时序数据（来自 time-series 端点） */
@@ -74,6 +84,8 @@ export interface TimeSeriesResponse {
   /** 全局 RBA 月利率，对齐 months，缺失月为 null（PDD 1.7 scoped） */
   rba: (number | null)[]
   series: FundSeries[]
+  /** 因数据缺口被跳过的基金（robustness 降级，不拖垮整批） */
+  excluded?: ExcludedFund[]
 }
 
 /** 异常记录 */

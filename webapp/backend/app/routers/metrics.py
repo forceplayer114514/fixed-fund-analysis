@@ -70,6 +70,7 @@ def compare(fund_ids: str = Query(...),
         common_months = get_common_months(all_dates)
 
     results = []
+    excluded = []
     for fid in ids:
         try:
             if period == "full":
@@ -89,8 +90,9 @@ def compare(fund_ids: str = Query(...),
             else:
                 m_dict = _recompute_for_slice(session, fid, period, common_months)
         except ValueError as e:
-            # 缺口/RBA 缺失是可预期业务错误，返回 422 而非 500
-            raise HTTPException(status_code=422, detail=str(e))
+            # 缺口/RBA 缺失：跳过该基金不拖垮整批（robustness），数据完整性铁律不变
+            excluded.append({"fund_id": fid, "reason": str(e)})
+            continue
         m_dict["fund_id"] = fid
         fund = get_fund(session, fid)
         m_dict["fund_name"] = fund.fund_name if fund else None
@@ -100,7 +102,7 @@ def compare(fund_ids: str = Query(...),
             if m_dict.get(bk) is not None:
                 m_dict[bk] = bool(m_dict[bk])
         results.append(m_dict)
-    return {"period": period, "funds": sanitize_for_json(results)}
+    return {"period": period, "funds": sanitize_for_json(results), "excluded": excluded}
 
 
 @router.get("/time-series")
@@ -134,12 +136,14 @@ def time_series(fund_ids: str = Query(...),
         common_months = get_common_months([v["dates"] for v in per_fund.values()])
 
     sliced = {}
+    excluded = []
     for fid, info in per_fund.items():
         d, r = slice_by_period(info["dates"], info["returns"], period, common_months)
-        # 数据缺口零容忍（CLAUDE.md 第一条）：切片后序列有缺口则拒绝
+        # 数据缺口零容忍（CLAUDE.md 第一条）：切片后序列有缺口则跳过该基金
         gaps = _find_month_gaps(d)
         if gaps:
-            raise HTTPException(status_code=422, detail=f"基金 {fid} 时序切片后月份存在缺口: {gaps}")
+            excluded.append({"fund_id": fid, "reason": f"时序切片后月份存在缺口: {gaps}"})
+            continue
         sliced[fid] = {"name": info["name"], "dates": d, "returns": r}
 
     all_months = sorted({d[:7] for info in sliced.values() for d in info["dates"]})
@@ -149,8 +153,7 @@ def time_series(fund_ids: str = Query(...),
     rba_rates, _rba_missing = resolve_rf_rates(session, all_months)
 
     series = []
-    for fid in ids:
-        info = sliced[fid]
+    for fid, info in sliced.items():
         r_slice = info["returns"]
         orig_nav = _build_nav_series(r_slice)[1:]  # 去掉起点 1.0
         unsm_nav = None
@@ -173,4 +176,4 @@ def time_series(fund_ids: str = Query(...),
             "is_geltner_applied": is_geltner,
         })
     return {"period": period, "months": all_months, "rba": sanitize_for_json(rba_rates),
-            "series": sanitize_for_json(series)}
+            "series": sanitize_for_json(series), "excluded": excluded}

@@ -105,6 +105,12 @@ export default function Dashboard() {
         </div>
       )}
 
+      {compareData?.excluded && compareData.excluded.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg p-3 mb-5">
+          {compareData.excluded.map(e => e.fund_id).join('、')} 因数据缺口已排除对比，请到 <a className="underline" href="/funds">/funds</a> 查看详情
+        </div>
+      )}
+
       {m ? (
         <div className="text-sm text-gray-500 mb-3">
           当前展示：<span className="font-medium text-gray-800">{m.fund_name ?? anchorFundId ?? '-'}</span>
