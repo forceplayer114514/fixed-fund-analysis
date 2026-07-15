@@ -47,4 +47,33 @@
 4. **LLM 兜底过同一闸门**：兜底提取 / |r|≥0.5 超限值进 `pending_review`（过同一 `gate_check`），人工 `promote_pending` 后入 `monthly_returns`，永不直通。
 5. **下界单向收敛**：发现更早月 -> 下界前移 -> expected_range 扩展 -> gap_set 重算；禁后缩（=静默删缺口）。L2 CDX 每缺失月至多 3 快照。
 6. **定位已验证 URL 契约**：LLM 定位的归档页 URL 必须 fetch 过（HTTP 200 + content-type + 首屏摘要），代码独立复核。reader-mode fetch 仅限读正文确认口径，禁用于提链接（代码 curl 抓原始 HTML，`extract_archive_links` 提链接，支持 HTML `<a href>` 与 markdown）。
-7. **清洗层闭环（提取逻辑不许活 REPL/临时脚本，2026-07-15 新增）**：清洗层（提取器）与搜索层同病——提示词不钉死"提取器不存在时怎么办"留决策真空，LLM 用 REPL 手写填真空（GCI 事件复盘）。堵法三层：(a) generic 兜底（`--extractor generic` 默认 `returned X%` 正则）；(b) A4 准入验证——新基金首批全进 `pending_review` `generic_first_use`（不入 `monthly_returns`），人工 `verify-extractor` 标 `extractor_verified=1` 后才入库 + 解锁 update 增量直通；反 benchmark 守卫：generic 匹配点前后 200 字符窗口含 benchmark/index/outperform/underperform/relative to/versus/vs -> `ambiguous=True` -> `ambiguous_subject` 进 pending（防命中 benchmark 收益率而非基金自身）；|r|≥0.5 优先 `abs_return_exceeds_threshold`；(c) EXTRACTOR_MISMATCH——generic 正则没匹配（`mismatch_months` 非空）报指引不 fail，走 add_fixed_fund.md 4.5 固定流程加专属提取器。专属提取器信任等级高于 generic（人写时已过样本核验，`ambiguous` 永远 False，首批直通）。探正则优先一次性诊断脚本（`python3 /tmp/diag_<issuer>.py`：fitz open 早期+晚期 2-3 样本 PDF -> dump 全文 -> grep 候选关键词 `NTA|return|Net Return` + 数值行 + 前后 5 行上下文 -> print，1 次 Bash 出全部信息，脚本留存 /tmp 跨会话不重做），**禁 desktop-commander 交互 REPL 串行探**（`start_process python3 -i` + `interact_with_process` N 次；GCI 一役 3 轮 REPL 跨 3 天探同一正则，每轮重做 import fitz + open PDF + 重定义 parse 函数，上下文未累积，纯 REPL ~39min，13 次 interact 串行 + 3 次 8s 卡顿放大）。REPL 探正则仅探无写权限（探索会话不发 `FUND_DB_WRITE_TOKEN`，`ingest`/`db` 写函数 `_require_write_token` 拒绝），输出物=候选正则+3 条源文本样例，固化进 `extract.py`+`tests`+`EXTRACTORS` 注册表+`--dry-run` 全量回跑验收后才入库。**禁 REPL 手写提取直接入库**。
+7. **清洗层闭环（候选池 + 滚动收益约束求解，2026-07-15 solver 重构）**：
+
+**第一性原理**：目标只是"从 PDF 拿到月收益率"。每份月报 performance 表天然含 3/6/12mo 滚动收益，正确的月度序列复利必与滚动值吻合。用这条纯数学约束替代每个发行商专属正则试错（GCI 一役 ~39min 探同一正则）。
+
+**核心管道（默认路径，`--extractor solver`）**：
+- **候选生成器** `lib/candidates.py`：`CANDIDATE_PATTERNS` 6 条模式（现 4 个专属正则 + generic `returned X%` finditer 全部匹配 + performance 表 1mo）产候选池。`generate_candidates(text) -> list[ReturnCandidate]`；`extract_rolling_any` perf/bentham/gci 三种 rolling 提取器串行尝试，附 `precision`（原文最小小数位，供求解器容差自适应）。
+- **约束求解器** `lib/solver.py`：`solve_series(months) -> {ym: MonthResolution}` 三阶段——Pass Z 池唯一值预定；Pass A 约束传播 fixpoint（窗口内 1 未知月反解 expected → SELECT_TOL 内命中）；Pass B 冷启动锚定枚举（3mo 笛卡尔 ≤MAX_COMBOS + 后续窗口消歧，1mo 永不单独作选择依据）；Pass C 验证窗口计数（3/6/12mo 主 + 1mo 确认）。
+- **数学准入 A4**：`MonthResolution.status='resolved'` 意味着 ≥2 个独立滚动窗口误差 <0.5%（`VERIFY_TOL=0.005`，`MIN_VERIFY_WINDOWS=2`），自动入库；不再要求 `generic_first_use` 人工首批审。
+- **反捏造铁律**：`MonthResolution.chosen` 必为候选池对象（`_pick_candidate_for_value` + assert 断言 chosen is in pool），反解期望值仅用于比对选择，**绝不写库**。候选值全部经 `_pct_to_decimal` Decimal 无损转换，`source_quote` 保留原文可追溯。
+- **|r|≥0.5 优先兜底**：即使 resolved 也强制 `pending_review` `abs_return_exceeds_threshold`（§五异常值人工复核规则）。
+- **新 `review_reason` 枚举**（`pending_review.candidates_json` 记录全部候选池）：
+    - `no_unique_candidate`（tie，多候选落容差）
+    - `constraint_violation`（无候选落容差，rolling 与候选矛盾）
+    - `unverifiable_no_rolling`（无 rolling 表 / 验证窗口 <2）
+    - `no_candidates`（候选池空，≙ 旧 EXTRACTOR_MISMATCH）
+    - `abs_return_exceeds_threshold`（|r|≥0.5，兜底优先）
+
+**Phase 0 确定性提速**（已生效，无行为变化）：PDF 持久缓存 `data/pdf_cache/<fund_id>/YYYY-MM.pdf`（环境变量 `FUND_PDF_CACHE` 可覆盖），命中跳过下载；`funds.max_pdf_pages` 透传给 extractor 限制读页；`make_pdf_extractor` 工厂收敛旧 4 段样板包装器。**缓存文件即 source 可追溯载体，禁手工修改。**
+
+**加候选模式流程**（新发行商真值不在池中）：
+- solver dry-run 出 `no_candidates` 月 → 阅读该月 PDF 定位真值原文行 → 决定加一条 pattern：
+  1. 一次性诊断脚本（`/tmp/diag_<issuer>.py`：fitz open 2-3 样本 PDF → dump 全文 + grep 候选关键词 + 前后 5 行 → print，1 次 Bash 出全部信息，脚本留存跨会话）；**禁 desktop-commander 交互 REPL 串行探**（`start_process python3 -i` + `interact_with_process` N 次；GCI 一役 3 轮 REPL ~39min 反面案例）
+  2. 在 `lib/candidates.py` 加 `pattern_<issuer>(text) -> list[ReturnCandidate]` + 进 `CANDIDATE_PATTERNS`，priority=0（专属模式）
+  3. `tests/test_candidates.py` 加测试用例覆盖该 pattern
+  4. `python3 -c "import pytest; pytest.main(['tests/', '-q'])"` 全绿
+  5. `--dry-run --extractor solver` 全量回跑验收（`solver_report` 显示该基金全部 resolved 或合理 pending）
+- **禁 REPL 手写提取直接入库**；探正则仅在探索会话无写权限（不发 `FUND_DB_WRITE_TOKEN`，`_require_write_token` 拒绝）。
+
+**Legacy 路径保留**（兼容存量 33 条 pending 与旧数据）：`--extractor generic|stake|bentham|kkc|gci` 走单提取器分支，`is_generic_extractor` + `extractor_verified` + `generic_first_use` + `ambiguous_subject` + `EXTRACTOR_MISMATCH` 语义与 2026-07-14 版一致；`verify-extractor` 子命令仍可用于处置 legacy pending。solver 路径不读写 `extractor_verified`（该列语义仅约束 legacy）。
+
