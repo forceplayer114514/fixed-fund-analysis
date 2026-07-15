@@ -47,6 +47,7 @@ from lib.extract import (
     parse_html_monthly_table,
     parse_pdf_text,
     parse_plotly_nav_series,
+    pdf_cache_dir,
 )
 
 
@@ -400,13 +401,29 @@ def ingest_discovery(
     Returns: {'months','start','end','gaps','gate_pass','errors',
               'failed_months','pending_review_count','short_history_warning'}
     """
-    import tempfile
-
     records: list[tuple[str, ExtractedReturn]] = []
     rolling_per_month: dict = {}
     seen_dates: set = set()
     failed_months: list = []
     best_payload: Optional[dict] = None
+
+    # Phase 0:PDF 持久缓存 — dest_dir 缺省用 pdf_cache_dir(fund_id),不再 mkdtemp
+    # 后进程结束丢弃。max_pdf_pages 从 funds 表读取(fund 未注册时 None 读全部页)。
+    if dest_dir is None:
+        dest_dir = pdf_cache_dir(report.fund_id)
+    # 读 max_pdf_pages(可能 fund 尚未 create -> None)
+    max_pages: Optional[int] = None
+    try:
+        _tmp_conn = get_connection(db_path)
+        try:
+            ensure_tables(_tmp_conn)
+            _fund_row = get_fund(_tmp_conn, report.fund_id)
+            if _fund_row is not None:
+                max_pages = _fund_row.get("max_pdf_pages")
+        finally:
+            _tmp_conn.close()
+    except Exception:
+        max_pages = None
 
     for level_key, payload in report.per_level_payload.items():
         if not payload:
@@ -416,11 +433,10 @@ def ingest_discovery(
         if payload.get("fetch_method") == "local":
             continue  # L0 已入库,跳过
         if "links" in payload:
-            if dest_dir is None:
-                dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
             results = download_and_extract_parallel(
                 payload["links"], dest_dir,
                 max_workers=max_workers, extractor=extractor, return_full=True,
+                max_pages=max_pages,
             )
             for ym, er, rolling in results:
                 if er is None:
@@ -589,11 +605,15 @@ def ingest_discovery(
     }
 
 
-def _collect_records(report, dest_dir=None, extractor=None, max_workers=None):
+def _collect_records(report, dest_dir=None, extractor=None, max_workers=None,
+                     max_pages=None):
     """从 report.per_level_payload 收集 records(L1/L2 links 下载提取,L3 records
     直接,L0 local 跳过)。返回 (records, rolling_per_month, failed_months)。
-    去重 by date,低 level 优先。"""
-    import tempfile
+    去重 by date,低 level 优先。
+
+    Phase 0:dest_dir 缺省用 pdf_cache_dir(fund_id)(持久缓存,反复 update 免重下)。
+    max_pages 透传给 download_and_extract_parallel,来源为 funds.max_pdf_pages。
+    """
     records: list[tuple[str, float]] = []
     rolling_per_month: dict = {}
     seen_dates: set = set()
@@ -603,10 +623,11 @@ def _collect_records(report, dest_dir=None, extractor=None, max_workers=None):
             continue
         if "links" in payload:
             if dest_dir is None:
-                dest_dir = tempfile.mkdtemp(prefix=f"{report.fund_id}_pdfs_")
+                dest_dir = pdf_cache_dir(report.fund_id)
             results = download_and_extract_parallel(
                 payload["links"], dest_dir,
                 max_workers=max_workers, extractor=extractor, return_full=True,
+                max_pages=max_pages,
             )
             for ym, er, rolling in results:
                 if er is None:
@@ -684,7 +705,9 @@ def update_fund(
         }
         report = run_discovery(fund_info)
         records, _rolling, failed_months = _collect_records(
-            report, dest_dir=dest_dir, extractor=extractor, max_workers=max_workers)
+            report, dest_dir=dest_dir, extractor=extractor, max_workers=max_workers,
+            max_pages=fund.get("max_pdf_pages"),
+        )
 
         use_generic = is_generic_extractor(extractor_name)
         extractor_verified = get_extractor_verified(conn, fund_id)

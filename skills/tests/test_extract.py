@@ -870,3 +870,208 @@ def test_extract_archive_links_html_anchor():
     assert len(al.unparseable) == 1
     assert al.unparseable[0]["raw_text"] == "Mystery"
     assert al.unparseable[0]["url"] == "https://example.com/undated.pdf"
+
+
+# --- Phase 0: PDF 持久缓存 + max_pages 透传 + 注册表等价性 ---
+
+def test_pdf_cache_dir_env_and_default(tmp_path, monkeypatch):
+    """FUND_PDF_CACHE 环境变量优先;缺省时用 <repo_root>/data/pdf_cache/。"""
+    from lib.extract import pdf_cache_dir
+    monkeypatch.setenv("FUND_PDF_CACHE", str(tmp_path))
+    d = pdf_cache_dir("fund_x")
+    assert d == os.path.join(str(tmp_path), "fund_x")
+    assert os.path.isdir(d)
+    # 覆盖 fund_id -> 子目录不同
+    d2 = pdf_cache_dir("fund_y")
+    assert d != d2
+
+
+def test_download_file_cached_hit(tmp_path, monkeypatch):
+    """已存在且非空的 filepath -> 跳过下载,返回 True。"""
+    from lib.extract import download_file_cached
+    filepath = str(tmp_path / "cache_hit.pdf")
+    with open(filepath, "wb") as f:
+        f.write(b"cached content")
+    # 若真去下载会失败(URL 不通),命中则不触发 download_file。
+    called = {"n": 0}
+
+    def _boom(*a, **kw):
+        called["n"] += 1
+        raise AssertionError("download_file should not be called on cache hit")
+
+    monkeypatch.setattr("lib.extract.download_file", _boom)
+    hit = download_file_cached("https://example.com/x.pdf", filepath)
+    assert hit is True
+    assert called["n"] == 0
+
+
+def test_download_file_cached_miss_calls_download(tmp_path, monkeypatch):
+    """文件不存在 -> 调 download_file,返回 False。"""
+    from lib.extract import download_file_cached
+    filepath = str(tmp_path / "cache_miss.pdf")
+    called = {"n": 0}
+
+    def _fake(url, fp, headers=None):
+        called["n"] += 1
+        with open(fp, "wb") as f:
+            f.write(b"new content")
+
+    monkeypatch.setattr("lib.extract.download_file", _fake)
+    hit = download_file_cached("https://example.com/y.pdf", filepath)
+    assert hit is False
+    assert called["n"] == 1
+    assert os.path.getsize(filepath) > 0
+
+
+def test_download_file_cached_empty_file_treated_as_miss(tmp_path, monkeypatch):
+    """0 字节文件视为坏缓存 -> 重下载(避免命中空文件反复 parse_error)。"""
+    from lib.extract import download_file_cached
+    filepath = str(tmp_path / "empty.pdf")
+    with open(filepath, "wb") as f:
+        pass  # 0 字节
+    called = {"n": 0}
+
+    def _fake(url, fp, headers=None):
+        called["n"] += 1
+        with open(fp, "wb") as f:
+            f.write(b"real content")
+
+    monkeypatch.setattr("lib.extract.download_file", _fake)
+    hit = download_file_cached("https://example.com/z.pdf", filepath)
+    assert hit is False
+    assert called["n"] == 1
+
+
+def test_download_and_extract_parallel_cache_hit_no_download(monkeypatch, tmp_path):
+    """dest_dir 已有 <ym>.pdf -> 跳过 download_file,只跑 extractor。"""
+    # 预置缓存文件
+    filepath = os.path.join(str(tmp_path), "2025-05.pdf")
+    with open(filepath, "wb") as f:
+        f.write(b"cached")
+
+    calls = {"download": 0, "extract": 0}
+
+    def fake_download(url, fp, headers=None):
+        calls["download"] += 1
+        with open(fp, "wb") as f:
+            f.write(b"downloaded")
+
+    def fake_extract(pdf_path, max_pages=None):
+        calls["extract"] += 1
+        return (0.01, {"1mo": 0.01, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    monkeypatch.setattr("lib.extract.extract_pdf_one", fake_extract)
+
+    results = download_and_extract_parallel(
+        [("2025-05", "https://example.com/may.pdf")], str(tmp_path),
+        max_workers=1,
+    )
+    assert calls["download"] == 0
+    assert calls["extract"] == 1
+    assert results[0][1] == 0.01
+
+
+def test_download_and_extract_parallel_bad_cache_redownloads(monkeypatch, tmp_path):
+    """命中缓存但 extractor parse_error -> 删文件重下一次。第二次仍 parse_error
+    则不再重下,保留 parse_error 状态。"""
+    filepath = os.path.join(str(tmp_path), "2025-06.pdf")
+    with open(filepath, "wb") as f:
+        f.write(b"bad cached")
+
+    n_download = {"n": 0}
+    n_extract = {"n": 0}
+
+    def fake_download(url, fp, headers=None):
+        n_download["n"] += 1
+        with open(fp, "wb") as f:
+            f.write(b"redownloaded ok")
+
+    def fake_extract(pdf_path, max_pages=None):
+        n_extract["n"] += 1
+        # 第一次 parse_error,第二次(重下载后)成功
+        if n_extract["n"] == 1:
+            return (None, {"1mo": None, "3mo": None, "6mo": None,
+                           "12mo": None, "inception": None, "parse_error": True})
+        return (0.02, {"1mo": 0.02, "3mo": None, "6mo": None,
+                       "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    monkeypatch.setattr("lib.extract.extract_pdf_one", fake_extract)
+
+    results = download_and_extract_parallel(
+        [("2025-06", "https://example.com/jun.pdf")], str(tmp_path),
+        max_workers=1,
+    )
+    assert n_download["n"] == 1  # 只重下载一次
+    assert n_extract["n"] == 2  # 提取两次
+    assert results[0][1] == 0.02
+    assert results[0][2]["parse_error"] is False
+
+
+def test_download_and_extract_parallel_max_pages_passthrough(monkeypatch, tmp_path):
+    """max_pages 参数透传给 extractor(修复 funds.max_pdf_pages 存而不用)。"""
+    seen = {"max_pages": None}
+
+    def fake_download(url, fp, headers=None):
+        with open(fp, "wb") as f:
+            f.write(b"x")
+
+    def fake_extract(pdf_path, max_pages=None):
+        seen["max_pages"] = max_pages
+        return (0.0, {"1mo": 0.0, "3mo": None, "6mo": None,
+                      "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    monkeypatch.setattr("lib.extract.extract_pdf_one", fake_extract)
+
+    download_and_extract_parallel(
+        [("2025-07", "https://example.com/jul.pdf")], str(tmp_path),
+        max_workers=1, max_pages=3,
+    )
+    assert seen["max_pages"] == 3
+
+
+def test_download_and_extract_parallel_max_pages_none_omits_kwarg(monkeypatch, tmp_path):
+    """max_pages=None 时不带该 kwarg 调 extractor(兼容不接受 max_pages 的 mock)。"""
+    def fake_download(url, fp, headers=None):
+        with open(fp, "wb") as f:
+            f.write(b"x")
+
+    # 故意不接受 max_pages 参数
+    def strict_extract(pdf_path):
+        return (0.0, {"1mo": 0.0, "3mo": None, "6mo": None,
+                      "12mo": None, "inception": None, "parse_error": False})
+
+    monkeypatch.setattr("lib.extract.download_file", fake_download)
+    results = download_and_extract_parallel(
+        [("2025-08", "https://example.com/aug.pdf")], str(tmp_path),
+        max_workers=1, extractor=strict_extract,
+    )
+    # 未抛 TypeError,结果成功
+    assert results[0][1] == 0.0
+
+
+def test_extractor_registry_equivalence():
+    """make_pdf_extractor 生成的 EXTRACTORS 行为与旧 4 个包装器完全等价:
+    模块级 extract_pdf_one_X_full 名字仍为可调用,签名兼容,失败路径返 None+parse_error。"""
+    from lib.extract import (
+        EXTRACTORS,
+        EXTRACTOR_SPECS,
+        extract_pdf_one_full,
+        extract_pdf_one_bentham_full,
+        extract_pdf_one_kkc_full,
+        extract_pdf_one_gci_full,
+    )
+    # 5 键,与 EXTRACTOR_SPECS 保持同键集(stake 复用 generic)
+    assert set(EXTRACTORS.keys()) == {"generic", "stake", "bentham", "kkc", "gci"}
+    assert set(EXTRACTOR_SPECS.keys()) == set(EXTRACTORS.keys())
+    # generic 与 stake 应指同一 (return_fn, rolling_fn)
+    assert EXTRACTOR_SPECS["generic"] == EXTRACTOR_SPECS["stake"]
+    # 打不开的路径 -> (None, parse_error=True) — 所有生成器行为一致
+    for fn in (extract_pdf_one_full, extract_pdf_one_bentham_full,
+               extract_pdf_one_kkc_full, extract_pdf_one_gci_full):
+        er, rolling = fn("/no/such/file.pdf")
+        assert er is None
+        assert rolling["parse_error"] is True

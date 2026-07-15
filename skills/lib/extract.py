@@ -248,6 +248,48 @@ def parse_pdf_text(pdf_path: str, max_pages: Optional[int] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PDF 持久缓存(Phase 0):同一基金反复 discover/update 不再重复下载。
+# 目录:环境变量 FUND_PDF_CACHE > <仓库根>/data/pdf_cache/<fund_id>/
+# skills/lib/extract.py -> parent(lib) -> parent(skills) -> parent(仓库根)
+# 命中条件:文件存在且 size > 0。坏缓存(下游提取报 parse_error)由上层 _worker
+# 侦测后 os.remove 一次并重下载,避免死循环用错文件。缓存文件本身即 source
+# 可追溯载体,禁止手工修改。
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PDF_CACHE_ROOT = (
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+) + os.sep + "data" + os.sep + "pdf_cache"
+
+
+def pdf_cache_dir(fund_id: str) -> str:
+    """返回该基金的 PDF 持久缓存目录(自动 mkdir -p)。
+
+    路径优先级:环境变量 FUND_PDF_CACHE > <仓库根>/data/pdf_cache/<fund_id>/。
+    fund_id 内的路径分隔符会被 os.path.join 自然处理;调用方保证 fund_id 是
+    合法目录段(现有 fund_id 均为下划线小写标识符)。
+    """
+    root = os.environ.get("FUND_PDF_CACHE") or _DEFAULT_PDF_CACHE_ROOT
+    path = os.path.join(root, fund_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def download_file_cached(
+    url: str, filepath: str, headers: Optional[dict] = None
+) -> bool:
+    """缓存命中则跳过下载,返回 True;未命中则 download_file 后返回 False。
+
+    命中判定:filepath 存在且 size > 0(0 字节文件视为坏缓存,重下载)。
+    上层 _worker 若提取时 parse_error,应 os.remove(filepath) 后再调用
+    download_file(不再走本函数)重下一次,避免坏缓存反复命中。
+    """
+    if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+        return True
+    download_file(url, filepath, headers=headers)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # PDF 提取：Commentary 当月收益 + performance 表滚动收益
 # 数据完整性：Commentary 正文优先（复利验证已证明 performance 表 1mo 口径
 # 错误）；负号强制捕获；按列标题对应值不靠位置；不捏造不插值。
@@ -501,21 +543,6 @@ def extract_bentham_rolling(text: str) -> dict:
     return result
 
 
-def extract_pdf_one_bentham_full(
-    pdf_path: str, max_pages: Optional[int] = None
-) -> tuple[Optional[ExtractedReturn], dict]:
-    """Bentham 单 PDF 提取(带 quote):parse_pdf_text -> net ExtractedReturn + rolling。
-
-    同 extract_pdf_one_full 接口,但用 Bentham 专属提取器(net 非 gross)。
-    """
-    try:
-        text = parse_pdf_text(pdf_path, max_pages=max_pages)
-    except Exception:
-        return (None, {"1mo": None, "3mo": None, "6mo": None,
-                       "12mo": None, "inception": None, "parse_error": True})
-    return (extract_bentham_net_return_full(text), extract_bentham_rolling(text))
-
-
 def extract_pdf_one_bentham(
     pdf_path: str, max_pages: Optional[int] = None
 ) -> tuple[Optional[float], dict]:
@@ -550,18 +577,6 @@ def extract_kkc_net_return_full(text: str) -> Optional[ExtractedReturn]:
     if m:
         return ExtractedReturn(value=_pct_to_decimal(m.group(1)), source_quote=m.group(0), ambiguous=False)
     return None
-
-
-def extract_pdf_one_kkc_full(
-    pdf_path: str, max_pages: Optional[int] = None
-) -> tuple[Optional[ExtractedReturn], dict]:
-    """KKC 单 PDF 提取(带 quote):parse_pdf_text -> kkc ExtractedReturn + rolling。"""
-    try:
-        text = parse_pdf_text(pdf_path, max_pages=max_pages)
-    except Exception:
-        return (None, {"1mo": None, "3mo": None, "6mo": None,
-                       "12mo": None, "inception": None, "parse_error": True})
-    return (extract_kkc_net_return_full(text), extract_perf_rolling(text))
 
 
 def extract_gci_net_return_full(text: str) -> Optional[ExtractedReturn]:
@@ -612,42 +627,72 @@ def extract_gci_rolling(text: str) -> dict:
     return result
 
 
-def extract_pdf_one_gci_full(
-    pdf_path: str, max_pages: Optional[int] = None
-) -> tuple[Optional[ExtractedReturn], dict]:
-    """GCI 单 PDF 提取(带 quote)。"""
-    try:
-        text = parse_pdf_text(pdf_path, max_pages=max_pages)
-    except Exception:
-        return (None, {"1mo": None, "3mo": None, "6mo": None,
-                       "12mo": None, "inception": None, "parse_error": True})
-    return (extract_gci_net_return_full(text), extract_gci_rolling(text))
-
-
-def extract_pdf_one_full(
-    pdf_path: str, max_pages: Optional[int] = None
-) -> tuple[Optional[ExtractedReturn], dict]:
-    """单 PDF 提取(带 quote):parse_pdf_text -> ExtractedReturn + rolling。
-
-    顶层纯函数(可被 ThreadPool/ProcessPool 调用)。失败返回
-    (None, {'parse_error':True})。需要 source_quote 的调用方(ingest 超 |r|<0.5
-    进 pending_review)用本函数。
-    """
-    try:
-        text = parse_pdf_text(pdf_path, max_pages=max_pages)
-    except Exception:
-        return (None, {"1mo": None, "3mo": None, "6mo": None,
-                       "12mo": None, "inception": None, "parse_error": True})
-    return (extract_commentary_return_full(text), extract_perf_rolling(text))
-
-
 # ---------------------------------------------------------------------------
 # 提取器注册表(A1):--extractor choices 从此动态取,新基金默认 generic。
 # generic = extract_commentary_return_full("returned X%"),带 A4c 反 benchmark
 # 守卫(ambiguous)。专属提取器(bentham 等)人写时人眼看过样本,ambiguous=False。
 # 新基金先 generic,gate 失败/EXTRACTOR_MISMATCH -> 走 add_fixed_fund.md 4.5
 # 固定流程加专属提取器(禁 REPL 手写入库)。
+#
+# Phase 0:用 make_pdf_extractor 收敛 4 个逐字重复的样板包装器(旧 extract_pdf_
+# one_bentham_full / _kkc_full / _gci_full / _full 结构完全一致,仅 return_fn 与
+# rolling_fn 不同)。EXTRACTOR_SPECS 用 (return_fn, rolling_fn) 元组注册,
+# EXTRACTORS 由此生成。兼容性:模块级 extract_pdf_one_full/_bentham_full/
+# _kkc_full/_gci_full/_bentham 名字仍导出,行为完全一致(tests/ingest.py 直接
+# 导入这些名字的调用点不变)。
 # ---------------------------------------------------------------------------
+
+
+def _failed_rolling_dict() -> dict:
+    """PDF 打开失败/无 rolling 表时的占位 dict。"""
+    return {"1mo": None, "3mo": None, "6mo": None,
+            "12mo": None, "inception": None, "parse_error": True}
+
+
+def make_pdf_extractor(
+    return_fn: Callable[[str], Optional[ExtractedReturn]],
+    rolling_fn: Callable[[str], dict],
+) -> Callable[..., tuple[Optional[ExtractedReturn], dict]]:
+    """按 (return_fn, rolling_fn) 二元组生成单 PDF 提取器(顶层纯函数,
+    可被 ThreadPool/ProcessPool 调用)。
+
+    生成的函数签名:(pdf_path, max_pages=None) -> (ExtractedReturn|None, rolling dict)。
+    parse_pdf_text 异常时返回 (None, _failed_rolling_dict())。
+    """
+    def _one(pdf_path: str, max_pages: Optional[int] = None):
+        try:
+            text = parse_pdf_text(pdf_path, max_pages=max_pages)
+        except Exception:
+            return (None, _failed_rolling_dict())
+        return (return_fn(text), rolling_fn(text))
+    return _one
+
+
+# (return_fn, rolling_fn) 二元组注册。candidates.py 会引用这些函数作为
+# 高优先级候选模式源。
+EXTRACTOR_SPECS: dict = {
+    "generic": (extract_commentary_return_full, extract_perf_rolling),
+    "stake":   (extract_commentary_return_full, extract_perf_rolling),
+    "bentham": (extract_bentham_net_return_full, extract_bentham_rolling),
+    "kkc":     (extract_kkc_net_return_full, extract_perf_rolling),
+    "gci":     (extract_gci_net_return_full, extract_gci_rolling),
+}
+
+# 生成 _full 提取器(带 ExtractedReturn)。旧的顶层 extract_pdf_one_X_full 名字
+# 覆写为 make_pdf_extractor 生成的实例(行为等价,消除 4 段样板重复)。
+extract_pdf_one_full = make_pdf_extractor(
+    extract_commentary_return_full, extract_perf_rolling
+)
+extract_pdf_one_bentham_full = make_pdf_extractor(
+    extract_bentham_net_return_full, extract_bentham_rolling
+)
+extract_pdf_one_kkc_full = make_pdf_extractor(
+    extract_kkc_net_return_full, extract_perf_rolling
+)
+extract_pdf_one_gci_full = make_pdf_extractor(
+    extract_gci_net_return_full, extract_gci_rolling
+)
+
 EXTRACTORS = {
     "generic": extract_pdf_one_full,
     "stake": extract_pdf_one_full,
@@ -840,6 +885,7 @@ def download_and_extract_parallel(
     max_workers: Optional[int] = None,
     extractor: Optional[Callable] = None,
     return_full: bool = False,
+    max_pages: Optional[int] = None,
 ) -> list:
     """ThreadPool pipeline：每 worker 下载一个 PDF 后立即提取。
 
@@ -851,6 +897,11 @@ def download_and_extract_parallel(
     return_full=True:extractor 默认 extract_pdf_one_full(返 ExtractedReturn +
     rolling),供 ingest_discovery 拿 source_quote/ambiguous(A4)。调用方据此取
     .value 或直接用 ExtractedReturn。
+    max_pages(Phase 0):透传给 extractor 限制读页,来源 funds.max_pdf_pages。
+    None -> 读全部页(与旧行为一致)。
+    Phase 0:走 download_file_cached — 目标 dest_dir 已有 <ym>.pdf 且非空则跳过
+    下载;若下游提取报 parse_error 且刚才命中缓存,os.remove 后重下载一次(防坏
+    缓存反复命中)。
     返回 [(ym, commentary, rolling), ...]，按 ym 升序排序。commentary 类型=
     float(return_full=False)或 ExtractedReturn(return_full=True)。失败 ->
     (ym, None, {'parse_error':True})，不中断其他。复用 download_file。
@@ -864,10 +915,33 @@ def download_and_extract_parallel(
         return {"1mo": None, "3mo": None, "6mo": None,
                 "12mo": None, "inception": None, "parse_error": True}
 
-    def _worker(ym: str, url: str) -> tuple[Optional[float], dict]:
+    def _run_extractor(filepath: str):
+        # 部分 extractor(如 extract_pdf_one_bentham)接受 max_pages 关键字;历史测试
+        # 中传 fake_extract 也是 (pdf_path, max_pages=None) 签名。max_pages=None
+        # 时统一不带该参调用(保底兼容不接受该关键字的自定义 extractor)。
+        if max_pages is None:
+            return extractor(filepath)
+        try:
+            return extractor(filepath, max_pages=max_pages)
+        except TypeError:
+            return extractor(filepath)
+
+    def _worker(ym: str, url: str):
         filepath = os.path.join(dest_dir, f"{ym}.pdf")
-        download_file(url, filepath)
-        return extractor(filepath)
+        cache_hit = download_file_cached(url, filepath)
+        result = _run_extractor(filepath)
+        # 坏缓存自愈:命中且提取 parse_error -> 删文件重下一次(用原始 download_file
+        # 避免再走缓存逻辑)。再次 parse_error 就交由上层记 failed_months。
+        if cache_hit:
+            _, rolling = result
+            if isinstance(rolling, dict) and rolling.get("parse_error"):
+                try:
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                download_file(url, filepath)
+                result = _run_extractor(filepath)
+        return result
 
     results: list[tuple[str, Optional[float], dict]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:

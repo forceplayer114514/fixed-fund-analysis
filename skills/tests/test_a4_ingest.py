@@ -53,7 +53,8 @@ def _disc_report(fund_id="a4_fund", links=None, gaps=None,
 
 def _fake_parallel(rows):
     """rows: [(ym, er_or_None), ...] -> 补 _PE rolling 凑 download_and_extract_parallel 返值。"""
-    def _fp(links, dest_dir, max_workers=None, extractor=None, return_full=False):
+    def _fp(links, dest_dir, max_workers=None, extractor=None, return_full=False,
+            max_pages=None):
         out = []
         for ym, er in rows:
             out.append((ym, er, _PE))
