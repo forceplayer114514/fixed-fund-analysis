@@ -579,6 +579,35 @@ def extract_kkc_net_return_full(text: str) -> Optional[ExtractedReturn]:
     return None
 
 
+# GCI 月报 performance 表净回报标签:2023-02 起 'NTA Net Return (%)',此前
+# 'Net Return (%)'(无 NTA 前缀);2022-08~12 带脚注 'Net Return2 (%)'。精确锚定
+# 整行(允许 Return 后脚注数字 + 行尾脚注),排除 KKC 'Net Return Based on NTA (%)'
+# 与同行 'Net Excess Return (%)'--二者含 'Net Return' 子串但非此格式(前者 Return
+# 与 (%) 间有 'Based on NTA',后者 Return 前是 'Excess')。
+_GCI_NET_RETURN_LABEL_RE = re.compile(
+    r"^(?:NTA\s+)?Net Return\s*\d*\s*\(%\)\s*\d*\s*$"
+)
+
+
+def _parse_gci_value_cell(s: str) -> Optional[float]:
+    """解析 GCI performance 表单个数值单元格 -> 小数 float。
+
+    支持: '0.45'/'0.45%'/'-0.45'/'+0.45'/'(0.45)'(会计括号负数,如 COVID 砸盘月)。
+    dash(–/-)或非数值返 None(调用方据此 break/占位)。用 _pct_to_decimal 的 Decimal
+    移位无损转换;括号负数仅剥离括号取负,不改原始量级(忠实映射,非纠正)。
+    """
+    s = s.strip().replace("%", "")
+    neg = False
+    m = re.match(r"^\((.+)\)$", s)  # 会计括号负数 (0.45) -> -0.45
+    if m:
+        s = m.group(1)
+        neg = True
+    if not re.match(r"^[+-]?\d+\.\d+$", s):
+        return None
+    v = _pct_to_decimal(s)
+    return -v if neg else v
+
+
 def extract_gci_net_return_full(text: str) -> Optional[ExtractedReturn]:
     """GCI 专属 PDF 提取器：提取 NTA Net Return (%) 下的 1 Mth 净回报。"""
     if not text:
@@ -598,7 +627,13 @@ def extract_gci_net_return_full(text: str) -> Optional[ExtractedReturn]:
 
 
 def extract_gci_rolling(text: str) -> dict:
-    """GCI 专属滚动收益提取器。"""
+    """GCI 专属滚动收益提取器。
+
+    匹配 'Net Return (%)'(2023-02 前)或 'NTA Net Return (%)'(2023-02 起)标签
+    行,读其后逐行数值(列序:1Mth/3Mth/6Mth/1Yr/[3Yr Ann]/.../Incep Ann)。
+    –(dash)作 None 占位不断列(早期基金不足 1 年时 1Yr 列为 –);列数可变
+    (5/6/7),inception 取最后一个数值,12mo 取 vals[3](1Yr 列,缺失则 None)。
+    """
     result = {
         "1mo": None, "3mo": None, "6mo": None,
         "12mo": None, "inception": None, "parse_error": False,
@@ -608,20 +643,31 @@ def extract_gci_rolling(text: str) -> dict:
         return result
     lines = [clean_spacing(line).strip() for line in text.split("\n") if line.strip()]
     try:
-        idx = [i for i, l in enumerate(lines) if "NTA Net Return" in l][0]
-        vals = []
+        idx = next((i for i, l in enumerate(lines)
+                    if _GCI_NET_RETURN_LABEL_RE.match(l)), None)
+        if idx is None:
+            result["parse_error"] = True
+            return result
+        vals: list = []  # 含 None 占位(dash 列),保持列位置
         for l in lines[idx + 1:]:
-            if "Distribution" in l or "Target" in l or not re.match(r"^[+-]?\d+\.\d+%?$", l):
+            if "Distribution" in l or "Target" in l:
                 break
-            vals.append(float(l.replace("%", "")) / 100.0)
-        if len(vals) < 7:
+            if l in ("–", "—", "-", "‐", "−"):  # en/em/hyphen dash = 缺失列占位
+                vals.append(None)
+                continue
+            v = _parse_gci_value_cell(l)  # 含会计括号负数 (0.45)->-0.0045
+            if v is None:
+                break
+            vals.append(v)
+        if len(vals) < 3:  # 至少需 1mo/3mo/6mo
             result["parse_error"] = True
             return result
         result["1mo"] = vals[0]
         result["3mo"] = vals[1]
         result["6mo"] = vals[2]
-        result["12mo"] = vals[3]
-        result["inception"] = vals[6]
+        if len(vals) >= 4:
+            result["12mo"] = vals[3]  # 1Yr 列(基金<1年时为 None)
+        result["inception"] = vals[-1]  # 最后数值(列数可变,恒为 Incep Ann)
     except Exception:
         result["parse_error"] = True
     return result

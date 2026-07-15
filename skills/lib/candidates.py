@@ -22,6 +22,8 @@ from typing import Callable, Optional
 
 from lib.extract import (
     _BENCHMARK_GUARD_RE,
+    _GCI_NET_RETURN_LABEL_RE,
+    _parse_gci_value_cell,
     _pct_to_decimal,
     clean_spacing,
     extract_bentham_rolling,
@@ -47,7 +49,7 @@ class ReturnCandidate:
         - total_return_after_fees: r"had a total return \\(after fees\\*?\\) of X"
         - total_returns_net: r"Total Returns? \\(Net\\) X%"
         - net_return_nta_row: r"Net Return Based on NTA X%"
-        - nta_net_return_label: GCI "NTA Net Return" 标签下一行数值
+        - nta_net_return_label: GCI "Net Return (%)"/"NTA Net Return (%)" 标签下一行数值
         - perf_table_1mo: performance 表 1mo 列(已知 Stake 口径错,靠约束淘汰)
     char_pos: 匹配起始位置,同值不同位置区分(finditer 多匹配去重时保留代表位置)。
     priority: 展示优先级(0=专属模式源 1=generic 2=表格 1mo)。仅影响 pending
@@ -148,9 +150,11 @@ def pattern_kkc_nta(text: str) -> list[ReturnCandidate]:
 
 
 def pattern_gci_label(text: str) -> list[ReturnCandidate]:
-    """GCI 'NTA Net Return' 标签行 -> 下一行数值(不用正则,行定位)。
+    """GCI 'Net Return (%)' / 'NTA Net Return (%)' 标签行 -> 下一行 1mo 数值。
 
-    多次匹配同一标签时取全部;数值行格式必须是纯 X.XX% 或 X.XX。
+    2023-02 起月报用 'NTA Net Return (%)',此前用 'Net Return (%)'(无 NTA 前缀),
+    两种均匹配(精确正则 _GCI_NET_RETURN_LABEL_RE,排除 KKC 'Net Return Based on
+    NTA' 与 'Net Excess Return')。多次匹配同一标签取全部;数值行须纯 X.XX% 或 X.XX。
     """
     if not text:
         return []
@@ -159,17 +163,13 @@ def pattern_gci_label(text: str) -> list[ReturnCandidate]:
     cursor = 0  # 记录字符 offset
     for i, ln in enumerate(lines):
         line_len = len(ln) + 1  # 含 \n
-        if "NTA Net Return" in ln and i + 1 < len(lines):
-            val_str = lines[i + 1].strip().replace("%", "")
-            m = re.match(r"^[+-]?\d+\.\d+$", val_str)
-            if m:
-                try:
-                    v = _pct_to_decimal(val_str)
-                except Exception:
-                    cursor += line_len
-                    continue
-                # source_quote 用两行拼接
-                quote = f"NTA Net Return (%): {lines[i + 1].strip()}"
+        label = clean_spacing(ln).strip()
+        if _GCI_NET_RETURN_LABEL_RE.match(label) and i + 1 < len(lines):
+            raw = lines[i + 1].strip()
+            v = _parse_gci_value_cell(raw)  # 含会计括号负数 (0.45)->-0.0045
+            if v is not None:
+                # source_quote 用实际标签行 + 数值行(标签保留原文,可追溯口径)
+                quote = f"{label}: {raw}"
                 out.append(ReturnCandidate(
                     value=v,
                     source_quote=quote,

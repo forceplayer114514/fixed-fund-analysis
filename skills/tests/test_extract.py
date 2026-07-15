@@ -205,6 +205,7 @@ from lib.extract import (
     extract_pdf_links_from_archive,
     extract_bentham_net_return,
     extract_bentham_rolling,
+    extract_gci_rolling,
 )
 
 
@@ -299,6 +300,98 @@ def test_extract_perf_rolling_negative_value():
     assert r["1mo"] == -0.0026
     assert r["3mo"] == -0.0050
     assert r["parse_error"] is False
+
+
+# --- 12b. extract_gci_rolling (GCI 表标签行逐行数值) ---
+def test_extract_gci_rolling_new_format_nta_label():
+    """2023-02 起新格式 'NTA Net Return (%)' 6 列(1/3/6/1Yr/3Yr Ann/Incep Ann)。"""
+    text = (
+        "Fund Performance\n1 Mth\n3 Mth\n6 Mth\n1 Yr\n3 Yr (Ann)\nIncep (Ann)\n"
+        "NTA Net Return (%)\n0.71\n2.03\n3.79\n5.65\n5.11\n5.07\n"
+        "Distribution (¢/unit)\n1.17\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(0.0071)
+    assert r["3mo"] == pytest.approx(0.0203)
+    assert r["6mo"] == pytest.approx(0.0379)
+    assert r["12mo"] == pytest.approx(0.0565)
+    assert r["inception"] == pytest.approx(0.0507)
+
+
+def test_extract_gci_rolling_old_format_no_nta_prefix():
+    """2023-02 前旧格式 'Net Return (%)(无 NTA 前缀)' 6 列,同样解析。"""
+    text = (
+        "Fund Performance\n1 Mth\n3 Mth\n6 Mth\n1 Yr\n3 Yr (Ann)\nIncep (Ann)\n"
+        "Net Return (%)\n0.48\n1.78\n3.16\n6.29\n5.17\n5.07\n"
+        "RBA Cash Rate (%)\n0.01\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(0.0048)
+    assert r["3mo"] == pytest.approx(0.0178)
+    assert r["6mo"] == pytest.approx(0.0316)
+    assert r["12mo"] == pytest.approx(0.0629)
+    assert r["inception"] == pytest.approx(0.0507)
+
+
+def test_extract_gci_rolling_old_format_dash_for_missing_1yr():
+    """早期基金不足 1 年,1 Yr 列为 –(en-dash):12mo=None,inception 仍取最后值。"""
+    text = (
+        "Fund Performance\n1 Mth\n3 Mth\n6 Mth\n1 Yr\nIncep (Ann)\n"
+        "Net Return (%)\n0.42\n1.37\n2.68\n–\n4.57\n"
+        "RBA Cash Rate (%)\n0.12\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(0.0042)
+    assert r["3mo"] == pytest.approx(0.0137)
+    assert r["6mo"] == pytest.approx(0.0268)
+    assert r["12mo"] is None
+    assert r["inception"] == pytest.approx(0.0457)
+
+
+def test_extract_gci_rolling_excludes_excess_return_row():
+    """'Net Excess Return (%)' 行(紧随 Net Return)不被误当主标签。"""
+    text = (
+        "1 Mth\n3 Mth\n6 Mth\n1 Yr\nIncep (Ann)\n"
+        "Net Return (%)\n0.42\n1.37\n2.68\n–\n4.57\n"
+        "Net Excess Return (%)\n0.30\n1.00\n1.92\n–\n3.03\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(0.0042)
+    assert r["inception"] == pytest.approx(0.0457)
+
+
+def test_extract_gci_rolling_footnote_label():
+    """2022-08~12 月报标签带脚注 'Net Return2 (%)'。"""
+    text = (
+        "1 Mth\n3 Mth\n6 Mth\n1 Yr\n3 Yr (Ann)\nIncep (Ann)\n"
+        "Net Return2 (%)\n0.60\n1.78\n3.16\n6.29\n5.17\n5.07\n"
+        "RBA Cash Rate (%)\n0.01\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(0.0060)
+    assert r["12mo"] == pytest.approx(0.0629)
+    assert r["inception"] == pytest.approx(0.0507)
+
+
+def test_extract_gci_rolling_parens_negative_1mo():
+    """2020-03 COVID 砸盘月:1mo 为会计括号负数 '(0.45)' = -0.45%。"""
+    text = (
+        "1 Mth\n3 Mth\n6 Mth\n1 Yr\nIncep (Ann)\n"
+        "Net Return (%)\n(0.45)\n0.27\n1.46\n4.35\n4.51\n"
+        "RBA Cash Rate (%)\n0.04\n"
+    )
+    r = extract_gci_rolling(text)
+    assert r["parse_error"] is False
+    assert r["1mo"] == pytest.approx(-0.0045)
+    assert r["3mo"] == pytest.approx(0.0027)
+    assert r["6mo"] == pytest.approx(0.0146)
+    assert r["12mo"] == pytest.approx(0.0435)
+    assert r["inception"] == pytest.approx(0.0451)
 
 
 # --- 13. extract_pdf_one（mock parse_pdf_text）---

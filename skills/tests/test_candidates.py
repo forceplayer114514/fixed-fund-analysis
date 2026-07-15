@@ -112,6 +112,43 @@ def test_pattern_gci_label_no_valid_next_line():
     assert pattern_gci_label(text) == []
 
 
+def test_pattern_gci_label_old_format_no_nta_prefix():
+    """2023-02 前旧格式用 'Net Return (%)'(无 NTA 前缀),同样命中 1mo 值。"""
+    text = "Net Return (%)\n0.42\n1.37\n2.68\n–\n4.57\n"
+    cands = pattern_gci_label(text)
+    assert len(cands) == 1
+    assert cands[0].value == pytest.approx(0.0042)
+    assert cands[0].pattern_tag == "nta_net_return_label"
+    assert "Net Return" in cands[0].source_quote
+
+
+def test_pattern_gci_label_excludes_kkc_and_excess_labels():
+    """精确正则不误匹配 KKC 'Net Return Based on NTA' 或 'Net Excess Return'。
+    两者含 'Net Return' 子串但非 GCI 表标签格式。"""
+    # KKC 标签(下一行是纯数字,确保是正则而非下一行守卫排除它)
+    assert pattern_gci_label("Net Return Based on NTA (%)\n0.72\n") == []
+    # Net Excess Return 行(GCI 表内同行,与 Net Return 形似)
+    assert pattern_gci_label("Net Excess Return (%)\n0.30\n1.00\n") == []
+
+
+def test_pattern_gci_label_footnote_marker():
+    """2022-08~12 月报标签带脚注 'Net Return2 (%)',正则允许 Return 后脚注数字。"""
+    text = "Net Return2 (%)\n0.60\n1.78\n3.16\n"
+    cands = pattern_gci_label(text)
+    assert len(cands) == 1
+    assert cands[0].value == pytest.approx(0.0060)
+    assert "Net Return2" in cands[0].source_quote
+
+
+def test_pattern_gci_label_parens_negative():
+    """会计括号负数 '(0.45)' = -0.45%(如 COVID 2020-03 砸盘月)。"""
+    text = "Net Return (%)\n(0.45)\n0.27\n1.46\n"
+    cands = pattern_gci_label(text)
+    assert len(cands) == 1
+    assert cands[0].value == pytest.approx(-0.0045)
+    assert "(0.45)" in cands[0].source_quote
+
+
 # --- pattern_perf_table_1mo ---
 def test_pattern_perf_table_1mo_hits_when_table_parsed():
     """extract_perf_rolling 能解出 1mo 时,perf_table_1mo 产一个候选。"""
