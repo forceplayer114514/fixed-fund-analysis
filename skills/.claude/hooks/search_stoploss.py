@@ -65,7 +65,8 @@ def main():
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
                     f"已连续调用搜索类工具 {count} 次未穿插其他操作，必须停止搜索"
-                    "并切换策略（换信息源类型，比如从第三方聚合站转官网分页参数）"
+                    "并切换策略：AJAX/动态归档页用 stealthy_fetch(network_idle=true) 渲染；"
+                    "探测需迭代调脚本 -> 派子代理，脚本代码不进主上下文。"
                     "或直接询问用户，不允许继续重复措辞搜索。"
                 ),
             },

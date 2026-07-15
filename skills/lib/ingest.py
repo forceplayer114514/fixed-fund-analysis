@@ -1296,7 +1296,8 @@ def _cli() -> int:
     disc_p = sub.add_parser("discover", help="LLM 定位归档页 URL 后代码全流程(抓取+run_discovery+ingest_discovery)")
     disc_p.add_argument("--fund-id", required=True)
     disc_p.add_argument("--name", required=True)
-    disc_p.add_argument("--url", required=True, help="已验证归档页 URL(L1,LLM 定位)")
+    disc_p.add_argument("--url", required=True, help="已验证归档页 URL(L1,LLM 定位);数据源追溯用")
+    disc_p.add_argument("--archive-html", default=None, help="预抓渲染后 HTML 路径(AJAX/动态页用,跳过 curl 直读);--url 仍必填作数据源")
     disc_p.add_argument("--inception-date", default=None)
     disc_p.add_argument("--inception-assumed", action="store_true")
     disc_p.add_argument("--latest-month", default=None)
@@ -1357,16 +1358,20 @@ def _cli() -> int:
     if args.command == "discover":
         from lib.strategies import run_discovery
         import subprocess
-        r = subprocess.run(
-            ["curl", "-sL", "--max-time", "60", args.url],
-            capture_output=True, text=True, timeout=70,
-        )
-        archive_html = r.stdout if r.returncode == 0 and r.stdout else ""
-        if not archive_html:
-            print(json.dumps({"gate_pass": False,
-                              "errors": [f"curl 抓归档页失败: {args.url}"]},
-                             ensure_ascii=False))
-            return 1
+        if args.archive_html:
+            with open(args.archive_html, "r", encoding="utf-8") as f:
+                archive_html = f.read()
+        else:
+            r = subprocess.run(
+                ["curl", "-sL", "--max-time", "60", args.url],
+                capture_output=True, text=True, timeout=70,
+            )
+            archive_html = r.stdout if r.returncode == 0 and r.stdout else ""
+            if not archive_html:
+                print(json.dumps({"gate_pass": False,
+                                  "errors": [f"curl 抓归档页失败: {args.url}"]},
+                                 ensure_ascii=False))
+                return 1
         fund_info = {
             "fund_id": args.fund_id, "confirmed_url": args.url,
             "archive_markdown": archive_html,

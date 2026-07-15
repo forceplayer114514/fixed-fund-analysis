@@ -19,9 +19,12 @@
 2. 任何补齐（backfill）、前推（forward-fill）逻辑在数据摄取层**绝对禁止**。提取层只能做纯文本到数字的映射。
 3. 禁止连续出现相同的精确浮点数插值（ANTI-FABRICATION GUARD）。
 
-## 四、搜索/抓取主会话执行（2026-07-13 调整）
+## 四、执行主体：ingest 主会话 / 探测脚本循环转子代理（2026-07-16 调整）
 
-涉及网络抓取（MCP `fetch`/`stealthy_fetch`、`mcp__search__search` 探测、`bash curl` 下 PDF）、大批量数据处理的任务，**主会话直接执行，不委派子 agent**。子 agent 有时不退出，阻塞 pipeline。主会话抓取后自行核对数据完整性，可疑（数值突变、格式异常）则重新抓取验证而非直接采信。
+- **ingest 确定性抓取**（MCP `fetch`/`stealthy_fetch` 一次性读、`bash curl` 下 PDF、`ingest.py`/`discover` CLI、fallback 链、solver）主会话直接执行。
+- **探测脚本循环**（Vue AJAX 端点试错、分页参数、正则试错、渲染后解析、逐资源页爬）派 `general-purpose` 子代理，返回结构化摘要（已验证 URL + 归档结构 + 链接规律或 JSON 端点），脚本代码不进主上下文。GCI 一役 6 版 `fetch_gci_links.py` 污染主上下文即此反例。
+- 子 agent 不退出阻塞 pipeline 的风险仅限长驻 ingest 抓取子代理；探测子代理任务边界清晰、返回即终，不在此列。
+- 主会话抓取后自行核对数据完整性，可疑（数值突变、格式异常）则重新抓取验证而非直接采信。
 
 ## 五、职责边界
 
