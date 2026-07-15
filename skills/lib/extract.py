@@ -957,6 +957,61 @@ def download_and_extract_parallel(
     return results
 
 
+def download_and_extract_candidates(
+    links: list[tuple[str, str]],
+    dest_dir: str,
+    max_workers: Optional[int] = None,
+    max_pages: Optional[int] = None,
+) -> list:
+    """solver 路径的并发下载+候选提取。
+
+    每 worker:download_file_cached -> extract_pdf_one_candidates ->
+    (ym, list[ReturnCandidate], rolling)。缓存/坏缓存自愈/max_pages 透传
+    与 download_and_extract_parallel 一致。空候选或 parse_error 不算失败
+    (交给 solver 判 no_candidates / unverifiable_no_rolling)。
+
+    返回 [(ym, candidates, rolling), ...],按 ym 升序。异常时该月 -> (ym, [],
+    parse_error rolling)。lib.candidates 在此按需 import,避免与 extract.py
+    形成模块级循环依赖。
+    """
+    from lib.candidates import extract_pdf_one_candidates
+
+    if max_workers is None:
+        max_workers = min(24, (os.cpu_count() or 8) * 2)
+
+    def _failed_rolling() -> dict:
+        return {"1mo": None, "3mo": None, "6mo": None,
+                "12mo": None, "inception": None, "parse_error": True,
+                "extractor_tag": "none", "precision": 2}
+
+    def _worker(ym: str, url: str):
+        filepath = os.path.join(dest_dir, f"{ym}.pdf")
+        cache_hit = download_file_cached(url, filepath)
+        cands, rolling = extract_pdf_one_candidates(filepath, max_pages=max_pages)
+        # 坏缓存自愈:命中缓存且候选空 + rolling parse_error -> 重下载一次
+        if cache_hit and not cands and rolling.get("parse_error"):
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+            download_file(url, filepath)
+            cands, rolling = extract_pdf_one_candidates(filepath, max_pages=max_pages)
+        return cands, rolling
+
+    results: list[tuple[str, list, dict]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_ym = {ex.submit(_worker, ym, url): ym for ym, url in links}
+        for fut in concurrent.futures.as_completed(future_to_ym):
+            ym = future_to_ym[fut]
+            try:
+                cands, rolling = fut.result()
+            except Exception:
+                cands, rolling = [], _failed_rolling()
+            results.append((ym, cands, rolling))
+    results.sort(key=lambda r: r[0])
+    return results
+
+
 def verify_monthly_vs_rolling(
     monthly: list[tuple[str, float]],
     rolling: dict,

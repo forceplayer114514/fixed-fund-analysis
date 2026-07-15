@@ -401,6 +401,21 @@ def ingest_discovery(
     Returns: {'months','start','end','gaps','gate_pass','errors',
               'failed_months','pending_review_count','short_history_warning'}
     """
+    # Phase 3:solver 分派 -- 独立分支,不走 legacy 三层分流(不看 extractor_verified /
+    # generic_first_use;A4 数学准入直接由 solver.MIN_VERIFY_WINDOWS 保证)。
+    if extractor_name == "solver":
+        return _ingest_discovery_solver(
+            report, name,
+            db_path=db_path,
+            max_workers=max_workers,
+            shareclass_prefix=shareclass_prefix,
+            apir=apir,
+            verified_at=verified_at,
+            url_type=url_type,
+            dest_dir=dest_dir,
+            dry_run=dry_run,
+        )
+
     records: list[tuple[str, ExtractedReturn]] = []
     rolling_per_month: dict = {}
     seen_dates: set = set()
@@ -605,6 +620,288 @@ def ingest_discovery(
     }
 
 
+def _ingest_discovery_solver(
+    report,
+    name: str,
+    *,
+    db_path: Optional[str] = None,
+    max_workers: Optional[int] = None,
+    shareclass_prefix: Optional[str] = None,
+    apir: Optional[str] = None,
+    verified_at: Optional[str] = None,
+    url_type: str = "archive_page",
+    dest_dir: Optional[str] = None,
+    dry_run: bool = False,
+) -> dict:
+    """solver 路径入库:候选池 + 滚动收益约束求解 -> 每月 MonthResolution ->
+    resolved 且过 gate 直通入库,其他状态进 pending_review 带候选池 JSON。
+
+    A4 数学准入:MonthResolution.status=='resolved' 意味着 >=2 独立滚动窗口
+    验证通过(误差<0.5%),自动入库;不走 generic_first_use 人工首批审。
+
+    dry_run=True:只跑 solve + gate,不入库,输出 solver_report(每月 status /
+    chosen / verify_windows / windows_detail)。回归/加候选模式全量验证用。
+    """
+    from lib.candidates import ReturnCandidate  # 循环 import 避免
+    from lib.extract import download_and_extract_candidates
+    from lib.solver import MonthInput, solve_series
+
+    # dest_dir 缺省 = pdf_cache_dir(fund_id),持久缓存(Phase 0)
+    if dest_dir is None:
+        dest_dir = pdf_cache_dir(report.fund_id)
+    # 读 max_pdf_pages(fund 未注册时 None 读全部页)
+    max_pages: Optional[int] = None
+    try:
+        _tmp_conn = get_connection(db_path)
+        try:
+            ensure_tables(_tmp_conn)
+            _fund_row = get_fund(_tmp_conn, report.fund_id)
+            if _fund_row is not None:
+                max_pages = _fund_row.get("max_pdf_pages")
+        finally:
+            _tmp_conn.close()
+    except Exception:
+        max_pages = None
+
+    # 收集每月的 (candidates, rolling)。L0 local 跳过;L1/L2 links 走并发下载
+    # 候选提取;L3 records 直接封装为 single-candidate MonthInput。
+    month_inputs: list[MonthInput] = []
+    seen_yms: set = set()
+    failed_months: list[str] = []
+    best_payload: Optional[dict] = None
+
+    for level_key, payload in report.per_level_payload.items():
+        if not payload:
+            continue
+        if best_payload is None and payload.get("fetch_method") != "local":
+            best_payload = payload
+        if payload.get("fetch_method") == "local":
+            continue
+        if "links" in payload:
+            results = download_and_extract_candidates(
+                payload["links"], dest_dir,
+                max_workers=max_workers, max_pages=max_pages,
+            )
+            for ym, cands, rolling in results:
+                if ym in seen_yms:
+                    continue
+                seen_yms.add(ym)
+                if not cands and rolling.get("parse_error"):
+                    failed_months.append(ym)
+                    # 仍然产 MonthInput(空池),让 solver 判 no_candidates
+                month_inputs.append(MonthInput(ym=ym, candidates=cands, rolling=rolling))
+        elif "records" in payload:
+            # L3 已经是 [(date_str, ret)] 明确值 -- 包装为单候选 MonthInput,
+            # rolling parse_error(无表可验证),交 solver 判 unverifiable_no_rolling
+            for date_str, ret in payload["records"]:
+                ym = date_str[:7]
+                if ym in seen_yms:
+                    continue
+                seen_yms.add(ym)
+                c = ReturnCandidate(
+                    value=float(ret),
+                    source_quote=f"L3 records value: {ret}",
+                    pattern_tag="l3_records",
+                    char_pos=0,
+                    priority=0,
+                    ambiguous_context=False,
+                )
+                month_inputs.append(MonthInput(
+                    ym=ym, candidates=[c],
+                    rolling={"1mo": None, "3mo": None, "6mo": None,
+                             "12mo": None, "inception": None,
+                             "parse_error": True, "extractor_tag": "none",
+                             "precision": 2},
+                ))
+
+    if not month_inputs:
+        return {"months": 0, "start": None, "end": None, "gaps": report.gaps,
+                "gate_pass": False,
+                "errors": ["无 records 可入库(提取全失败或无 payload)"],
+                "failed_months": failed_months, "pending_review_count": 0,
+                "short_history_warning": True,
+                "extractor_mismatch": bool(failed_months),
+                "mismatch_months": failed_months,
+                "solver_report": {}}
+
+    # 运行求解器
+    resolutions = solve_series(month_inputs)
+
+    # 组 solver_report(dry-run/审计用)
+    def _res_summary(r) -> dict:
+        return {
+            "status": r.status,
+            "chosen": (r.chosen.value if r.chosen else None),
+            "chosen_tag": (r.chosen.pattern_tag if r.chosen else None),
+            "verify_windows": r.verify_windows,
+            "windows_pass": sum(1 for w in r.windows_detail if w.passed),
+            "windows_total": len(r.windows_detail),
+            "pool_size": len(r.pool),
+        }
+    solver_report = {ym: _res_summary(r) for ym, r in resolutions.items()}
+
+    # 组装 resolved 记录(供 gate_check 使用)与非 resolved 分流列表
+    resolved_records: list[tuple[str, float]] = []       # [(date, r)]
+    rolling_for_gate: dict = {}
+    for mi in month_inputs:
+        r = resolutions[mi.ym]
+        date = _ym_to_month_end(mi.ym)
+        if date is None:
+            failed_months.append(mi.ym)
+            continue
+        if r.status == "resolved":
+            resolved_records.append((date, r.chosen.value))
+            # gate_check 复利验证:solver 已数学验证,gate 复利再复核仍稳
+            rolling_for_gate[mi.ym] = mi.rolling
+
+    # gate_check 硬 gate(缺口非失败/ANTI-FABRICATION/字段异常)
+    # 若 resolved_records 空(全是非 resolved 月 -> pending),跳过 gate_check
+    # (gate_check 对空 records 返"无数据"errors,与 solver 语义冲突)。
+    if resolved_records:
+        _pass_ok, errors = gate_check(resolved_records, rolling_for_gate)
+    else:
+        errors = []
+    over_threshold = {d for d, v in resolved_records if abs(v) >= 0.5}
+    has_over = bool(over_threshold)
+    other_errors = [
+        e for e in errors
+        if "缺口" not in e
+        and "字段异常" not in e
+        and not (has_over and "复利验证失败" in e)
+    ]
+
+    records_sorted = sorted(resolved_records, key=lambda x: x[0])
+    start = records_sorted[0][0] if records_sorted else None
+    end = records_sorted[-1][0] if records_sorted else None
+
+    if other_errors:
+        return {"months": len(records_sorted), "start": start, "end": end,
+                "gaps": report.gaps, "gate_pass": False,
+                "errors": other_errors, "failed_months": failed_months,
+                "pending_review_count": 0,
+                "short_history_warning": len(records_sorted) < 36,
+                "extractor_mismatch": bool(failed_months),
+                "mismatch_months": failed_months,
+                "solver_report": solver_report}
+
+    if dry_run:
+        return {"months": len(records_sorted), "start": start, "end": end,
+                "gaps": report.gaps, "gate_pass": True,
+                "errors": [], "failed_months": failed_months,
+                "extractor_mismatch": bool(failed_months),
+                "mismatch_months": failed_months,
+                "pending_review_count": sum(
+                    1 for r in resolutions.values() if r.status != "resolved"
+                ),
+                "short_history_warning": len(records_sorted) < 36,
+                "dry_run": True,
+                "solver_report": solver_report}
+
+    # 入库
+    confirmed_url = (best_payload or {}).get("confirmed_url", "")
+    fetch_method = (best_payload or {}).get("fetch_method", "pdf")
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        already_exists = get_fund(conn, report.fund_id) is not None
+        if not already_exists:
+            create_fund(
+                conn, fund_id=report.fund_id, fund_name=name,
+                confirmed_url=confirmed_url, fetch_method=fetch_method,
+                url_type=url_type, apir_code=apir, verified_at=verified_at,
+                shareclass_prefix=shareclass_prefix,
+                inception_date=report.inception_date,
+                inception_assumed=1 if report.inception_assumed else 0,
+                extractor_verified=1,  # solver 数学准入,无需 legacy verify-extractor
+            )
+        pending_count = 0
+        ingested_dates: list[str] = []
+        for mi in month_inputs:
+            r = resolutions[mi.ym]
+            date = _ym_to_month_end(mi.ym)
+            if date is None:
+                continue
+            if r.status == "resolved":
+                v = r.chosen.value
+                # |r|>=0.5 兜底(优先级高于 resolved 直通,尊重 skills/CLAUDE.md
+                # §五异常值必须交人工复核规则)
+                if abs(v) >= 0.5:
+                    add_pending_review(
+                        conn, fund_id=report.fund_id, date=date, net_return=v,
+                        source_quote=r.chosen.source_quote,
+                        extract_method="solver",
+                        gate_result="abs_return_exceeds_threshold",
+                        review_reason="abs_return_exceeds_threshold",
+                        candidates_json=_serialize_pool(r.pool),
+                    )
+                    pending_count += 1
+                else:
+                    upsert_monthly_return(
+                        conn, fund_id=report.fund_id, date=date,
+                        net_return=v, commentary_truth=v,
+                        verify_windows=r.verify_windows,
+                        source_quote=r.chosen.source_quote,
+                        pattern_tag=r.chosen.pattern_tag,
+                    )
+                    ingested_dates.append(date)
+            else:
+                # 非 resolved -> pending_review,net_return 取展示代表候选(池
+                # 首个优先级最高;pool 空则 net_return=0.0 占位,review_reason
+                # 标 no_candidates)。candidates_json 记录全部候选。
+                display_c = _best_display_candidate(r.pool)
+                display_v = display_c.value if display_c else 0.0
+                display_q = display_c.source_quote if display_c else ""
+                add_pending_review(
+                    conn, fund_id=report.fund_id, date=date,
+                    net_return=display_v,
+                    source_quote=display_q,
+                    extract_method="solver",
+                    gate_result=r.status,
+                    review_reason=r.status,
+                    candidates_json=_serialize_pool(r.pool),
+                )
+                pending_count += 1
+        exhausted = ",".join(report.per_level_contribution.keys()) or "L0,L1,L2,L3"
+        for gap_ym in report.gaps:
+            record_confirmed_gap(
+                conn, fund_id=report.fund_id, missing_month=gap_ym,
+                exhausted_levels=exhausted,
+            )
+        audit_all_funds(conn)
+    finally:
+        conn.close()
+
+    ingested_dates.sort()
+    return {
+        "months": len(ingested_dates),
+        "start": ingested_dates[0] if ingested_dates else None,
+        "end": ingested_dates[-1] if ingested_dates else None,
+        "gaps": report.gaps,
+        "gate_pass": True,
+        "errors": [],
+        "failed_months": failed_months,
+        "extractor_mismatch": bool(failed_months),
+        "mismatch_months": failed_months,
+        "pending_review_count": pending_count,
+        "short_history_warning": len(records_sorted) < 36,
+        "solver_report": solver_report,
+    }
+
+
+def _serialize_pool(pool) -> str:
+    """候选池 -> JSON list(供 pending_review.candidates_json)。
+    每候选序列化为 dict,frozen dataclass 可安全 asdict。"""
+    from dataclasses import asdict
+    return json.dumps([asdict(c) for c in pool], ensure_ascii=False)
+
+
+def _best_display_candidate(pool):
+    """从候选池挑代表候选:priority 最小,同 priority 按 char_pos 稳定。"""
+    if not pool:
+        return None
+    return sorted(pool, key=lambda c: (c.priority, c.char_pos))[0]
+
+
 def _collect_records(report, dest_dir=None, extractor=None, max_workers=None,
                      max_pages=None):
     """从 report.per_level_payload 收集 records(L1/L2 links 下载提取,L3 records
@@ -678,6 +975,13 @@ def update_fund(
               'stale_pending_reviews','inception_assumed'}
     """
     from lib.strategies import run_discovery
+    # Phase 3:solver 分派 -- update 侧走 _update_fund_solver
+    if extractor_name == "solver":
+        return _update_fund_solver(
+            fund_id, db_path=db_path,
+            archive_markdown=archive_markdown, latest_month=latest_month,
+            max_workers=max_workers, dest_dir=dest_dir,
+        )
     conn = get_connection(db_path)
     try:
         ensure_tables(conn)
@@ -774,6 +1078,189 @@ def update_fund(
         conn.close()
 
 
+def _update_fund_solver(
+    fund_id: str,
+    *,
+    db_path: Optional[str] = None,
+    archive_markdown: Optional[str] = None,
+    latest_month: Optional[str] = None,
+    max_workers: Optional[int] = None,
+    dest_dir: Optional[str] = None,
+) -> dict:
+    """solver 路径增量更新:已入库月作为已定值锚点参与约束求解,新月由约束自动
+    定值。天然解决增量冷启动(既有序列已提供锚点,新月一次窗口即可反解)。
+    """
+    from lib.candidates import ReturnCandidate
+    from lib.extract import download_and_extract_candidates
+    from lib.solver import MonthInput, solve_series
+    from lib.strategies import run_discovery
+
+    conn = get_connection(db_path)
+    try:
+        ensure_tables(conn)
+        fund = get_fund(conn, fund_id)
+        if fund is None:
+            return {"updated": False, "errors": [f"基金 {fund_id} 未注册"]}
+        existing_rows = get_monthly_returns(conn, fund_id)
+        existing_months = {r["date"][:7]: r["net_return"] for r in existing_rows}
+        existing_gaps = {g["missing_month"] for g in list_confirmed_gaps(conn, fund_id)}
+        confirmed_url = fund["confirmed_url"]
+        if archive_markdown is None:
+            import subprocess
+            r = subprocess.run(
+                ["curl", "-sL", "--max-time", "60", confirmed_url],
+                capture_output=True, text=True, timeout=70,
+            )
+            archive_markdown = r.stdout if r.returncode == 0 and r.stdout else ""
+        fund_info = {
+            "fund_id": fund_id, "confirmed_url": confirmed_url,
+            "archive_markdown": archive_markdown,
+            "inception_date": fund["inception_date"],
+            "inception_assumed": bool(fund["inception_assumed"]),
+            "latest_month": latest_month,
+            "db_path": db_path,
+        }
+        report = run_discovery(fund_info)
+
+        # 收集所有月的 (candidates, rolling)
+        if dest_dir is None:
+            dest_dir = pdf_cache_dir(fund_id)
+        max_pages = fund.get("max_pdf_pages")
+        seen_yms: set = set()
+        failed_months: list[str] = []
+        month_inputs: list[MonthInput] = []
+        for level_key, payload in report.per_level_payload.items():
+            if not payload or payload.get("fetch_method") == "local":
+                continue
+            if "links" in payload:
+                results = download_and_extract_candidates(
+                    payload["links"], dest_dir,
+                    max_workers=max_workers, max_pages=max_pages,
+                )
+                for ym, cands, rolling in results:
+                    if ym in seen_yms:
+                        continue
+                    seen_yms.add(ym)
+                    if not cands and rolling.get("parse_error"):
+                        failed_months.append(ym)
+                    month_inputs.append(MonthInput(ym=ym, candidates=cands,
+                                                   rolling=rolling))
+            elif "records" in payload:
+                for date_str, ret in payload["records"]:
+                    ym = date_str[:7]
+                    if ym in seen_yms:
+                        continue
+                    seen_yms.add(ym)
+                    c = ReturnCandidate(
+                        value=float(ret),
+                        source_quote=f"L3 records value: {ret}",
+                        pattern_tag="l3_records",
+                        char_pos=0, priority=0,
+                    )
+                    month_inputs.append(MonthInput(
+                        ym=ym, candidates=[c],
+                        rolling={"1mo": None, "3mo": None, "6mo": None,
+                                 "12mo": None, "inception": None,
+                                 "parse_error": True, "extractor_tag": "none",
+                                 "precision": 2},
+                    ))
+
+        # 把已入库月并入 month_inputs 作为已定值锚点:候选池仅含入库值,
+        # rolling parse_error(避免污染约束验证 -- 已入库月已 verify 过);
+        # solver 的 Pass Z 会直接 chosen 唯一候选。
+        for ym_str, r_val in existing_months.items():
+            if ym_str in seen_yms:
+                continue
+            seen_yms.add(ym_str)
+            anchor = ReturnCandidate(
+                value=float(r_val),
+                source_quote=f"existing monthly_returns anchor: {r_val}",
+                pattern_tag="existing_anchor",
+                char_pos=0, priority=0,
+            )
+            month_inputs.append(MonthInput(
+                ym=ym_str, candidates=[anchor],
+                rolling={"1mo": None, "3mo": None, "6mo": None,
+                         "12mo": None, "inception": None,
+                         "parse_error": True, "extractor_tag": "none",
+                         "precision": 2},
+            ))
+
+        resolutions = solve_series(month_inputs)
+
+        # 只处理新月(existing_months 之外)
+        upserted = 0
+        pending_count = 0
+        newly_filled: set = set()
+        for mi in month_inputs:
+            if mi.ym in existing_months:
+                continue
+            r = resolutions[mi.ym]
+            date = _ym_to_month_end(mi.ym)
+            if date is None:
+                continue
+            if r.status == "resolved":
+                v = r.chosen.value
+                if abs(v) >= 0.5:
+                    add_pending_review(
+                        conn, fund_id=fund_id, date=date, net_return=v,
+                        source_quote=r.chosen.source_quote,
+                        extract_method="solver",
+                        gate_result="abs_return_exceeds_threshold",
+                        review_reason="abs_return_exceeds_threshold",
+                        candidates_json=_serialize_pool(r.pool),
+                    )
+                    pending_count += 1
+                else:
+                    upsert_monthly_return(
+                        conn, fund_id=fund_id, date=date,
+                        net_return=v, commentary_truth=v,
+                        verify_windows=r.verify_windows,
+                        source_quote=r.chosen.source_quote,
+                        pattern_tag=r.chosen.pattern_tag,
+                    )
+                    upserted += 1
+                    if mi.ym in existing_gaps:
+                        newly_filled.add(mi.ym)
+            else:
+                display_c = _best_display_candidate(r.pool)
+                display_v = display_c.value if display_c else 0.0
+                display_q = display_c.source_quote if display_c else ""
+                add_pending_review(
+                    conn, fund_id=fund_id, date=date,
+                    net_return=display_v,
+                    source_quote=display_q,
+                    extract_method="solver",
+                    gate_result=r.status,
+                    review_reason=r.status,
+                    candidates_json=_serialize_pool(r.pool),
+                )
+                pending_count += 1
+
+        exhausted = ",".join(report.per_level_contribution.keys()) or "L0,L1,L2,L3"
+        for gap_ym in report.gaps:
+            record_confirmed_gap(
+                conn, fund_id=fund_id, missing_month=gap_ym,
+                exhausted_levels=exhausted,
+            )
+        for gap_ym in newly_filled:
+            remove_confirmed_gap(conn, fund_id, gap_ym)
+        audit_all_funds(conn)
+        stale = list_stale_pending_reviews(conn, days=14)
+        return {
+            "updated": True, "new_months": upserted,
+            "pending_review_count": pending_count,
+            "gaps": sorted(set(report.gaps)),
+            "failed_months": failed_months,
+            "extractor_mismatch": bool(failed_months),
+            "mismatch_months": failed_months,
+            "stale_pending_reviews": stale,
+            "inception_assumed": bool(fund["inception_assumed"]),
+        }
+    finally:
+        conn.close()
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description="skills 全自动入库流水线")
     parser.add_argument(
@@ -817,17 +1304,20 @@ def _cli() -> int:
     disc_p.add_argument("--apir", default=None)
     disc_p.add_argument("--verified-at", default=None)
     disc_p.add_argument("--db-path", default=None)
-    disc_p.add_argument("--extractor", default="generic",
-                        choices=extractor_names(),
-                        help="PDF 提取器(generic=默认 returned X%; 新基金先 generic,"
-                             "gate 失败/EXTRACTOR_MISMATCH 走 add_fixed_fund.md 4.5 加专属)")
+    disc_p.add_argument("--extractor", default="solver",
+                        choices=["solver"] + extractor_names(),
+                        help="提取路径(solver=默认,候选+滚动收益约束求解,数学"
+                             "准入>=2 窗口通过即入库;legacy 名字 generic/stake/"
+                             "bentham/kkc/gci 走单提取器路径,兼容旧 pending)")
     disc_p.add_argument("--dry-run", action="store_true",
-                        help="跑提取+gate 不入库,出报告(4.5 全量回跑验收用)")
+                        help="跑提取+solve 不入库,出 solver_report(每月 status/"
+                             "chosen/verify_windows)")
     upd_p = sub.add_parser("update", help="增量复查最新月+confirmed_gaps 复查+pending_review 滞留报告")
     upd_p.add_argument("--fund-id", required=True)
     upd_p.add_argument("--db-path", default=None)
-    upd_p.add_argument("--extractor", default="generic", choices=extractor_names(),
-                       help="PDF 提取器(须与 discover 时一致)")
+    upd_p.add_argument("--extractor", default="solver",
+                       choices=["solver"] + extractor_names(),
+                       help="提取路径(须与 discover 时一致)")
     ve_p = sub.add_parser("verify-extractor",
                           help="人工审核通过 generic 首批后:标 extractor_verified=1 + 批量 promote generic_first_use pending")
     ve_p.add_argument("--fund-id", required=True)
@@ -887,7 +1377,10 @@ def _cli() -> int:
             "db_path": args.db_path,
         }
         report = run_discovery(fund_info)
-        extractor = get_extractor(args.extractor)
+        # solver 分支不用 extractor 函数(内部走 candidates+solver);legacy 分支
+        # 才需要 get_extractor 拿单提取器。solver 名字不在 EXTRACTORS 中,
+        # get_extractor 会 fallback generic,但 solver 分支不会真的调用它。
+        extractor = None if args.extractor == "solver" else get_extractor(args.extractor)
         result = ingest_discovery(
             report, args.name, db_path=args.db_path,
             apir=args.apir, verified_at=args.verified_at,
@@ -897,9 +1390,10 @@ def _cli() -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["gate_pass"] else 1
     if args.command == "update":
+        _extr = None if args.extractor == "solver" else get_extractor(args.extractor)
         result = update_fund(args.fund_id, db_path=args.db_path,
                              extractor_name=args.extractor,
-                             extractor=get_extractor(args.extractor))
+                             extractor=_extr)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=list))
         return 0
     if args.command == "verify-extractor":

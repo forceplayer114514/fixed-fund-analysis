@@ -83,6 +83,9 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             net_return REAL NOT NULL,
             nav REAL NOT NULL,
             commentary_truth REAL,
+            verify_windows INTEGER,
+            source_quote TEXT,
+            pattern_tag TEXT,
             FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
             UNIQUE(fund_id, date)
         );
@@ -107,6 +110,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             gate_result TEXT,
             review_state TEXT NOT NULL DEFAULT 'pending',
             review_reason TEXT,
+            candidates_json TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE
         );
@@ -129,6 +133,20 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
             "UPDATE funds SET extractor_verified=1 WHERE fund_id IN "
             "(SELECT DISTINCT fund_id FROM monthly_returns)"
         )
+    # Phase 3 幂等迁移:solver 路径需记录 verify_windows / source_quote /
+    # pattern_tag(monthly_returns)与候选池 JSON(pending_review),旧库缺列则 ALTER。
+    mr_cols = [r["name"] for r in conn.execute(
+        "PRAGMA table_info(monthly_returns)").fetchall()]
+    if "verify_windows" not in mr_cols:
+        conn.execute("ALTER TABLE monthly_returns ADD COLUMN verify_windows INTEGER")
+    if "source_quote" not in mr_cols:
+        conn.execute("ALTER TABLE monthly_returns ADD COLUMN source_quote TEXT")
+    if "pattern_tag" not in mr_cols:
+        conn.execute("ALTER TABLE monthly_returns ADD COLUMN pattern_tag TEXT")
+    pr_cols = [r["name"] for r in conn.execute(
+        "PRAGMA table_info(pending_review)").fetchall()]
+    if "candidates_json" not in pr_cols:
+        conn.execute("ALTER TABLE pending_review ADD COLUMN candidates_json TEXT")
     conn.commit()
 
 
@@ -183,24 +201,38 @@ def upsert_monthly_return(
     date: str,
     net_return: float,
     commentary_truth: Optional[float] = None,
+    verify_windows: Optional[int] = None,
+    source_quote: Optional[str] = None,
+    pattern_tag: Optional[str] = None,
 ) -> None:
     """插入或更新某月收益,随后重算该基金全部 NAV。
 
-    ON CONFLICT(fund_id, date) 时更新 net_return;commentary_truth 用
-    COALESCE(excluded, 旧值) 处理 -- 仅当传入非 None 时覆盖,传 None 则保留
-    旧值。新插入行 nav 暂占位 1.0,由随后的 recompute_nav 重算为正确复利值。
+    ON CONFLICT(fund_id, date) 时更新 net_return;commentary_truth /
+    verify_windows / source_quote / pattern_tag 用 COALESCE(excluded, 旧值)
+    处理 -- 仅当传入非 None 时覆盖,传 None 则保留旧值。这样 legacy 路径写
+    NULL 时不覆盖历史 solver 记录的元数据,solver 路径写值时不清掉旧
+    commentary_truth。新插入行 nav 暂占位 1.0,由随后的 recompute_nav 重算。
     """
     _require_write_token()
     conn.execute(
         """
-        INSERT INTO monthly_returns (fund_id, date, net_return, nav, commentary_truth)
-        VALUES (?, ?, ?, 1.0, ?)
+        INSERT INTO monthly_returns
+            (fund_id, date, net_return, nav, commentary_truth,
+             verify_windows, source_quote, pattern_tag)
+        VALUES (?, ?, ?, 1.0, ?, ?, ?, ?)
         ON CONFLICT(fund_id, date) DO UPDATE SET
             net_return = excluded.net_return,
             commentary_truth = COALESCE(excluded.commentary_truth,
-                                       monthly_returns.commentary_truth)
+                                       monthly_returns.commentary_truth),
+            verify_windows = COALESCE(excluded.verify_windows,
+                                     monthly_returns.verify_windows),
+            source_quote = COALESCE(excluded.source_quote,
+                                   monthly_returns.source_quote),
+            pattern_tag = COALESCE(excluded.pattern_tag,
+                                  monthly_returns.pattern_tag)
         """,
-        (fund_id, date, net_return, commentary_truth),
+        (fund_id, date, net_return, commentary_truth,
+         verify_windows, source_quote, pattern_tag),
     )
     conn.commit()
     recompute_nav(conn, fund_id)
@@ -318,23 +350,25 @@ def add_pending_review(
     extract_method: str,
     gate_result: Optional[str] = None,
     review_reason: Optional[str] = None,
+    candidates_json: Optional[str] = None,
 ) -> int:
     """写一条待人工审核记录,返回自增 id。
 
-    extract_method: 'code'(代码提取超限)或 'llm'(LLM 兜底提取)。
-    review_state 默认 'pending',永不直通 monthly_returns -- 过同一 gate_check
-    仅获准入审核队列,promote_pending 后才入库(修正3.1.2)。
+    extract_method: 'code'(代码提取超限)/ 'solver'(约束求解未定值)/ 'llm'
+    (LLM 兜底提取)。review_state 默认 'pending',永不直通 monthly_returns。
+    candidates_json:solver 路径记录全部候选池(JSON 序列化列表),供人工审核
+    时看到"求解器给出的选择空间"。legacy 路径传 None。
     """
     _require_write_token()
     cur = conn.execute(
         """
         INSERT INTO pending_review
             (fund_id, date, net_return, source_quote, extract_method,
-             gate_result, review_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+             gate_result, review_reason, candidates_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (fund_id, date, net_return, source_quote, extract_method,
-         gate_result, review_reason),
+         gate_result, review_reason, candidates_json),
     )
     conn.commit()
     return cur.lastrowid
