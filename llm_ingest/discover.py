@@ -116,6 +116,41 @@ def _dedup_links(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
 
 def _fetch(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:
+    """浏览器渲染抓页 (playwright chromium headless).
+
+    默认走 playwright — 覆盖 AJAX/SPA 归档 (GCI 的 wp-load-posts, JCB 表格等).
+    静态站也能过, 就是慢一些 (~2s launch + ~1s render). Phase 2 不做二级兜底,
+    强的功能优先 (用户指令).
+    network_idle=True 等到 500ms 无网络请求, 保证 AJAX 加载完成.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        # 未装 playwright, 退回 requests (静态站仍可用)
+        return _fetch_requests(url, timeout)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
+                page = context.new_page()
+                page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                return page.content()
+            finally:
+                browser.close()
+    except Exception:
+        # 页 load 超时/浏览器崩溃 -> 退 requests
+        return _fetch_requests(url, timeout)
+
+
+def _fetch_requests(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:
+    """静态 requests 抓页 (备用: playwright 不可用或崩溃时)."""
     try:
         r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200 and r.text:
