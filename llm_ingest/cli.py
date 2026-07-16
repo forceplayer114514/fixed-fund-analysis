@@ -386,6 +386,18 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0 if stats["monthly"] > 0 else 2
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """跑 Spec A 迁移 (幂等). 输出 JSON 到 stdout."""
+    from .migrations.spec_a_20260717 import apply as apply_spec_a
+    conn = store_mod.open_conn()
+    try:
+        result = apply_spec_a(conn)
+    finally:
+        conn.close()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     r = run_compare(args.fund_id, limit=args.limit, max_pages=args.max_pages, concurrency=args.concurrency)
     Path(args.out).write_text(json.dumps(_report_to_json(r), ensure_ascii=False, indent=2))
@@ -440,6 +452,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     i.add_argument("--limit", type=int, default=None, help="仅处理前 N 个链接 (调试)")
     i.add_argument("--max-pages", type=int, default=2)
     i.set_defaults(func=cmd_ingest)
+
+    m = sub.add_parser("migrate", help="apply Spec A DB migration (idempotent)")
+    m.set_defaults(func=cmd_migrate)
 
     args = p.parse_args(argv)
     return args.func(args)

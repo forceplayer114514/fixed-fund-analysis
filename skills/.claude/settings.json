@@ -9,6 +9,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/chong/Desktop/fixed_fund_analysis/skills/.claude/hooks/db_write_guard.py",
+            "timeout": 5
+          }
+        ]
       }
     ]
   }

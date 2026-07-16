@@ -181,15 +181,63 @@ class Client:
 #   [2] [other.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
 
 _SRC_LINE = re.compile(r"\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)")
+# 无序号 markdown link -- prompt 让模型直接输 `[hostname](url)` 时用
+_MD_LINK = re.compile(r"\[([a-z0-9][a-z0-9.\-]*\.[a-z]{2,})\]\((https?://[^)]+)\)",
+                      flags=re.IGNORECASE)
 _QRY_LINE = re.compile(r"Web search queries:\s*(.+)")
+
+# label 像纯域名 (至少一个点, 全 ASCII 字母数字/中划线) -> 免走 follow_redirect
+# grounding label 常是短域 (benthamam.com, jamiesoncoote.com.au); 走 label 拼伪
+# URL 就够供 _pick_issuer_domain / _validate_url_in_sources 使用, 不必真去 Google
+# 直连查真 URL (中国大陆网络到 1e100.net 直连不通, follow 会 20s 超时)
+_LABEL_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+$")
+
+# 备用: prompt 要求 "每个 URL 前标 [SOURCE]" 时, 模型直接内联 URL 而非 markdown
+# link 语法; sub2api 也不总给结构化 grounding block。这个正则捕这种内联格式。
+# 教训: 模型爱在 [SOURCE] 后贴幻觉 URL (Yarra 一测抓到 yarracapital.com 但真域是
+# yarracm.com), 只信 vertexaisearch grounding-redirect 展开链 -- 那是 Google
+# 后端算法真见过的 URL, 幻觉概率极低。裸 URL 一律丢弃。
+_INLINE_SRC = re.compile(
+    r"\[SOURCE\]\s*[:\-]?\s*(https?://[^\s\)\]<>\"']+)",
+    flags=re.IGNORECASE,
+)
+_GROUNDING_HOST = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
 
 
 def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
-    """从 sub2api 返回文本里抠 grounding sources + queries."""
+    """从 sub2api 返回文本里抠 grounding sources + queries.
+
+    支持两种格式:
+      (a) markdown block `[1] [label](url)` -- sub2api 结构化 grounding
+      (b) `[SOURCE] https://...` 内联 -- prompt 要求 [SOURCE] 前缀时模型直接输出
+
+    label 是纯域名时直接返回 `https://<label>` 伪 URL, 免走 follow_redirect;
+    label 不像域名 (如别名 "Bentham Reports") 时保留 redirect URL 等 follow 展开。
+    """
     sources: List[str] = []
     queries: List[str] = []
     for m in _SRC_LINE.finditer(text):
-        url = m.group(2).strip()
+        label = m.group(1).strip().lower()
+        redirect_url = m.group(2).strip()
+        if _LABEL_DOMAIN_RE.match(label):
+            real = f"https://{label}"
+        else:
+            real = redirect_url
+        if real and real not in sources:
+            sources.append(real)
+    # 无序号 markdown link `[hostname](url)` -- 现 prompt 主格式, 直接抽 label 域
+    # (redirect_url 走不通; label 已被正则强制为纯域名, 无幻觉风险)
+    for m in _MD_LINK.finditer(text):
+        host = m.group(1).strip().lower()
+        real = f"https://{host}"
+        if real not in sources:
+            sources.append(real)
+    # 内联 [SOURCE] URL 兜底 -- 只信 vertexaisearch grounding redirect 展开的,
+    # 裸 URL 丢弃 (模型幻觉热区; Yarra 案例见文件顶注释)
+    for m in _INLINE_SRC.finditer(text):
+        url = m.group(1).rstrip(".,;")
+        if _GROUNDING_HOST not in url:
+            continue
         if url and url not in sources:
             sources.append(url)
     qm = _QRY_LINE.search(text)
@@ -198,11 +246,16 @@ def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
     return sources, queries
 
 
-def follow_redirect(url: str, timeout: int = 20) -> Optional[str]:
+def follow_redirect(url: str, timeout: int = 5) -> Optional[str]:
     """跟随 vertexaisearch grounding-api-redirect 拿到真实 URL.
 
-    真站可能 403 (直接抓时反爬), 但重定向 chain 走完前 requests 会记 r.url.
+    真站可能 403 (直接抓时反爬), 但重定向 chain 走完前 requests 会记 r.url。
+    可用 `NO_GROUNDING_FOLLOW=1` 环境变量彻底短路 (走不到 Google 时用);
+    默认 timeout 从 20s 减到 5s, 单次失败快速放弃, 避免拖住 discovery。
     """
+    import os
+    if os.environ.get("NO_GROUNDING_FOLLOW"):
+        return None
     try:
         r = requests.get(
             url, allow_redirects=True, timeout=timeout,

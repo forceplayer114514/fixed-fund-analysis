@@ -31,6 +31,13 @@ from .verify import (
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO / "data" / "fund_analysis.db"
 
+# 权威源白名单: 走过 gate/两闸的通路, pending 不允许覆盖
+#   - fundmonitors_table: L3 表格通路 (缺口/反捏造/字段/YTD 复利 4 gate 已过)
+#   - llm: L1 PDF 通路 (quote/rolling/field_type/antifab 四闸已过)
+# 未在白名单内 (如 NULL / 'nta_net_return_label' 等 skills-era 遗留 tag) 允许被 pending 覆盖
+# (对齐 Spec B 洗数据目标)。
+_AUTHORITATIVE_TAGS = frozenset({"fundmonitors_table", "llm"})
+
 
 # ---------- 连接 ----------
 
@@ -465,15 +472,18 @@ def list_pending(
     return [dict(r) for r in rows]
 
 
-def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, str]:
+def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, Any]:
     """人工审核通过: pending 行 net_return 走 upsert_monthly_return (含 NAV 重算),
-    并标 review_state='approved'. 返回 {fund_id, date, action}.
+    并标 review_state='approved'. 返回 {fund_id, date, action, [existing_tag]}.
 
-    Guard: 若目标 (fund_id, date) 已被更权威源覆盖 (pattern_tag='fundmonitors_table'
-    L3 表格通路), 拒绝覆盖 -- L3 是逐月表源, 无 quote 但已过 4 项 gate (缺口/反捏造/
-    字段类型/YTD 复利), 优于单份 PDF 抽取。此处只把 pending 标 'rejected' 附因由,
-    monthly_returns 不动, action 返 'skipped_l3_covered'。
-    KKR 现场教训: skills 旧候选 pending 与 L3 值不同 -> approve 会污染 monthly_returns。
+    Guard (P4 扩权威源白名单): 若目标 (fund_id, date) 已被 _AUTHORITATIVE_TAGS 覆盖
+    (当前包含 L3 表格通路 'fundmonitors_table' 与 L1 PDF LLM 通路 'llm'), 拒绝覆盖 --
+    两条通路皆已过 gate/两闸校验, 优于人工挪进来的 pending 单值。此处只把 pending 标
+    'rejected' 附因由, monthly_returns 不动, action 返 'skipped_authoritative_covered',
+    附 existing_tag 让前端告诉审核人是被哪种权威源挡的。
+    未纳入白名单的 pattern_tag (NULL / 'nta_net_return_label' 等 skills-era 遗留) 允许被
+    pending 覆盖 -- 对齐 Spec B 洗数据目标, 那些行未经现有 gate。
+    KKR 现场教训: skills 旧候选 pending 与权威源值不同 -> approve 会污染 monthly_returns。
     """
     row = conn.execute(
         "SELECT fund_id, date, net_return, source_quote FROM pending_review WHERE id=?",
@@ -483,23 +493,28 @@ def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, str]:
         raise KeyError(f"pending_review id={review_id} 不存在")
     fund_id = row["fund_id"]
     date = row["date"]
-    # 检查同月是否已有 L3 覆盖
+    # 检查同月是否已被权威源覆盖
     existing = conn.execute(
         "SELECT pattern_tag, net_return FROM monthly_returns WHERE fund_id=? AND date=?",
         (fund_id, date),
     ).fetchone()
-    if existing and existing["pattern_tag"] == "fundmonitors_table":
+    if existing and existing["pattern_tag"] in _AUTHORITATIVE_TAGS:
+        existing_tag = existing["pattern_tag"]
+        reason_text = (
+            f"skipped_authoritative_covered: {existing_tag} 源值 "
+            f"{existing['net_return']} 已入库, pending 值 {row['net_return']} 未采纳"
+        )
         conn.execute(
-            """UPDATE pending_review
-               SET review_state='rejected',
-                   review_reason='skipped_l3_covered: L3 fundmonitors 表值 '
-                                 || CAST(? AS TEXT) || ' 已入库, pending 值 '
-                                 || CAST(? AS TEXT) || ' 未采纳'
-               WHERE id=?""",
-            (existing["net_return"], row["net_return"], review_id),
+            "UPDATE pending_review SET review_state='rejected', review_reason=? "
+            "WHERE id=?",
+            (reason_text, review_id),
         )
         conn.commit()
-        return {"fund_id": fund_id, "date": date, "action": "skipped_l3_covered"}
+        return {
+            "fund_id": fund_id, "date": date,
+            "action": "skipped_authoritative_covered",
+            "existing_tag": existing_tag,
+        }
     _upsert_monthly_return(
         conn, fund_id=fund_id, date=date,
         net_return=float(row["net_return"]),

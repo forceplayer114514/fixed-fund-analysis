@@ -93,6 +93,22 @@ def test_create_fund_duplicate_apir_raises(db_conn):
                     apir_code="ETL5010AU")
 
 
+def test_create_fund_invalid_apir_raises(db_conn):
+    with pytest.raises(ValueError):
+        create_fund(db_conn, fund_id="F001", fund_name="Fund Bad APIR",
+                    confirmed_url="u1", fetch_method="pdf", url_type="pdf",
+                    apir_code="BAD123")
+
+
+def test_create_fund_none_apir_allowed(db_conn):
+    # Stake/MXT 等无标准 APIR,None 须放行
+    create_fund(db_conn, fund_id="F001", fund_name="Fund No APIR",
+                confirmed_url="u1", fetch_method="pdf", url_type="pdf",
+                apir_code=None)
+    f = get_fund(db_conn, "F001")
+    assert f["apir_code"] is None
+
+
 def test_upsert_monthly_return_inserts_and_computes_nav(db_conn):
     _make_fund(db_conn)
     upsert_monthly_return(db_conn, fund_id="F001", date="2024-01-31", net_return=0.01)

@@ -25,6 +25,7 @@ import requests
 
 from . import extract as ex_mod
 from .client import Client, resolve_sources
+from .tavily import TavilyError, multi_query_search
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 CDX_SNAPSHOTS_PER_MONTH = 3
@@ -45,6 +46,9 @@ class ArchivePointer:
     raw: Dict[str, Any] = field(default_factory=dict)
     search_sources: List[str] = field(default_factory=list)  # grounding 展开后的真实 URL
     search_queries: List[str] = field(default_factory=list)
+    # v2 (discover2.find_archive_v2) 抓页时已直接看见的所有 PDF URL. v1 不填。
+    # run_discovery 若发现此字段非空, 优先用它反解 ym, 跳过再让 Gemini 解析归档页。
+    discovered_pdfs: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -278,28 +282,48 @@ def find_archive_via_search(
     if client is None:
         client = Client()
 
-    # --- 阶段 A: 搜索 (强触发 prompt 变体) ---
-    domain_hint = f" 已知 issuer_domain 提示: {issuer_domain}." if issuer_domain else ""
-    asx_hint = f" ASX 代码: {asx_code}." if asx_code else ""
-    p_variants = [
-        (
-            f"联网搜索: {fund_name} monthly report site:au 官网归档页\n"
-            f"联网搜索后回答:\n"
-            f"1. {issuer} 的现役官网域名是?\n"
-            f"2. {fund_name} 的月报页面 URL 是?\n"
-            f"3. 该页是列多个历史月份的归档页, 还是只挂最新一份?\n"
-            f"把找到的 URL 列出来, 每个 URL 前标 [SOURCE]。{domain_hint}{asx_hint}"
-        ),
-        (
-            f"联网搜索: '{fund_name}' fund monthly report factsheet PDF\n"
-            f"联网搜索: '{issuer}' official website\n"
-            f"回答:\n"
-            f"1. 官网真实域名 (可能与基金名不同)?\n"
-            f"2. 有归档页列多月吗?\n"
-            f"每个引用 URL 前标 [SOURCE]。"
-        ),
-    ]
-    real_sources, queries = _search_with_retry(client, p_variants, max_tries=2)
+    # --- 阶段 A: 搜索 ---
+    # 首选 Tavily REST 一次调用给结构化真 URL, 无 grounding 中间层, 无幻觉。
+    # Tavily 失败 (key 缺 / 网错 / 全 query 空返) 再降级 sub2api web_search。
+    real_sources: List[str] = []
+    queries: List[str] = []
+    try:
+        tavily_queries = [
+            fund_name,
+            f"{fund_name} performance",
+            f"{fund_name} monthly report",
+        ]
+        real_sources = multi_query_search(
+            tavily_queries,
+            max_results_per_query=5,
+            exclude_aggregators=True,
+        )
+        queries = tavily_queries if real_sources else []
+    except TavilyError:
+        real_sources = []
+
+    if not real_sources:
+        # --- 回退: sub2api web_search (英文简洁 prompt, 强制触发) ---
+        # 教训:
+        # - 中文 prompt: Gemini 只跑 1 条 vague query 且返幻觉 URL (澳洲基金语料全英)
+        # - 全裸 [SOURCE] <url>: 只出 grounding-redirect 链, 中国网络下 follow 超时
+        # 现改: 英文 + 强制 markdown link 格式 `[hostname](url)`, label 是纯域名
+        # -> _parse_grounding 走 label 短路, 免走 Google 直连
+        p_variants = [
+            (
+                f"Use web_search TWICE:\n"
+                f"1. Query: {fund_name}\n"
+                f"2. Query: {fund_name} performance\n"
+                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
+            ),
+            (
+                f"Use web_search TWICE:\n"
+                f"1. Query: {fund_name} monthly report\n"
+                f"2. Query: {fund_name} fact sheet\n"
+                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
+            ),
+        ]
+        real_sources, queries = _search_with_retry(client, p_variants, max_tries=2)
 
     # --- 阶段 B: 让 Gemini 读 sources 判 JSON ---
     domain = _pick_issuer_domain(real_sources, issuer, fund_name) if real_sources else issuer_domain
@@ -314,7 +338,9 @@ def find_archive_via_search(
         )
         prompt += "\n\n---搜索结果 (真实展开后 URL, 只从中挑, 不许生成新域名) ---\n"
         prompt += "\n".join(f"- {u}" for u in real_sources)
-        resp = client.messages(prompt, max_tokens=1024)
+        # max_tokens 1024 曾致 Gemini "思考+JSON" 混排被截半 (Yarra 阶段 B 观察);
+        # 提到 2048 给足余量。若模型输长中文推理再吐 JSON, 短 budget 直接把 JSON 截掉。
+        resp = client.messages(prompt, max_tokens=2048)
         ptr_json = _parse_json_response(resp.text) or {}
 
     llm_archive = ptr_json.get("archive_url")
@@ -406,14 +432,59 @@ def probe_l1_official(
     client: Optional[Client] = None,
     max_pagination: int = 8,
 ) -> Tuple[List[Tuple[str, str]], ArchivePointer, int]:
-    """L1 完整流程: 联网找页 -> fetch -> Gemini 解析 -> 若分页则遍历.
+    """L1 完整流程: 找归档页 -> fetch -> Gemini 解析 -> 若分页则遍历.
+
+    优先走 v2 (discover2.find_archive_v2): Tavily 排序 + Scrapling 抓 + PDF 打样验证。
+    v2 未定位到归档且未定位到最新单份时, 回退 v1 (find_archive_via_search) 兜底。
 
     返回 (links, pointer, unparseable_total).
     """
     if client is None:
         client = Client()
-    pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
+    # v2 首选
+    from . import discover2 as d2
+    pointer = d2.find_archive_v2(fund_name, issuer, issuer_domain, asx_code, client=client)
+    # v2 完全空 (无 archive 且无 latest_pdf) 时降级 v1 (可能 v1 web_search 拿到 v2 没找到的 URL)
+    if not pointer.archive_url and not pointer.latest_pdf_url:
+        pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
+
+    # v2 快路: pointer.discovered_pdfs 非空说明抓页时已看见全部 PDF URL, 直接用文件名
+    # 反解 ym (URL slug 里带 "-May-2026" / "202603" 等), 免再让 Gemini 解析一遍归档页
+    # (Yarra 教训: 归档页 HTML 前 80k 字符 Gemini 判月份返 0 links)。反解失败的丢, 但保留
+    # 至少 latest_pdf_url 作为兜底 -- 只要有 1 份能反解出 ym 都强于让 Gemini 二解。
+    if pointer.discovered_pdfs:
+        # 噪声过滤: 归档页里除月报外还常挂 PDS/TMD/FSG/研究报告等静态 PDF, 靠日期匹配后仍
+        # 会混入 (如 "TMD-...-11-October-2023.pdf" 匹到 2023-10)。这些不是月度业绩报告,
+        # 摄取阶段跑 extract 必然 not_found 或 measure 错。用文件名黑名单字面预筛。
+        _NON_MONTHLY_HINTS = re.compile(
+            r"(pds|tmd|target[-_]market|fsg|financial[-_]services|whistle|"
+            r"research|lonsec|morningstar|zenith|genium|platform|"
+            r"fact[-_]sheet|application|additional[-_]information|"
+            r"policy|guide|dictionary|handbook)",
+            re.I,
+        )
+        pairs: List[Tuple[str, str]] = []
+        for u in pointer.discovered_pdfs:
+            fname = u.rsplit("/", 1)[-1]
+            if _NON_MONTHLY_HINTS.search(fname):
+                continue
+            ym = _parse_ym_from_text(fname) or _parse_ym_from_text(u)
+            if ym and _valid_ym(ym):
+                pairs.append((ym, u))
+        if pairs:
+            return (_dedup_links(pairs), pointer, 0)
+        # 全反解失败 -> 单份兜底 (latest_pdf_url 已过 v2 PDF 打样, ym 由 extract 阶段的 PDF 文本决定)
+        if pointer.latest_pdf_url:
+            ym = _parse_ym_from_text(pointer.latest_pdf_url.rsplit("/", 1)[-1]) or ""
+            if ym and _valid_ym(ym):
+                return ([(ym, pointer.latest_pdf_url)], pointer, 0)
+
+    # 无 archive_url: 单份场景, 只有 latest_pdf_url 时直接返
     if not pointer.archive_url:
+        if pointer.latest_pdf_url:
+            ym = _parse_ym_from_text(pointer.latest_pdf_url.rsplit("/", 1)[-1]) or ""
+            if ym and _valid_ym(ym):
+                return ([(ym, pointer.latest_pdf_url)], pointer, 0)
         return ([], pointer, 0)
 
     aggregate: List[Tuple[str, str]] = []

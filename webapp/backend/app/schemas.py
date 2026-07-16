@@ -65,9 +65,13 @@ class PendingReviewResponse(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    """POST /api/ingest/funds 请求体."""
-    fund_id: str
+    """POST /api/ingest/funds 请求体。只有 fund_name 必填；
+
+    其余全选填 -- fund_id 空则由 fund_name slugify；issuer 空则用 fund_name
+    当搜索词交 Gemini 联网自搜。为最小心智负担设计。
+    """
     fund_name: str
+    fund_id: Optional[str] = None
     apir_code: Optional[str] = None
     confirmed_url: Optional[str] = None  # 选填；留空由 Gemini 联网自搜归档
     issuer: Optional[str] = None

@@ -174,7 +174,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         if not req.confirmed_url and len(links) < 24:
             _job_log(jid, "L3 fundmonitors: probing ...")
             try:
-                l3_result = fm_mod.probe(req.fund_name)
+                l3_result = fm_mod.probe(req.fund_name, fund_id=req.fund_id, db_conn=conn)
             except Exception as e:  # noqa: BLE001
                 l3_result = {"status": f"exception:{type(e).__name__}"}
             _job_log(jid, f"L3 fundmonitors: status={l3_result.get('status')}, "
@@ -331,8 +331,9 @@ def approve_pending(review_id: int):
 
     返回 info["action"]:
       - 'approved': pending 值已入 monthly_returns, 触发指标重算
-      - 'skipped_l3_covered': 该月已由 L3 fundmonitors 表覆盖, pending 未采纳
-        (标 rejected), monthly_returns 不动, 不重算
+      - 'skipped_authoritative_covered': 该月已由权威源 (L3 fundmonitors 表 或 L1 LLM
+        PDF 通路) 覆盖, pending 未采纳 (标 rejected), monthly_returns 不动, 不重算。
+        额外附 existing_tag 告诉前端是被哪种权威源挡的。
     """
     from llm_ingest import store as store_mod
     conn = store_mod.open_conn()
@@ -342,11 +343,12 @@ def approve_pending(review_id: int):
         conn.close()
         raise HTTPException(status_code=404, detail=f"pending id={review_id} 不存在")
     conn.close()
-    # L3 已覆盖场景: 前端展示"未采纳"提示, 不重算
-    if info.get("action") == "skipped_l3_covered":
+    # 权威源已覆盖场景: 前端展示"未采纳"提示, 不重算
+    if info.get("action") == "skipped_authoritative_covered":
         return {"ok": True, "fund_id": info["fund_id"], "date": info["date"],
-                "action": "skipped_l3_covered",
-                "message": "该月已由 L3 fundmonitors 表覆盖, pending 未采纳"}
+                "action": "skipped_authoritative_covered",
+                "existing_tag": info["existing_tag"],
+                "message": f"该月已由权威源 ({info['existing_tag']}) 覆盖, pending 未采纳"}
     # 触发指标重算
     try:
         from app.database import SessionLocal

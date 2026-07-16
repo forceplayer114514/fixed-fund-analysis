@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+APIR_PATTERN = re.compile(r"^[A-Z]{3}\d{4}AU$")
 
 
 def _require_write_token() -> None:
@@ -175,8 +178,14 @@ def create_fund(
     inception_assumed=1 并以全链最早可得月作下界(见 strategies expected_range)。
     extractor_verified:A4 准入标记。新基金默认 0(generic 首批全进 pending,
     人工 verify_extractor 后标 1,update 侧增量才直通)。
+    apir_code 非空时须匹配 ^[A-Z]{3}\\d{4}AU$(3位大写字母+4位数字+AU),
+    格式不合规抛 ValueError;None/空串视为无 APIR(Stake/MXT 等)放行。
     """
     _require_write_token()
+    if apir_code and not APIR_PATTERN.match(apir_code):
+        raise ValueError(
+            f"apir_code 格式不合规: {apir_code!r}(须匹配 ^[A-Z]{{3}}\\d{{4}}AU$)"
+        )
     conn.execute(
         """
         INSERT INTO funds

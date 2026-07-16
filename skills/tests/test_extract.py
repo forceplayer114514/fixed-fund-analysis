@@ -160,6 +160,7 @@ def test_parse_pdf_text_with_test_pdf():
     fitz = pytest.importorskip("fitz")
     expected_text = "Hello World Monthly Report Test PDF"
     tmp_path = tempfile.mktemp(suffix=".pdf")
+    txt_cache_path = os.path.splitext(tmp_path)[0] + ".txt"
     try:
         doc = fitz.open()
         page = doc.new_page()
@@ -173,6 +174,8 @@ def test_parse_pdf_text_with_test_pdf():
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+        if os.path.exists(txt_cache_path):
+            os.remove(txt_cache_path)
 
 
 def test_parse_pdf_text_max_pages(tmp_path):
@@ -196,6 +199,71 @@ def test_parse_pdf_text_max_pages(tmp_path):
     assert "PAGE_0_MARKER" in all_pages
     assert "PAGE_1_MARKER" in all_pages
     assert "PAGE_2_MARKER" in all_pages
+
+
+def _make_test_pdf(path: str, text: str) -> None:
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 72), text, fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
+def test_parse_pdf_text_writes_txt_cache(tmp_path):
+    """提取后应在同目录落盘同名 .txt，首行为页数标记。"""
+    pytest.importorskip("fitz")
+    pdf_path = str(tmp_path / "2024-01.pdf")
+    _make_test_pdf(pdf_path, "CACHE_MARKER_TEXT")
+
+    result = parse_pdf_text(pdf_path)
+    assert "CACHE_MARKER_TEXT" in result
+
+    txt_path = str(tmp_path / "2024-01.txt")
+    assert os.path.exists(txt_path)
+    with open(txt_path, "r", encoding="utf-8") as f:
+        header = f.readline().strip()
+        cached_text = f.read()
+    assert header == "#PAGES:ALL"
+    assert cached_text == result
+
+
+def test_parse_pdf_text_cache_hit_skips_reparse(tmp_path):
+    """.txt 缓存 mtime >= pdf mtime 时，即使 pdf 内容已变也应返回缓存旧文本。"""
+    pytest.importorskip("fitz")
+    pdf_path = str(tmp_path / "2024-02.pdf")
+    _make_test_pdf(pdf_path, "VERSION_ONE_MARKER")
+
+    first = parse_pdf_text(pdf_path)
+    assert "VERSION_ONE_MARKER" in first
+    original_pdf_mtime = os.path.getmtime(pdf_path)
+
+    # 覆盖 pdf 内容为新版本，但把 mtime 强制拨回原值（模拟"未变化"场景）
+    _make_test_pdf(pdf_path, "VERSION_TWO_MARKER")
+    os.utime(pdf_path, (original_pdf_mtime, original_pdf_mtime))
+
+    second = parse_pdf_text(pdf_path)
+    assert "VERSION_ONE_MARKER" in second
+    assert "VERSION_TWO_MARKER" not in second
+
+
+def test_parse_pdf_text_mtime_invalidates_cache(tmp_path):
+    """pdf mtime 晚于 .txt 缓存时应重新解析，返回新内容。"""
+    pytest.importorskip("fitz")
+    pdf_path = str(tmp_path / "2024-03.pdf")
+    _make_test_pdf(pdf_path, "VERSION_ONE_MARKER")
+
+    first = parse_pdf_text(pdf_path)
+    assert "VERSION_ONE_MARKER" in first
+
+    # 覆盖 pdf 内容为新版本，mtime 拨到明显更晚 -> 缓存应失效
+    _make_test_pdf(pdf_path, "VERSION_TWO_MARKER")
+    future = os.path.getmtime(pdf_path) + 100
+    os.utime(pdf_path, (future, future))
+
+    second = parse_pdf_text(pdf_path)
+    assert "VERSION_TWO_MARKER" in second
+    assert "VERSION_ONE_MARKER" not in second
 
 
 from lib.extract import (

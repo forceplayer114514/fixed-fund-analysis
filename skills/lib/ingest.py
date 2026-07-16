@@ -27,6 +27,7 @@ from lib.db import (
     get_monthly_returns,
     list_confirmed_gaps,
     list_stale_pending_reviews,
+    promote_pending,
     record_confirmed_gap,
     remove_confirmed_gap,
     upsert_monthly_return,
@@ -1323,6 +1324,14 @@ def _cli() -> int:
                           help="人工审核通过 generic 首批后:标 extractor_verified=1 + 批量 promote generic_first_use pending")
     ve_p.add_argument("--fund-id", required=True)
     ve_p.add_argument("--db-path", default=None)
+    pp_p = sub.add_parser("promote-pending",
+                          help="人工审核通过单条 pending_review:入 monthly_returns(同一 upsert 路径,含 NAV 重算)")
+    pp_p.add_argument("--review-id", required=True, type=int)
+    pp_p.add_argument("--db-path", default=None)
+    rg_p = sub.add_parser("regress",
+                          help="golden 回归:pdf_cache 全量缓存重跑 solver,与库内已入库值 diff(只读,不发网络请求)")
+    rg_p.add_argument("--fund-id", default=None, help="不传则跑全库")
+    rg_p.add_argument("--db-path", default=None)
     args = parser.parse_args()
 
     if args.write_token is not None:
@@ -1410,6 +1419,25 @@ def _cli() -> int:
             conn.close()
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
+    if args.command == "promote-pending":
+        conn = get_connection(args.db_path)
+        try:
+            ensure_tables(conn)
+            result = promote_pending(conn, args.review_id)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    if args.command == "regress":
+        from lib.regress import run_regression
+        conn = get_connection(args.db_path)
+        try:
+            ensure_tables(conn)
+            report = run_regression(conn, fund_id=args.fund_id)
+        finally:
+            conn.close()
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        return 1 if report.has_regression else 0
     return 1
 
 

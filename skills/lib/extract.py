@@ -224,6 +224,12 @@ def download_file(url: str, filepath: str, headers: Optional[dict] = None) -> No
         f.write(resp.content)
 
 
+def _text_cache_path(pdf_path: str) -> str:
+    """PDF 同目录同名 .txt 缓存路径（如 2024-01.pdf -> 2024-01.txt）。"""
+    base, _ext = os.path.splitext(pdf_path)
+    return base + ".txt"
+
+
 def parse_pdf_text(pdf_path: str, max_pages: Optional[int] = None) -> str:
     """用 PyMuPDF 打开 PDF，逐页提取文本并合并返回。
 
@@ -231,11 +237,27 @@ def parse_pdf_text(pdf_path: str, max_pages: Optional[int] = None) -> str:
     提取通用部分（打开、逐页 get_text、合并），**去除所有基金特定逻辑**
     （日期正则、收益提取、表块坐标过滤等）。max_pages 限制读取页数；为 None
     时读全部页。返回原始合并文本（不在此处做 clean_spacing，调用方可按需调用）。
+
+    文本缓存：结果落盘为 pdf_path 同目录同名 .txt，首行写 `#PAGES:<n|ALL>`
+    标记本次读取的页数上限（限页文本与全文不可混用）。命中条件：.txt 存在、
+    mtime >= pdf mtime、且页数标记与本次调用一致 -> 直接读文本跳过 fitz 解析
+    （诊断/回归批量重跑时免重复解析）。PDF 被删除重下后 mtime 更新，旧 .txt
+    自然失效，无需显式清理。写缓存失败（如只读文件系统）不影响主流程返回值。
     """
     if fitz is None:  # pragma: no cover - 环境缺 PyMuPDF 时
         raise ImportError(
             "PyMuPDF (fitz) is not installed; run `pip3 install PyMuPDF`."
         )
+
+    page_marker = str(max_pages) if max_pages is not None else "ALL"
+    cache_path = _text_cache_path(pdf_path)
+    pdf_mtime = os.path.getmtime(pdf_path)
+
+    if os.path.exists(cache_path) and os.path.getmtime(cache_path) >= pdf_mtime:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            if header.rstrip("\n") == f"#PAGES:{page_marker}":
+                return f.read()
 
     text = ""
     with fitz.open(pdf_path) as doc:
@@ -244,6 +266,14 @@ def parse_pdf_text(pdf_path: str, max_pages: Optional[int] = None) -> str:
         )
         for i in range(pages_to_read):
             text += doc[i].get_text()
+
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(f"#PAGES:{page_marker}\n")
+            f.write(text)
+    except OSError:
+        pass
+
     return text
 
 

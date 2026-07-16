@@ -126,10 +126,10 @@ export interface FundCreatePayload {
   max_pdf_pages?: number | null
 }
 
-/** LLM 摄取请求体 (POST /api/ingest/funds). confirmed_url 选填 (留空由 Gemini 自搜) */
+/** LLM 摄取请求体 (POST /api/ingest/funds). 只有 fund_name 必填; 其余全选填。 */
 export interface IngestRequest {
-  fund_id: string
   fund_name: string
+  fund_id?: string | null
   apir_code?: string | null
   confirmed_url?: string | null
   issuer?: string | null

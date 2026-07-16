@@ -27,6 +27,7 @@ export default function FundManagement() {
     asx_code: '',
   })
   const [addError, setAddError] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   // job 状态
   const [job, setJob] = useState<IngestJob | null>(null)
@@ -105,12 +106,8 @@ export default function FundManagement() {
 
   const handleAdd = async () => {
     setAddError('')
-    if (!addForm.fund_id || !addForm.fund_name) {
-      setAddError('fund_id / 基金名 必填')
-      return
-    }
-    if (!addForm.confirmed_url && !addForm.issuer) {
-      setAddError('至少给"归档页 URL"或"发行商" — 后者会让 Gemini 联网自搜')
+    if (!addForm.fund_name.trim()) {
+      setAddError('基金名 必填 (其余均选填)')
       return
     }
     if (addForm.apir_code && !/^[A-Z]{3}\d{4}AU$/.test(addForm.apir_code)) {
@@ -120,8 +117,8 @@ export default function FundManagement() {
     setSubmitting(true)
     try {
       const j = await api.startIngest({
-        fund_id: addForm.fund_id,
         fund_name: addForm.fund_name,
+        fund_id: addForm.fund_id || null,
         apir_code: addForm.apir_code || null,
         confirmed_url: addForm.confirmed_url || null,
         issuer: addForm.issuer || null,
@@ -138,6 +135,7 @@ export default function FundManagement() {
   const closeModal = () => {
     setShowAdd(false)
     setJob(null)
+    setShowAdvanced(false)
     setAddForm({
       fund_id: '', fund_name: '', apir_code: '',
       confirmed_url: '', issuer: '', issuer_domain: '', asx_code: '',
@@ -254,68 +252,90 @@ export default function FundManagement() {
             ) : (
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-gray-500 block mb-1">fund_id *</label>
-                  <input
-                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                    value={addForm.fund_id}
-                    onChange={e => setAddForm({ ...addForm, fund_id: e.target.value })}
-                    placeholder="如 bentham_global_income_fund"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">基金名称 *</label>
+                  <label className="text-xs text-gray-500 block mb-1">
+                    基金名 <span className="text-red-500">*</span>
+                    <span className="text-gray-400 ml-1">(唯一必填)</span>
+                  </label>
                   <input
                     className="w-full text-sm border border-gray-200 rounded px-3 py-2"
                     value={addForm.fund_name}
                     onChange={e => setAddForm({ ...addForm, fund_name: e.target.value })}
                     placeholder="如 Bentham Global Income Fund"
                   />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">APIR 代码</label>
-                  <input
-                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                    value={addForm.apir_code}
-                    onChange={e => setAddForm({ ...addForm, apir_code: e.target.value })}
-                    placeholder="如 ETL5010AU（选填）"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500 block mb-1">
-                    归档页 URL <span className="text-gray-400">(选填 — 留空由 Gemini 自搜)</span>
-                  </label>
-                  <input
-                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                    value={addForm.confirmed_url}
-                    onChange={e => setAddForm({ ...addForm, confirmed_url: e.target.value })}
-                    placeholder="https://.../monthly-reports"
-                  />
-                </div>
-                <div className="border-t border-gray-100 pt-3">
-                  <div className="text-xs text-gray-500 mb-2">
-                    ↑ 留空则用下列信息让 Gemini 联网找归档页:
-                  </div>
-                  <div className="space-y-2">
-                    <input
-                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                      value={addForm.issuer}
-                      onChange={e => setAddForm({ ...addForm, issuer: e.target.value })}
-                      placeholder="发行商 (如 Bentham Asset Management)"
-                    />
-                    <input
-                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                      value={addForm.issuer_domain}
-                      onChange={e => setAddForm({ ...addForm, issuer_domain: e.target.value })}
-                      placeholder="发行商官网域名 (如 benthamam.com，选填)"
-                    />
-                    <input
-                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                      value={addForm.asx_code}
-                      onChange={e => setAddForm({ ...addForm, asx_code: e.target.value })}
-                      placeholder="ASX 代码 (如 MXT，选填)"
-                    />
+                  <div className="text-xs text-gray-400 mt-1">
+                    提交后 Gemini 会自动联网找归档页并抓月度数据。
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  className="text-xs text-gray-500 hover:text-gray-700 underline"
+                  onClick={() => setShowAdvanced(v => !v)}
+                >
+                  {showAdvanced ? '▼' : '▶'} 高级选项 (全部选填, 用于加速/纠错定位)
+                </button>
+
+                {showAdvanced && (
+                  <div className="space-y-3 border-l-2 border-gray-100 pl-3">
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">
+                        fund_id <span className="text-gray-400">(选填 -- 留空由基金名自动生成 slug)</span>
+                      </label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.fund_id}
+                        onChange={e => setAddForm({ ...addForm, fund_id: e.target.value })}
+                        placeholder="如 bentham_global_income_fund"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">APIR 代码</label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.apir_code}
+                        onChange={e => setAddForm({ ...addForm, apir_code: e.target.value })}
+                        placeholder="如 ETL5010AU"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">归档页 URL (跳过搜索)</label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.confirmed_url}
+                        onChange={e => setAddForm({ ...addForm, confirmed_url: e.target.value })}
+                        placeholder="https://.../monthly-reports"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">发行商 (加速搜索)</label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.issuer}
+                        onChange={e => setAddForm({ ...addForm, issuer: e.target.value })}
+                        placeholder="如 Bentham Asset Management"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">发行商官网域名</label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.issuer_domain}
+                        onChange={e => setAddForm({ ...addForm, issuer_domain: e.target.value })}
+                        placeholder="如 benthamam.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500 block mb-1">ASX 代码</label>
+                      <input
+                        className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                        value={addForm.asx_code}
+                        onChange={e => setAddForm({ ...addForm, asx_code: e.target.value })}
+                        placeholder="如 MXT"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 {addError && <div className="text-xs text-red-500">{addError}</div>}
                 <button
                   className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e] disabled:opacity-50"
