@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from . import extract as ex_mod
-from .client import Client
+from .client import Client, resolve_sources
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 CDX_SNAPSHOTS_PER_MONTH = 3
@@ -43,6 +43,8 @@ class ArchivePointer:
     issuer_domain_confirmed: Optional[str]
     evidence: str
     raw: Dict[str, Any] = field(default_factory=dict)
+    search_sources: List[str] = field(default_factory=list)  # grounding 展开后的真实 URL
+    search_queries: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -193,6 +195,72 @@ def _parse_json_response(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _same_host(a: str, b: str) -> bool:
+    """比域名, 忽略 www./协议差异."""
+    from urllib.parse import urlparse
+    ha = urlparse(a).netloc.lower().lstrip("www.").removeprefix("www.")
+    hb = urlparse(b).netloc.lower().lstrip("www.").removeprefix("www.")
+    return bool(ha) and ha == hb
+
+
+def _validate_url_in_sources(url: Optional[str], sources: List[str]) -> bool:
+    """URL 的域必须出现在 sources 里 (即真被搜索命中过, 而非模型幻觉)."""
+    if not url:
+        return False
+    return any(_same_host(url, s) for s in sources)
+
+
+def _pick_issuer_domain(sources: List[str], issuer: str, fund_name: str) -> Optional[str]:
+    """从 sources 里挑最像发行商官网的域. 启发式: 域名含发行商关键词, 排聚合站."""
+    from urllib.parse import urlparse
+    tokens = re.findall(r"[a-z]+", (issuer + " " + fund_name).lower())
+    tokens = [t for t in tokens if len(t) >= 4 and t not in {"fund", "capital", "management", "australia", "trust", "income", "asset", "monthly"}]
+    excludes = {"morningstar.com", "morningstar.com.au", "lonsec.com.au", "fundmonitors.com",
+                "asx.com.au", "yahoo.com", "reuters.com", "bloomberg.com",
+                "linkedin.com", "wikipedia.org", "google.com", "youtube.com"}
+    def _host(u: str) -> str:
+        h = urlparse(u).netloc.lower()
+        if h.startswith("www."):
+            h = h[4:]
+        return h
+    for s in sources:
+        host = _host(s)
+        if not host or host in excludes:
+            continue
+        if any(tok in host for tok in tokens):
+            return f"https://{host}"
+    for s in sources:
+        host = _host(s)
+        if host and host not in excludes:
+            return f"https://{host}"
+    return None
+
+
+def _search_and_resolve(
+    client: Client,
+    query_prompt: str,
+    max_uses: int = 6,
+) -> Tuple[List[str], List[str]]:
+    """一次搜索调用 -> (真实 URL, queries). 短明 prompt 强触发工具."""
+    resp = client.messages_with_search(query_prompt, max_tokens=2048, max_uses=max_uses)
+    reals = resolve_sources(resp.search_sources) if resp.search_sources else []
+    return reals, list(resp.search_queries)
+
+
+def _search_with_retry(
+    client: Client, prompts: List[str], max_tries: int = 3,
+) -> Tuple[List[str], List[str]]:
+    """轮流试多组 prompt, 拿到 sources 立即返回. sub2api web_search 触发是概率性的."""
+    all_queries: List[str] = []
+    for prompt in prompts:
+        for _ in range(max_tries):
+            sources, queries = _search_and_resolve(client, prompt)
+            all_queries.extend(queries)
+            if sources:
+                return sources, all_queries
+    return [], all_queries
+
+
 def find_archive_via_search(
     fund_name: str,
     issuer: str,
@@ -201,29 +269,100 @@ def find_archive_via_search(
     *,
     client: Optional[Client] = None,
 ) -> ArchivePointer:
-    """L1 第一步: Gemini 联网找归档页 URL. 返回 ArchivePointer.
+    """L1 阶段 A (搜索) + 阶段 B (判 JSON).
 
-    搜索会降级到 gemini-2.5-flash (中转限制). 不带 PDF, 纯文本+web_search 工具.
+    sub2api 的 web_search 触发是概率性的 — 用多个显式子问 + [SOURCE] 标记 prompt
+    实测触发率高; 触发失败时重试并换 prompt 模板 (`_search_with_retry`)。
+    信 grounding sources 展开后的 URL, 不信文字回答里生成的 URL (幻觉高发)。
     """
     if client is None:
         client = Client()
-    tmpl = _load_prompt("find_archive.md")
-    prompt = (
-        tmpl.replace("{fund_name}", fund_name)
-            .replace("{issuer}", issuer)
-            .replace("{issuer_domain}", issuer_domain or "")
-            .replace("{asx_code}", asx_code or "")
-    )
-    resp = client.messages_with_search(prompt, max_tokens=1024, max_uses=5)
-    obj = _parse_json_response(resp.text) or {}
+
+    # --- 阶段 A: 搜索 (强触发 prompt 变体) ---
+    domain_hint = f" 已知 issuer_domain 提示: {issuer_domain}." if issuer_domain else ""
+    asx_hint = f" ASX 代码: {asx_code}." if asx_code else ""
+    p_variants = [
+        (
+            f"联网搜索: {fund_name} monthly report site:au 官网归档页\n"
+            f"联网搜索后回答:\n"
+            f"1. {issuer} 的现役官网域名是?\n"
+            f"2. {fund_name} 的月报页面 URL 是?\n"
+            f"3. 该页是列多个历史月份的归档页, 还是只挂最新一份?\n"
+            f"把找到的 URL 列出来, 每个 URL 前标 [SOURCE]。{domain_hint}{asx_hint}"
+        ),
+        (
+            f"联网搜索: '{fund_name}' fund monthly report factsheet PDF\n"
+            f"联网搜索: '{issuer}' official website\n"
+            f"回答:\n"
+            f"1. 官网真实域名 (可能与基金名不同)?\n"
+            f"2. 有归档页列多月吗?\n"
+            f"每个引用 URL 前标 [SOURCE]。"
+        ),
+    ]
+    real_sources, queries = _search_with_retry(client, p_variants, max_tries=2)
+
+    # --- 阶段 B: 让 Gemini 读 sources 判 JSON ---
+    domain = _pick_issuer_domain(real_sources, issuer, fund_name) if real_sources else issuer_domain
+    ptr_json: Dict[str, Any] = {}
+    if real_sources:
+        tmpl = _load_prompt("find_archive.md")
+        prompt = (
+            tmpl.replace("{fund_name}", fund_name)
+                .replace("{issuer}", issuer)
+                .replace("{issuer_domain}", domain or issuer_domain or "")
+                .replace("{asx_code}", asx_code or "")
+        )
+        prompt += "\n\n---搜索结果 (真实展开后 URL, 只从中挑, 不许生成新域名) ---\n"
+        prompt += "\n".join(f"- {u}" for u in real_sources)
+        resp = client.messages(prompt, max_tokens=1024)
+        ptr_json = _parse_json_response(resp.text) or {}
+
+    llm_archive = ptr_json.get("archive_url")
+    llm_latest = ptr_json.get("latest_pdf_url")
+    llm_domain = ptr_json.get("issuer_domain_confirmed") or domain
+
+    # 交叉验证仍要跑 (Gemini 会不听话即使 sources 摆在面前)
+    archive_url = llm_archive if _validate_url_in_sources(llm_archive, real_sources) else None
+    latest_pdf_url = llm_latest if _validate_url_in_sources(llm_latest, real_sources) else None
+    final_domain = llm_domain if _validate_url_in_sources(llm_domain, real_sources) else domain
+
+    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的
+    if not archive_url and not latest_pdf_url and real_sources:
+        # 优先 PDF
+        for s in real_sources:
+            if s.lower().endswith(".pdf"):
+                latest_pdf_url = s
+                break
+        # 其次 domain 下, path 匹配基金关键词的
+        if not latest_pdf_url and final_domain:
+            fund_tokens = re.findall(r"[a-z]+", fund_name.lower())
+            fund_tokens = [t for t in fund_tokens if len(t) >= 4 and t not in {"fund", "trust", "capital"}]
+            best_score = -1
+            best_url = None
+            for s in real_sources:
+                if not _same_host(s, final_domain):
+                    continue
+                from urllib.parse import urlparse
+                path_low = urlparse(s).path.lower()
+                score = sum(1 for t in fund_tokens if t in path_low)
+                if any(x in path_low for x in ("/contact", "/about", "/careers", "/legal", "/privacy", "/insights")):
+                    score -= 2
+                if score > best_score:
+                    best_score = score
+                    best_url = s
+            if best_url:
+                latest_pdf_url = best_url
+
     return ArchivePointer(
-        archive_url=obj.get("archive_url"),
-        pagination_param=obj.get("pagination_param"),
-        no_archive=bool(obj.get("no_archive")),
-        latest_pdf_url=obj.get("latest_pdf_url"),
-        issuer_domain_confirmed=obj.get("issuer_domain_confirmed"),
-        evidence=str(obj.get("evidence") or ""),
-        raw=obj,
+        archive_url=archive_url,
+        pagination_param=ptr_json.get("pagination_param"),
+        no_archive=bool(ptr_json.get("no_archive")) or (archive_url is None),
+        latest_pdf_url=latest_pdf_url,
+        issuer_domain_confirmed=final_domain,
+        evidence=str(ptr_json.get("evidence") or ""),
+        raw=ptr_json,
+        search_sources=real_sources,
+        search_queries=queries,
     )
 
 

@@ -10,8 +10,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -63,6 +64,8 @@ class Response:
     model: str
     raw: Dict[str, Any]
     latency_s: float
+    search_sources: List[str] = field(default_factory=list)
+    search_queries: List[str] = field(default_factory=list)
 
 
 class ClientError(RuntimeError):
@@ -97,12 +100,16 @@ class Client:
                     continue
                 data = r.json()
                 texts = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
+                full_text = "\n".join(texts)
+                sources, queries = _parse_grounding(full_text)
                 return Response(
-                    text="\n".join(texts),
+                    text=full_text,
                     usage=data.get("usage", {}),
                     model=data.get("model", ""),
                     raw=data,
                     latency_s=latency,
+                    search_sources=sources,
+                    search_queries=queries,
                 )
             except (requests.Timeout, requests.ConnectionError) as e:
                 last_err = e
@@ -161,3 +168,56 @@ class Client:
             "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
         }
         return self._post(payload)
+
+
+# ---------- grounding 解析 (sub2api 把 Gemini groundingMetadata 拍成 text) ----------
+
+# text 里附加块形如:
+#   ---
+#   Web search queries: q1, q2, q3
+#
+#   Sources:
+#   [1] [domain.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+#   [2] [other.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+
+_SRC_LINE = re.compile(r"\[\d+\]\s*\[([^\]]+)\]\(([^)]+)\)")
+_QRY_LINE = re.compile(r"Web search queries:\s*(.+)")
+
+
+def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
+    """从 sub2api 返回文本里抠 grounding sources + queries."""
+    sources: List[str] = []
+    queries: List[str] = []
+    for m in _SRC_LINE.finditer(text):
+        url = m.group(2).strip()
+        if url and url not in sources:
+            sources.append(url)
+    qm = _QRY_LINE.search(text)
+    if qm:
+        queries = [q.strip() for q in qm.group(1).split(",") if q.strip()]
+    return sources, queries
+
+
+def follow_redirect(url: str, timeout: int = 20) -> Optional[str]:
+    """跟随 vertexaisearch grounding-api-redirect 拿到真实 URL.
+
+    真站可能 403 (直接抓时反爬), 但重定向 chain 走完前 requests 会记 r.url.
+    """
+    try:
+        r = requests.get(
+            url, allow_redirects=True, timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        return r.url
+    except Exception:
+        return None
+
+
+def resolve_sources(sources: List[str], timeout: int = 20) -> List[str]:
+    """批量展开 grounding redirect. 保留原顺序, 去重."""
+    seen: List[str] = []
+    for s in sources:
+        real = follow_redirect(s, timeout=timeout) if "grounding-api-redirect" in s else s
+        if real and real not in seen:
+            seen.append(real)
+    return seen
