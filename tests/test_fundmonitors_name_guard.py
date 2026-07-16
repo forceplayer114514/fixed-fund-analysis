@@ -107,7 +107,7 @@ def test_name_match_share_class_variant() -> None:
 
 
 def test_name_match_partial_miss() -> None:
-    md = "Bentham Global Fund report (缺 income 一 token)"
+    md = "Bentham Global Fund monthly report only"
     matched, reason = fm._name_match("Bentham Global Income Fund", md)
     assert matched is False
     assert "income" in reason
