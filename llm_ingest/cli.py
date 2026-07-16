@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import discover as disc_mod
 from . import extract as ex_mod
 from . import pdf as pdf_mod
 from . import verify
@@ -233,6 +234,44 @@ def _report_to_json(r: Report) -> Dict[str, Any]:
     }
 
 
+def cmd_discover(args: argparse.Namespace) -> int:
+    r = disc_mod.run_discovery(
+        fund_name=args.fund_name,
+        issuer=args.issuer,
+        fund_id=args.fund_id,
+        issuer_domain=args.issuer_domain,
+        asx_code=args.asx_code,
+        inception_ym=args.inception_ym,
+        latest_ym=args.latest_ym,
+    )
+    payload = {
+        "fund_id": r.fund_id,
+        "links": r.links,
+        "per_level_contribution": r.per_level_contribution,
+        "per_level_source": r.per_level_source,
+        "obtained": r.obtained,
+        "gaps": r.gaps,
+        "unparseable_count": r.unparseable_count,
+        "archive_pointer": (
+            asdict(r.archive_pointer) if r.archive_pointer else None
+        ),
+        "evidence_log": r.evidence_log,
+    }
+    Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(f"\n=== discovery summary ===")
+    print(f"fund_id: {r.fund_id}")
+    print(f"links found: {len(r.links)}")
+    print(f"per_level: {r.per_level_contribution}")
+    print(f"gaps: {len(r.gaps)}")
+    if r.archive_pointer:
+        print(f"archive_url: {r.archive_pointer.archive_url}")
+        print(f"no_archive: {r.archive_pointer.no_archive}")
+        print(f"latest_pdf_url: {r.archive_pointer.latest_pdf_url}")
+    print(f"unparseable: {r.unparseable_count}")
+    print(f"report -> {args.out}")
+    return 0 if r.links else 2
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     r = run_compare(args.fund_id, limit=args.limit, max_pages=args.max_pages, concurrency=args.concurrency)
     Path(args.out).write_text(json.dumps(_report_to_json(r), ensure_ascii=False, indent=2))
@@ -260,6 +299,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--max-pages", type=int, default=2)
     c.add_argument("--concurrency", type=int, default=1, help="并发 extract 数, 1=串行")
     c.set_defaults(func=cmd_compare)
+
+    d = sub.add_parser("discover", help="find archive PDFs via L1 (Gemini web search) + L2 (wayback)")
+    d.add_argument("--fund-name", required=True, help="e.g. 'Gryphon Capital Income Trust'")
+    d.add_argument("--issuer", required=True, help="e.g. 'Gryphon Capital Investments'")
+    d.add_argument("--fund-id", required=True, help="internal id, e.g. gryphon_capital_income")
+    d.add_argument("--issuer-domain", default=None, help="known official domain, may be empty")
+    d.add_argument("--asx-code", default=None)
+    d.add_argument("--inception-ym", default=None, help="YYYY-MM (若已知), 未给则从 L1 结果反推")
+    d.add_argument("--latest-ym", default=None, help="YYYY-MM, 默认当前-2月")
+    d.add_argument("--out", default="discovery.json")
+    d.set_defaults(func=cmd_discover)
 
     args = p.parse_args(argv)
     return args.func(args)
