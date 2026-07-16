@@ -9,7 +9,7 @@ schema 已由 skills/lib/db.py ensure_tables 建好, 本模块不重复建表 (�
   任一未过 / not_found=True / parse_error -> pending_review, candidates_json 存原始响应 + 四 gate reason
   三级 fallback 穷尽仍 not_found -> confirmed_gaps
 
-date 存 "YYYY-MM-01" (schema TEXT YYYY-MM-DD; skills 惯例月初).
+date 存 "YYYY-MM-末日" (schema TEXT YYYY-MM-DD; skills 惯例月末, 与 L3 表格一致)。
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .extract import Extraction
 from .verify import (
@@ -199,6 +199,54 @@ def _recompute_nav(conn: sqlite3.Connection, fund_id: str) -> None:
     conn.commit()
 
 
+def write_table_records(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    records: List[Tuple[str, float]],
+    source_url: str,
+    pattern_tag: str = "fundmonitors_table",
+) -> int:
+    """L3 通路 (表格源) 直入 monthly_returns。
+
+    records 已过 gate_check_table (缺口/反捏造/字段类型/YTD 复利), 无 per-month
+    quote 与 rolling, 因此:
+      - source_quote = f"L3 fundmonitors table: {source_url}"  (可溯)
+      - verify_windows = 0 (无 rolling 交叉, 但 YTD 已过, 表 gate 已过)
+      - pattern_tag = 'fundmonitors_table' 标记非 LLM 提取, 与 PDF 通路区分
+
+    返回入库行数。走完统一 recompute_nav。
+    """
+    n = 0
+    for date, net_ret in records:
+        conn.execute(
+            """
+            INSERT INTO monthly_returns
+                (fund_id, date, net_return, nav, verify_windows, source_quote, pattern_tag)
+            VALUES (?, ?, ?, 1.0, 0, ?, ?)
+            ON CONFLICT(fund_id, date) DO UPDATE SET
+                net_return = excluded.net_return,
+                verify_windows = COALESCE(excluded.verify_windows, monthly_returns.verify_windows),
+                source_quote = COALESCE(excluded.source_quote, monthly_returns.source_quote),
+                pattern_tag = COALESCE(excluded.pattern_tag, monthly_returns.pattern_tag)
+            """,
+            (fund_id, date, net_ret,
+             f"L3 fundmonitors table: {source_url}", pattern_tag),
+        )
+        n += 1
+    # 清除同月 confirmed_gaps: 该月既然 L3 补齐, 就不再是缺口, 免前端读 gap 表标红
+    if records:
+        months = tuple(sorted({d[:7] for d, _ in records}))
+        placeholders = ",".join("?" * len(months))
+        conn.execute(
+            f"DELETE FROM confirmed_gaps WHERE fund_id=? AND missing_month IN ({placeholders})",
+            (fund_id, *months),
+        )
+    conn.commit()
+    _recompute_nav(conn, fund_id)
+    return n
+
+
 # ---------- pending_review ----------
 
 def _add_pending(
@@ -263,8 +311,17 @@ class WriteDecision:
 
 
 def _ym_to_date(ym: str) -> str:
-    """'YYYY-MM' -> 'YYYY-MM-01' (schema 要求 YYYY-MM-DD, 月初惯例)."""
-    return f"{ym}-01"
+    """'YYYY-MM' -> 'YYYY-MM-末日' (schema TEXT YYYY-MM-DD; skills 惯例月末)。
+
+    与 L3 fundmonitors 表格通路的 `_get_last_day_of_month` 一致, 避免同一月既
+    有 '-01' 又有 '-31' 两行, 前端会误判缺口。既有 skills 数据全部月末格式,
+    llm_ingest 早期注释误写月初已修正。
+    """
+    import datetime as _dt
+    y, m = int(ym[:4]), int(ym[5:7])
+    if m == 12:
+        return f"{y}-12-31"
+    return (_dt.date(y, m + 1, 1) - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def write_extraction(
@@ -410,15 +467,41 @@ def list_pending(
 
 def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, str]:
     """人工审核通过: pending 行 net_return 走 upsert_monthly_return (含 NAV 重算),
-    并标 review_state='approved'. 返回 {fund_id, date}."""
+    并标 review_state='approved'. 返回 {fund_id, date, action}.
+
+    Guard: 若目标 (fund_id, date) 已被更权威源覆盖 (pattern_tag='fundmonitors_table'
+    L3 表格通路), 拒绝覆盖 -- L3 是逐月表源, 无 quote 但已过 4 项 gate (缺口/反捏造/
+    字段类型/YTD 复利), 优于单份 PDF 抽取。此处只把 pending 标 'rejected' 附因由,
+    monthly_returns 不动, action 返 'skipped_l3_covered'。
+    KKR 现场教训: skills 旧候选 pending 与 L3 值不同 -> approve 会污染 monthly_returns。
+    """
     row = conn.execute(
         "SELECT fund_id, date, net_return, source_quote FROM pending_review WHERE id=?",
         (review_id,),
     ).fetchone()
     if row is None:
         raise KeyError(f"pending_review id={review_id} 不存在")
+    fund_id = row["fund_id"]
+    date = row["date"]
+    # 检查同月是否已有 L3 覆盖
+    existing = conn.execute(
+        "SELECT pattern_tag, net_return FROM monthly_returns WHERE fund_id=? AND date=?",
+        (fund_id, date),
+    ).fetchone()
+    if existing and existing["pattern_tag"] == "fundmonitors_table":
+        conn.execute(
+            """UPDATE pending_review
+               SET review_state='rejected',
+                   review_reason='skipped_l3_covered: L3 fundmonitors 表值 '
+                                 || CAST(? AS TEXT) || ' 已入库, pending 值 '
+                                 || CAST(? AS TEXT) || ' 未采纳'
+               WHERE id=?""",
+            (existing["net_return"], row["net_return"], review_id),
+        )
+        conn.commit()
+        return {"fund_id": fund_id, "date": date, "action": "skipped_l3_covered"}
     _upsert_monthly_return(
-        conn, fund_id=row["fund_id"], date=row["date"],
+        conn, fund_id=fund_id, date=date,
         net_return=float(row["net_return"]),
         source_quote=row["source_quote"],
     )
@@ -427,7 +510,7 @@ def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, str]:
         (review_id,),
     )
     conn.commit()
-    return {"fund_id": row["fund_id"], "date": row["date"]}
+    return {"fund_id": fund_id, "date": date, "action": "approved"}
 
 
 def reject_pending(
