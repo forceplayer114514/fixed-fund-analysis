@@ -81,7 +81,7 @@ def test_write_extraction_all_pass_goes_monthly(conn):
     row = conn.execute(
         "SELECT * FROM monthly_returns WHERE fund_id='fund_x'"
     ).fetchone()
-    assert row["date"] == "2025-03-01"
+    assert row["date"] == "2025-03-31"
     assert abs(row["net_return"] - 0.0065) < 1e-9
     assert abs(row["nav"] - 1.0065) < 1e-9  # NAV 重算
     assert row["verify_windows"] == 1
@@ -253,7 +253,7 @@ def test_promote_pending_writes_monthly(conn):
     )
     assert dec.review_id is not None
     result = store.promote_pending(conn, dec.review_id)
-    assert result == {"fund_id": "fund_x", "date": "2025-08-01"}
+    assert result == {"fund_id": "fund_x", "date": "2025-08-31", "action": "approved"}
     row = conn.execute(
         "SELECT * FROM monthly_returns WHERE fund_id='fund_x'"
     ).fetchone()
@@ -344,7 +344,7 @@ def test_list_pending_and_gaps(conn):
     )
     pending = store.list_pending(conn, fund_id="fund_x")
     assert len(pending) == 1
-    assert pending[0]["date"] == "2025-10-01"
+    assert pending[0]["date"] == "2025-10-31"
 
     gaps = store.list_gaps(conn, "fund_x")
     assert len(gaps) == 1
