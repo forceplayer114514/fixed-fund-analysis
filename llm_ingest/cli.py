@@ -1,0 +1,269 @@
+"""CLI 入口. 当前实现: compare.
+
+compare --fund-id gryphon_capital_income --out report.json
+  逐份 PDF 跑 extract + 两道闸 + 对 DB 现值, 产 JSON 报告.
+  判据:
+    - 一致率 (abs(diff)<1e-6) >= 99%
+    - 防线漏检 = 0 (两闸都过但值和 DB 不符)
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import json
+import sqlite3
+import sys
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import extract as ex_mod
+from . import pdf as pdf_mod
+from . import verify
+
+REPO = Path(__file__).resolve().parent.parent
+DB_PATH = REPO / "data/fund_analysis.db"
+PDF_ROOT = REPO / "data/pdf_cache"
+
+
+def _load_db_series(fund_id: str) -> Dict[str, Tuple[float, str]]:
+    """ym (YYYY-MM) -> (net_return, source_quote_或空)."""
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        cur = conn.execute(
+            "SELECT date, net_return, COALESCE(source_quote, '') FROM monthly_returns WHERE fund_id=? ORDER BY date",
+            (fund_id,),
+        )
+        out: Dict[str, Tuple[float, str]] = {}
+        for date, nr, sq in cur.fetchall():
+            ym = date[:7]
+            out[ym] = (float(nr), sq)
+    finally:
+        conn.close()
+    return out
+
+
+def _pdf_paths(fund_id: str) -> List[Path]:
+    d = PDF_ROOT / fund_id
+    if not d.exists():
+        return []
+    return sorted(p for p in d.glob("*.pdf"))
+
+
+@dataclass
+class PerFile:
+    ym: str
+    pdf: str
+    extracted: Optional[float]
+    db_value: Optional[float]
+    diff: Optional[float]
+    match: bool  # abs(diff)<1e-6
+    not_found: bool
+    parse_error: Optional[str]
+    quote: str
+    quote_passed: bool
+    quote_reason: str
+    rolling_passed: bool
+    rolling_reason: str
+    rolling_windows: int
+    field_type_passed: bool
+    antifab_passed: bool
+    both_gates_passed: bool
+    breach: bool  # 两闸都过但值和 DB 不符 = 防线漏检
+
+
+@dataclass
+class Report:
+    fund_id: str
+    total: int
+    matched: int
+    consistency_rate: float
+    both_gates_passed: int
+    breaches: int  # 判据主指标
+    breach_ratio: float
+    gate_stats: Dict[str, int]
+    per_file: List[PerFile] = field(default_factory=list)
+    started_at: float = 0.0
+    duration_s: float = 0.0
+
+
+def run_compare(fund_id: str, limit: Optional[int] = None, max_pages: int = 2, concurrency: int = 1) -> Report:
+    db = _load_db_series(fund_id)
+    pdfs = _pdf_paths(fund_id)
+    if limit:
+        pdfs = pdfs[:limit]
+
+    # 前 11 月历史 (十进制) 累积传入 rolling 校验
+    history: Dict[str, float] = {}
+
+    per_files: List[PerFile] = []
+    gate_stats = {
+        "quote_blocked": 0,
+        "rolling_blocked": 0,
+        "field_type_blocked": 0,
+        "antifab_blocked": 0,
+        "not_found": 0,
+        "parse_error": 0,
+    }
+
+    started = time.time()
+
+    # Phase A: 并发 extract (API 密集).
+    # Phase B: 串行 verify + 累积 history (rolling 校验按 ym 顺序).
+    extractions: Dict[str, Any] = {}  # ym -> Extraction | Exception
+    total = len(pdfs)
+
+    def _do_extract(pdf: Path) -> Tuple[str, Any]:
+        ym = pdf.stem
+        try:
+            return ym, ex_mod.extract_from_pdf(pdf, ym, max_pages=max_pages)
+        except Exception as e:  # noqa: BLE001
+            return ym, e
+
+    if concurrency <= 1:
+        for i, pdf in enumerate(pdfs, 1):
+            ym, res = _do_extract(pdf)
+            extractions[ym] = res
+            tag = "ERR" if isinstance(res, Exception) else ("NF" if getattr(res, "not_found", False) else "ok")
+            print(f"[extract {i}/{total}] {ym} {tag}", file=sys.stderr)
+    else:
+        with cf.ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futs = {ex.submit(_do_extract, p): p for p in pdfs}
+            done = 0
+            for fut in cf.as_completed(futs):
+                ym, res = fut.result()
+                extractions[ym] = res
+                done += 1
+                tag = "ERR" if isinstance(res, Exception) else ("NF" if getattr(res, "not_found", False) else "ok")
+                print(f"[extract {done}/{total}] {ym} {tag}", file=sys.stderr)
+
+    extract_elapsed = time.time() - started
+    print(f"[extract-phase] {total} PDFs in {extract_elapsed:.1f}s (concurrency={concurrency})", file=sys.stderr)
+
+    # Phase B: 串行 verify, 按 ym 顺序累积 history.
+    for i, pdf in enumerate(pdfs, 1):
+        ym = pdf.stem
+        db_row = db.get(ym)
+        db_val = db_row[0] if db_row else None
+        res = extractions.get(ym)
+
+        if isinstance(res, Exception):
+            per_files.append(PerFile(
+                ym=ym, pdf=str(pdf), extracted=None, db_value=db_val,
+                diff=None, match=False, not_found=False, parse_error=f"api_error:{res}",
+                quote="", quote_passed=False, quote_reason="api_error",
+                rolling_passed=False, rolling_reason="api_error", rolling_windows=0,
+                field_type_passed=False, antifab_passed=False,
+                both_gates_passed=False, breach=False,
+            ))
+            print(f"[verify {i}/{total}] {ym} API ERR: {res}", file=sys.stderr)
+            continue
+
+        ex = res
+        if ex.parse_error:
+            gate_stats["parse_error"] += 1
+        if ex.not_found:
+            gate_stats["not_found"] += 1
+
+        pdf_text = pdf_mod.full_text(pdf)
+        q = verify.check_quote(ex.source_quote, pdf_text, ex.net_return)
+        if not q.passed:
+            gate_stats["quote_blocked"] += 1
+        r = verify.check_rolling(ex.net_return, ym, history, ex.rolling)
+        if not r.passed:
+            gate_stats["rolling_blocked"] += 1
+        f_ok, f_reason = verify.check_field_type(ex.net_return)
+        if not f_ok:
+            gate_stats["field_type_blocked"] += 1
+        hist_recent = sorted(history.items(), reverse=True)
+        af_ok, af_reason = verify.check_anti_fabrication(ex.net_return, ym, hist_recent)
+        if not af_ok:
+            gate_stats["antifab_blocked"] += 1
+
+        both_ok = q.passed and r.passed and f_ok and af_ok
+        diff: Optional[float] = None
+        matched = False
+        if ex.net_return is not None and db_val is not None:
+            diff = ex.net_return - db_val
+            matched = abs(diff) < 1e-6
+        breach = both_ok and (ex.net_return is not None) and (db_val is not None) and (not matched)
+
+        per_files.append(PerFile(
+            ym=ym, pdf=str(pdf), extracted=ex.net_return, db_value=db_val,
+            diff=diff, match=matched, not_found=ex.not_found,
+            parse_error=ex.parse_error, quote=ex.source_quote,
+            quote_passed=q.passed, quote_reason=q.reason,
+            rolling_passed=r.passed, rolling_reason=r.reason,
+            rolling_windows=r.windows_verified,
+            field_type_passed=f_ok, antifab_passed=af_ok,
+            both_gates_passed=both_ok, breach=breach,
+        ))
+
+        # 累积历史 (用 DB 真值, 不用提取值; 否则错误传播)
+        if db_val is not None:
+            history[ym] = db_val
+
+        tag = "OK" if matched else ("BREACH" if breach else ("MISS" if not matched else ""))
+        print(f"[verify {i}/{total}] {ym} ex={ex.net_return} db={db_val} diff={diff} gates=q{int(q.passed)}r{int(r.passed)}f{int(f_ok)}a{int(af_ok)} {tag}", file=sys.stderr)
+
+    matched = sum(1 for p in per_files if p.match)
+    both = sum(1 for p in per_files if p.both_gates_passed)
+    breaches = sum(1 for p in per_files if p.breach)
+    total_actual = len(per_files)
+    return Report(
+        fund_id=fund_id,
+        total=total_actual,
+        matched=matched,
+        consistency_rate=(matched / total_actual) if total_actual else 0.0,
+        both_gates_passed=both,
+        breaches=breaches,
+        breach_ratio=(breaches / total_actual) if total_actual else 0.0,
+        gate_stats=gate_stats,
+        per_file=per_files,
+        started_at=started,
+        duration_s=time.time() - started,
+    )
+
+
+def _report_to_json(r: Report) -> Dict[str, Any]:
+    return {
+        **{k: v for k, v in asdict(r).items() if k != "per_file"},
+        "per_file": [asdict(p) for p in r.per_file],
+    }
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    r = run_compare(args.fund_id, limit=args.limit, max_pages=args.max_pages, concurrency=args.concurrency)
+    Path(args.out).write_text(json.dumps(_report_to_json(r), ensure_ascii=False, indent=2))
+    print(f"\n=== compare summary ===")
+    print(f"fund_id: {r.fund_id}")
+    print(f"total: {r.total}  matched: {r.matched}  consistency: {r.consistency_rate:.4f}")
+    print(f"both_gates_passed: {r.both_gates_passed}  breaches: {r.breaches}  breach_ratio: {r.breach_ratio:.4f}")
+    print(f"gate_stats: {r.gate_stats}")
+    print(f"duration: {r.duration_s:.1f}s")
+    print(f"report -> {args.out}")
+    # 判据: breaches=0 且 consistency>=0.99
+    verdict = (r.breaches == 0) and (r.consistency_rate >= 0.99)
+    print(f"VERDICT: {'PASS' if verdict else 'FAIL'}")
+    return 0 if verdict else 2
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(prog="llm_ingest")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("compare", help="run extract+verify vs DB for a fund")
+    c.add_argument("--fund-id", required=True)
+    c.add_argument("--out", default="report.json")
+    c.add_argument("--limit", type=int, default=None, help="only first N PDFs (debug)")
+    c.add_argument("--max-pages", type=int, default=2)
+    c.add_argument("--concurrency", type=int, default=1, help="并发 extract 数, 1=串行")
+    c.set_defaults(func=cmd_compare)
+
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

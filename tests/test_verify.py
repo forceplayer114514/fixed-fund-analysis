@@ -60,11 +60,11 @@ def test_quote_empty_fails():
 
 
 def test_quote_not_in_pdf_fails():
-    """模型编了一个 PDF 里不存在的引用."""
+    """模型编了 PDF 里不存在的数字."""
     q = "NTA Net Return (%) 99.99 88.88"
     r = check_quote(q, GCI_2026_05_TEXT, 0.9999)
     assert not r.passed
-    assert r.reason == "quote_not_in_pdf"
+    assert "orphan" in r.reason
 
 
 def test_quote_present_but_value_not_in_quote_fails():
@@ -89,6 +89,40 @@ def test_quote_negative_value():
     quote = "Net Return (%) -0.50 -1.20 -2.10"
     r = check_quote(quote, pdf_text, -0.005)
     assert r.passed
+
+
+def test_quote_paren_negative_pdf_vs_dash_negative_quote():
+    """PDF 写 (0.45), 模型 quote 写 -0.45. 数字层面应视为同一数."""
+    pdf_text = "Net Return (%) (0.45) 0.27 1.46 4.35"
+    quote = "Net Return (%) -0.45 0.27 1.46 4.35"
+    r = check_quote(quote, pdf_text, -0.0045)
+    assert r.passed
+
+
+def test_quote_paren_negative_quote_kept_as_paren():
+    """PDF 写 (0.45), 模型 quote 忠实照抄 (0.45), net_return=-0.0045.
+    quote 里字面只有 +0.45; 靠 abs 兜底放过, rolling gate 兜正负号."""
+    pdf_text = "Net Return (%) (0.45) 0.27 1.46 4.35"
+    quote = "Net Return (%) (0.45) 0.27 1.46 4.35"
+    r = check_quote(quote, pdf_text, -0.0045)
+    assert r.passed, r.reason
+
+
+def test_quote_with_decoration_still_passes():
+    """模型加了 | : 等装饰, PDF 里没有—但数字都真实, 应过."""
+    pdf_text = "Fund Performance\n1 Mth 3 Mth 6 Mth 1 Yr\nNet Return (%)\n0.42\n1.37\n2.68\n"
+    quote = "Net Return (%) | 1 Mth: 0.42 | 3 Mth: 1.37 | 6 Mth: 2.68"
+    r = check_quote(quote, pdf_text, 0.0042)
+    assert r.passed, r.reason
+
+
+def test_quote_orphan_number_fails():
+    """quote 混入 PDF 里没有的数字 -> 挡 (幻觉信号)."""
+    pdf_text = "Net Return (%) 0.42 1.37 2.68"
+    quote = "Net Return (%) 0.42 9.99"  # 9.99 是编的
+    r = check_quote(quote, pdf_text, 0.0042)
+    assert not r.passed
+    assert "orphan" in r.reason
 
 
 # ---------- check_rolling ----------

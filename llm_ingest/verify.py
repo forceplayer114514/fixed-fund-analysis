@@ -27,15 +27,18 @@ def _parse_pct_from_quote(quote: str, target_pct: float, tol: float = 0.001) -> 
     """target_pct 是否能从 quote 里字面解析出来 (百分比十进制).
 
     quote 里的数字都是"百分数" (0.65 = 0.65%). 逐个数字 abs(n - target_pct) < tol 即匹配.
+    括号负数兜底: PDF 里 (0.45) 表示 -0.45%, quote 常照抄 (0.45), 数字层看到的是 +0.45.
+      故允许 abs(n - abs(target_pct)) 命中—负号靠字段类型 gate 与 rolling gate 兜住.
 
     tol=0.001 = 0.001 百分点 (即 0.00001 十进制); PDF 精度是两位小数, 该 tol 允许最后一位偏差.
     """
+    at = abs(target_pct)
     for m in _NUM_RE.finditer(quote):
         try:
             n = float(m.group())
         except ValueError:
             continue
-        if abs(n - target_pct) < tol:
+        if abs(n - target_pct) < tol or abs(abs(n) - at) < tol:
             return True
     return False
 
@@ -50,22 +53,43 @@ def check_quote(quote: str, pdf_text: str, net_return: Optional[float]) -> Quote
     """闸 1.
 
     - quote 空 -> 挡.
-    - quote (压平) 不是 pdf_text (压平) 子串 -> 挡.
-    - net_return != None 但 quote 里没有对应数字 -> 挡.
+    - net_return 数字必须能从 quote 里解析出来 (硬性).
+    - quote 里出现的所有百分数, 每一个都必须在 pdf_text 中出现 (归一化后).
+      放开"quote 整串是子串"—模型会加标点/分隔符/单位, 只要数字真实即可.
+    - 括号负数支持: PDF 写 (0.45), prompt 解析后 quote 里可能是 -0.45,
+      放宽为"数字或其去符号对应" 匹配.
 
     net_return 单位: 十进制 (0.0065). quote 里数字单位: 百分数 (0.65).
-    比对前 * 100.
     """
     if not quote:
         return QuoteCheck(False, "empty_quote")
-    q = _flatten(quote)
-    p = _flatten(pdf_text)
-    if q not in p:
-        return QuoteCheck(False, "quote_not_in_pdf")
+    q_flat = _flatten(quote)
+    p_flat = _flatten(pdf_text)
+
+    # 1) net_return 值必须在 quote 里
     if net_return is not None:
         target_pct = net_return * 100.0
-        if not _parse_pct_from_quote(q, target_pct):
+        if not _parse_pct_from_quote(q_flat, target_pct):
             return QuoteCheck(False, f"value_{target_pct:.4f}_not_in_quote")
+
+    # 2) quote 里每个百分数必须在 PDF 里出现 (数字, 或去符号后的绝对值 -- 兜住括号负数)
+    pdf_numbers = set()
+    for m in _NUM_RE.finditer(p_flat):
+        try:
+            pdf_numbers.add(round(float(m.group()), 4))
+        except ValueError:
+            pass
+    orphans = []
+    for m in _NUM_RE.finditer(q_flat):
+        try:
+            v = round(float(m.group()), 4)
+        except ValueError:
+            continue
+        if v in pdf_numbers or -v in pdf_numbers or abs(v) in pdf_numbers:
+            continue
+        orphans.append(v)
+    if orphans:
+        return QuoteCheck(False, f"orphan_numbers_{orphans[:3]}")
     return QuoteCheck(True, "ok")
 
 
