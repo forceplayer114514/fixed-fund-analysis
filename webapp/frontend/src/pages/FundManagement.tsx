@@ -93,7 +93,17 @@ export default function FundManagement() {
   }
 
   const handleApprove = async (id: number) => {
-    await api.approvePending(id)
+    const resp = await api.approvePending(id)
+    // 权威源已覆盖 (新 action=skipped_authoritative_covered; 兼容旧 action=skipped_l3_covered)
+    if (resp.action === 'skipped_authoritative_covered' || resp.action === 'skipped_l3_covered') {
+      const tag = resp.existing_tag
+      const tagLabel =
+        tag === 'fundmonitors_table' ? 'L3 fundmonitors 表'
+        : tag === 'llm' ? 'LLM PDF 提取'
+        : (tag ?? '权威源')
+      // eslint-disable-next-line no-alert
+      alert(`该月已由权威源 (${tagLabel}) 覆盖, pending 未采纳。`)
+    }
     setPending(pending.filter(p => p.id !== id))
     await fetchFunds()
   }

@@ -151,6 +151,22 @@ export interface IngestJob {
   error: string | null
 }
 
+/** PATCH /api/pending/{id}/approve 返回体
+ *  - action='approved': pending 已入 monthly_returns, 指标已重算
+ *  - action='skipped_authoritative_covered': 该月已由权威源覆盖 (existing_tag 说明是哪种),
+ *    pending 未采纳, monthly_returns 不动
+ *  - action='skipped_l3_covered': 旧后端语义, 前端兼容 fallback
+ */
+export interface ApprovePendingResponse {
+  ok: boolean
+  fund_id: string
+  date: string
+  action: 'approved' | 'skipped_authoritative_covered' | 'skipped_l3_covered' | string
+  /** 仅 skipped_authoritative_covered 有: 'fundmonitors_table' | 'llm' | 其他 */
+  existing_tag?: string
+  message?: string
+}
+
 /** pending_review 记录 (两闸未过, 待人工审核) */
 export interface PendingReview {
   id: number

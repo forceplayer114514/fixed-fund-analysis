@@ -59,7 +59,7 @@ export const api = {
   },
 
   approvePending: (reviewId: number) =>
-    request<Record<string, unknown>>(`/api/pending/${reviewId}/approve`, {
+    request<import('../types').ApprovePendingResponse>(`/api/pending/${reviewId}/approve`, {
       method: 'PATCH',
     }),
 
