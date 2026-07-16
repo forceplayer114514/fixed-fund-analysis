@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import discover as disc_mod
 from . import extract as ex_mod
 from . import pdf as pdf_mod
+from . import store as store_mod
 from . import verify
 
 REPO = Path(__file__).resolve().parent.parent
@@ -272,6 +273,119 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0 if r.links else 2
 
 
+def _download_pdf(url: str, out_path: Path, timeout: int = 60) -> bool:
+    """下载 PDF 到 out_path. requests + curl 兜底. 返 True/False."""
+    import requests
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200 and r.content[:4] == b"%PDF":
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(r.content)
+            return True
+    except Exception:
+        pass
+    # curl 兜底
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["curl", "-sL", "--max-time", str(timeout), "-A", "Mozilla/5.0", "-o", str(out_path), url],
+            capture_output=True, timeout=timeout + 10,
+        )
+        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            head = out_path.read_bytes()[:4]
+            if head == b"%PDF":
+                return True
+            out_path.unlink()
+    except Exception:
+        pass
+    return False
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """端到端: discover -> download -> extract -> verify -> store.
+
+    fund 必须已在 funds 表 (先 upsert_fund). ingest 逐月读 links, 下载 PDF,
+    提取, 走两闸, 写 monthly_returns / pending_review / confirmed_gaps.
+    """
+    fund_id = args.fund_id
+    conn = store_mod.open_conn()
+    store_mod.ensure_tables_if_missing(conn)
+
+    # 若给了 fund-name/issuer, 顺带 upsert 元信息
+    if args.fund_name and args.confirmed_url:
+        store_mod.upsert_fund(
+            conn, fund_id=fund_id, fund_name=args.fund_name,
+            confirmed_url=args.confirmed_url,
+            apir_code=args.apir_code, max_pdf_pages=args.max_pages,
+        )
+
+    # 加载 links
+    if args.discovery_json:
+        payload = json.loads(Path(args.discovery_json).read_text())
+        links: List[Tuple[str, str]] = [(str(y), str(u)) for y, u in payload.get("links", [])]
+    elif args.fund_name and args.issuer:
+        # 现跑 discover
+        rep = disc_mod.run_discovery(
+            fund_name=args.fund_name, issuer=args.issuer, fund_id=fund_id,
+            issuer_domain=args.issuer_domain, asx_code=args.asx_code,
+            inception_ym=args.inception_ym, latest_ym=args.latest_ym,
+        )
+        links = rep.links
+    else:
+        print("必须提供 --discovery-json, 或 (--fund-name + --issuer) 现跑 discovery", file=sys.stderr)
+        return 2
+
+    if args.limit:
+        links = links[: args.limit]
+    print(f"[ingest] {len(links)} links to process for {fund_id}", file=sys.stderr)
+
+    pdf_dir = PDF_ROOT / fund_id
+    stats = {"monthly": 0, "pending": 0, "gap": 0, "download_fail": 0}
+
+    for i, (ym, url) in enumerate(links, 1):
+        pdf_path = pdf_dir / f"{ym}.pdf"
+        # 下载 (若本地已缓存则跳过)
+        if not pdf_path.exists():
+            ok = _download_pdf(url, pdf_path)
+            if not ok:
+                stats["download_fail"] += 1
+                store_mod.record_confirmed_gap(
+                    conn, fund_id=fund_id, missing_month=ym,
+                    exhausted_levels="download_fail",
+                )
+                print(f"[{i}/{len(links)}] {ym} download FAILED {url}", file=sys.stderr)
+                continue
+        # 提取
+        try:
+            ex = ex_mod.extract_from_pdf(pdf_path, ym, max_pages=args.max_pages)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{i}/{len(links)}] {ym} extract error: {e}", file=sys.stderr)
+            store_mod.record_confirmed_gap(
+                conn, fund_id=fund_id, missing_month=ym,
+                exhausted_levels=f"api_error:{type(e).__name__}",
+            )
+            continue
+        # 两闸
+        pdf_text = pdf_mod.full_text(pdf_path)
+        q = verify.check_quote(ex.source_quote, pdf_text, ex.net_return)
+        history = store_mod.load_monthly_history(conn, fund_id)
+        r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
+        # 写库
+        dec = store_mod.write_extraction(
+            conn, fund_id=fund_id, ex=ex,
+            quote_check=q, rolling_check=r,
+            monthly_history=history,
+        )
+        stats[dec.action] = stats.get(dec.action, 0) + 1
+        print(f"[{i}/{len(links)}] {ym} {dec.action} {dec.gate_summary} {dec.reason}",
+              file=sys.stderr)
+
+    print(f"\n=== ingest summary ===")
+    print(f"fund_id: {fund_id}")
+    print(f"stats: {stats}")
+    return 0 if stats["monthly"] > 0 else 2
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     r = run_compare(args.fund_id, limit=args.limit, max_pages=args.max_pages, concurrency=args.concurrency)
     Path(args.out).write_text(json.dumps(_report_to_json(r), ensure_ascii=False, indent=2))
@@ -310,6 +424,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     d.add_argument("--latest-ym", default=None, help="YYYY-MM, 默认当前-2月")
     d.add_argument("--out", default="discovery.json")
     d.set_defaults(func=cmd_discover)
+
+    i = sub.add_parser("ingest", help="end-to-end: discover -> download -> extract -> verify -> store")
+    i.add_argument("--fund-id", required=True)
+    i.add_argument("--fund-name", default=None, help="给了则 upsert 到 funds 表")
+    i.add_argument("--issuer", default=None, help="现跑 discovery 时必给")
+    i.add_argument("--issuer-domain", default=None)
+    i.add_argument("--asx-code", default=None)
+    i.add_argument("--apir-code", default=None)
+    i.add_argument("--confirmed-url", default=None, help="funds.confirmed_url; 无则用 issuer_domain")
+    i.add_argument("--inception-ym", default=None)
+    i.add_argument("--latest-ym", default=None)
+    i.add_argument("--discovery-json", default=None,
+                   help="预跑 discover 的 JSON, 免除本次现跑 (省 Gemini 调用)")
+    i.add_argument("--limit", type=int, default=None, help="仅处理前 N 个链接 (调试)")
+    i.add_argument("--max-pages", type=int, default=2)
+    i.set_defaults(func=cmd_ingest)
 
     args = p.parse_args(argv)
     return args.func(args)

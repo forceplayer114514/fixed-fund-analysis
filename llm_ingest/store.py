@@ -1,0 +1,450 @@
+"""Phase 3 写库层.
+
+stdlib sqlite3 直写 funds / monthly_returns / pending_review / confirmed_gaps.
+schema 已由 skills/lib/db.py ensure_tables 建好, 本模块不重复建表 (幂等 CREATE IF NOT EXISTS
+放在 ensure_tables_if_missing, 供 webapp 空库初始化时用).
+
+决策:
+  两闸 (quote + rolling + field_type + antifab) 全过 -> monthly_returns (含 NAV 重算)
+  任一未过 / not_found=True / parse_error -> pending_review, candidates_json 存原始响应 + 四 gate reason
+  三级 fallback 穷尽仍 not_found -> confirmed_gaps
+
+date 存 "YYYY-MM-01" (schema TEXT YYYY-MM-DD; skills 惯例月初).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from .extract import Extraction
+from .verify import (
+    QuoteCheck,
+    RollingCheck,
+    check_anti_fabrication,
+    check_field_type,
+)
+
+REPO = Path(__file__).resolve().parent.parent
+DEFAULT_DB_PATH = REPO / "data" / "fund_analysis.db"
+
+
+# ---------- 连接 ----------
+
+def open_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
+    """打开 sqlite3 连接, foreign keys 打开, row_factory 设为 dict-like."""
+    if db_path is None:
+        env = os.environ.get("FUND_DB_PATH")
+        db_path = Path(env) if env else DEFAULT_DB_PATH
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def ensure_tables_if_missing(conn: sqlite3.Connection) -> None:
+    """幂等建表. 生产库 schema 已由 skills/lib/db.py 建好, 此函数仅在空库时兜底.
+
+    只建 llm_ingest 直接写的 4 张: funds / monthly_returns / confirmed_gaps / pending_review.
+    其他表 (rba_cash_rates / fund_metrics / anomalies / ai_reports) 由 webapp 自行建.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS funds (
+            fund_id TEXT PRIMARY KEY,
+            fund_name TEXT NOT NULL UNIQUE,
+            apir_code TEXT UNIQUE,
+            confirmed_url TEXT NOT NULL,
+            fetch_method TEXT NOT NULL,
+            url_type TEXT NOT NULL,
+            max_pdf_pages INTEGER,
+            verified_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            shareclass_prefix TEXT,
+            inception_date TEXT,
+            inception_assumed INTEGER DEFAULT 0,
+            extractor_verified INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_returns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            net_return REAL NOT NULL,
+            nav REAL NOT NULL,
+            commentary_truth REAL,
+            verify_windows INTEGER,
+            source_quote TEXT,
+            pattern_tag TEXT,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
+            UNIQUE(fund_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS confirmed_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            missing_month TEXT NOT NULL,
+            exhausted_levels TEXT,
+            checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE,
+            UNIQUE(fund_id, missing_month)
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            net_return REAL NOT NULL,
+            source_quote TEXT,
+            extract_method TEXT NOT NULL,
+            gate_result TEXT,
+            review_state TEXT NOT NULL DEFAULT 'pending',
+            review_reason TEXT,
+            candidates_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (fund_id) REFERENCES funds(fund_id) ON DELETE CASCADE
+        );
+        """
+    )
+    conn.commit()
+
+
+# ---------- funds ----------
+
+def upsert_fund(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    fund_name: str,
+    confirmed_url: str,
+    fetch_method: str = "llm_ingest",
+    url_type: str = "archive",
+    apir_code: Optional[str] = None,
+    max_pdf_pages: Optional[int] = None,
+    inception_date: Optional[str] = None,
+    inception_assumed: int = 0,
+) -> None:
+    """插入或更新基金元信息 (fund_id 主键 upsert).
+
+    fetch_method 默认 'llm_ingest' (与 skills 侧 'code'/'solver' 区分).
+    url_type: 'archive' (归档页) / 'latest_only' (只挂最新) / 'html_table' (JCB 类).
+    """
+    conn.execute(
+        """
+        INSERT INTO funds
+            (fund_id, fund_name, apir_code, confirmed_url, fetch_method,
+             url_type, max_pdf_pages, inception_date, inception_assumed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(fund_id) DO UPDATE SET
+            fund_name = excluded.fund_name,
+            apir_code = COALESCE(excluded.apir_code, funds.apir_code),
+            confirmed_url = excluded.confirmed_url,
+            fetch_method = excluded.fetch_method,
+            url_type = excluded.url_type,
+            max_pdf_pages = COALESCE(excluded.max_pdf_pages, funds.max_pdf_pages),
+            inception_date = COALESCE(excluded.inception_date, funds.inception_date),
+            inception_assumed = excluded.inception_assumed
+        """,
+        (
+            fund_id, fund_name, apir_code, confirmed_url, fetch_method,
+            url_type, max_pdf_pages, inception_date, inception_assumed,
+        ),
+    )
+    conn.commit()
+
+
+# ---------- monthly_returns + NAV 重算 ----------
+
+def _upsert_monthly_return(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    date: str,
+    net_return: float,
+    verify_windows: Optional[int] = None,
+    source_quote: Optional[str] = None,
+    pattern_tag: Optional[str] = "llm",
+) -> None:
+    """写一行月度. 走完立即 recompute_nav (与 skills 侧一致的语义)."""
+    conn.execute(
+        """
+        INSERT INTO monthly_returns
+            (fund_id, date, net_return, nav, verify_windows, source_quote, pattern_tag)
+        VALUES (?, ?, ?, 1.0, ?, ?, ?)
+        ON CONFLICT(fund_id, date) DO UPDATE SET
+            net_return = excluded.net_return,
+            verify_windows = COALESCE(excluded.verify_windows, monthly_returns.verify_windows),
+            source_quote = COALESCE(excluded.source_quote, monthly_returns.source_quote),
+            pattern_tag = COALESCE(excluded.pattern_tag, monthly_returns.pattern_tag)
+        """,
+        (fund_id, date, net_return, verify_windows, source_quote, pattern_tag),
+    )
+    conn.commit()
+    _recompute_nav(conn, fund_id)
+
+
+def _recompute_nav(conn: sqlite3.Connection, fund_id: str) -> None:
+    """按 date 升序重算 NAV, nav=1.0 起点."""
+    rows = conn.execute(
+        "SELECT id, net_return FROM monthly_returns WHERE fund_id=? ORDER BY date",
+        (fund_id,),
+    ).fetchall()
+    nav = 1.0
+    for r in rows:
+        nav = nav * (1.0 + r["net_return"])
+        conn.execute("UPDATE monthly_returns SET nav=? WHERE id=?", (nav, r["id"]))
+    conn.commit()
+
+
+# ---------- pending_review ----------
+
+def _add_pending(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    date: str,
+    net_return: float,
+    source_quote: Optional[str],
+    review_reason: str,
+    gate_result: str,
+    candidates_json: Optional[str],
+) -> int:
+    """写 pending, extract_method 固定 'llm' (与 skills 'code'/'solver' 区分)."""
+    cur = conn.execute(
+        """
+        INSERT INTO pending_review
+            (fund_id, date, net_return, source_quote, extract_method,
+             gate_result, review_reason, candidates_json)
+        VALUES (?, ?, ?, ?, 'llm', ?, ?, ?)
+        """,
+        (fund_id, date, net_return, source_quote, gate_result,
+         review_reason, candidates_json),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+# ---------- confirmed_gaps ----------
+
+def record_confirmed_gap(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    missing_month: str,
+    exhausted_levels: str = "L1,L2,L3",
+) -> None:
+    """记穷尽后的缺口 (UPSERT). missing_month 'YYYY-MM'."""
+    conn.execute(
+        """
+        INSERT INTO confirmed_gaps (fund_id, missing_month, exhausted_levels)
+        VALUES (?, ?, ?)
+        ON CONFLICT(fund_id, missing_month) DO UPDATE SET
+            exhausted_levels = excluded.exhausted_levels,
+            checked_at = CURRENT_TIMESTAMP
+        """,
+        (fund_id, missing_month, exhausted_levels),
+    )
+    conn.commit()
+
+
+# ---------- 决策核心: 写 extraction 结果 ----------
+
+@dataclass(frozen=True)
+class WriteDecision:
+    """写库决策记录, 供上层 (ingest/cli) 汇总统计."""
+    ym: str
+    action: str  # 'monthly' | 'pending' | 'gap' | 'skip'
+    review_id: Optional[int] = None  # pending 时的 lastrowid
+    gate_summary: str = ""            # "q1r1f1a1" 之类的紧凑串
+    reason: str = ""
+
+
+def _ym_to_date(ym: str) -> str:
+    """'YYYY-MM' -> 'YYYY-MM-01' (schema 要求 YYYY-MM-DD, 月初惯例)."""
+    return f"{ym}-01"
+
+
+def write_extraction(
+    conn: sqlite3.Connection,
+    *,
+    fund_id: str,
+    ex: Extraction,
+    quote_check: QuoteCheck,
+    rolling_check: RollingCheck,
+    monthly_history: Dict[str, float],
+    exhausted_levels: str = "L1,L2,L3",
+) -> WriteDecision:
+    """核心写库决策. 传入四个 check 结果, 决定 monthly / pending / gap.
+
+    monthly_history: {ym: net_return} 已入库的历史, 用于 anti-fab 检测.
+    exhausted_levels: not_found 时该月记 confirmed_gaps 的 exhausted 字段.
+
+    决策矩阵:
+      parse_error / not_found + net_return=None -> confirmed_gaps
+      net_return 存在 + 四闸全过 -> monthly_returns
+      net_return 存在 + 任一闸未过 -> pending_review
+
+    reason 用 review_reason 落库: 'quote_failed' / 'rolling_failed' /
+    'field_type_failed' / 'antifab_failed' / 'parse_error' / 'multi:xxx'
+    """
+    date = _ym_to_date(ex.ym)
+
+    # 完全无值 / parse 失败 -> gap (穷尽后)
+    if ex.parse_error or ex.not_found or ex.net_return is None:
+        record_confirmed_gap(
+            conn, fund_id=fund_id, missing_month=ex.ym,
+            exhausted_levels=exhausted_levels,
+        )
+        return WriteDecision(
+            ym=ex.ym, action="gap",
+            reason=ex.parse_error or ("not_found" if ex.not_found else "no_value"),
+        )
+
+    # 四道闸
+    f_ok, f_reason = check_field_type(ex.net_return)
+    # anti-fab 用历史倒序
+    hist_recent = sorted(monthly_history.items(), reverse=True)
+    a_ok, a_reason = check_anti_fabrication(ex.net_return, ex.ym, hist_recent)
+
+    summary = (
+        f"q{int(quote_check.passed)}"
+        f"r{int(rolling_check.passed)}"
+        f"f{int(f_ok)}"
+        f"a{int(a_ok)}"
+    )
+    all_ok = quote_check.passed and rolling_check.passed and f_ok and a_ok
+
+    if all_ok:
+        _upsert_monthly_return(
+            conn,
+            fund_id=fund_id,
+            date=date,
+            net_return=ex.net_return,
+            verify_windows=rolling_check.windows_verified,
+            source_quote=ex.source_quote,
+        )
+        return WriteDecision(ym=ex.ym, action="monthly", gate_summary=summary, reason="ok")
+
+    # pending: 汇总失败原因
+    reasons = []
+    if not quote_check.passed:
+        reasons.append(f"quote:{quote_check.reason}")
+    if not rolling_check.passed:
+        reasons.append(f"rolling:{rolling_check.reason}")
+    if not f_ok:
+        reasons.append(f"field:{f_reason}")
+    if not a_ok:
+        reasons.append(f"antifab:{a_reason}")
+    reason = "|".join(reasons)
+
+    # candidates_json 存原始响应+四 gate reason, 供人工审核看到原始上下文
+    payload: Dict[str, Any] = {
+        "raw": ex.raw,
+        "measure": ex.measure,
+        "measure_label_in_pdf": ex.measure_label_in_pdf,
+        "rolling": ex.rolling,
+        "gate_reasons": {
+            "quote": quote_check.reason,
+            "rolling": rolling_check.reason,
+            "field_type": f_reason,
+            "antifab": a_reason,
+        },
+    }
+    review_id = _add_pending(
+        conn,
+        fund_id=fund_id,
+        date=date,
+        net_return=ex.net_return,
+        source_quote=ex.source_quote,
+        review_reason=reason,
+        gate_result=summary,
+        candidates_json=json.dumps(payload, ensure_ascii=False),
+    )
+    return WriteDecision(
+        ym=ex.ym, action="pending", review_id=review_id,
+        gate_summary=summary, reason=reason,
+    )
+
+
+# ---------- 读接口 (供 webapp / CLI 用) ----------
+
+def load_monthly_history(
+    conn: sqlite3.Connection, fund_id: str
+) -> Dict[str, float]:
+    """ym (YYYY-MM) -> net_return, 用于 anti-fab / rolling 校验的历史输入."""
+    rows = conn.execute(
+        "SELECT date, net_return FROM monthly_returns WHERE fund_id=? ORDER BY date",
+        (fund_id,),
+    ).fetchall()
+    return {r["date"][:7]: float(r["net_return"]) for r in rows}
+
+
+def list_pending(
+    conn: sqlite3.Connection,
+    fund_id: Optional[str] = None,
+    state: str = "pending",
+) -> List[Dict[str, Any]]:
+    """列 pending_review 记录. state=None 列全部."""
+    sql = (
+        "SELECT id, fund_id, date, net_return, source_quote, extract_method, "
+        "gate_result, review_state, review_reason, candidates_json, created_at "
+        "FROM pending_review"
+    )
+    clauses: List[str] = []
+    params: List[Any] = []
+    if fund_id is not None:
+        clauses.append("fund_id=?")
+        params.append(fund_id)
+    if state is not None:
+        clauses.append("review_state=?")
+        params.append(state)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def promote_pending(conn: sqlite3.Connection, review_id: int) -> Dict[str, str]:
+    """人工审核通过: pending 行 net_return 走 upsert_monthly_return (含 NAV 重算),
+    并标 review_state='approved'. 返回 {fund_id, date}."""
+    row = conn.execute(
+        "SELECT fund_id, date, net_return, source_quote FROM pending_review WHERE id=?",
+        (review_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"pending_review id={review_id} 不存在")
+    _upsert_monthly_return(
+        conn, fund_id=row["fund_id"], date=row["date"],
+        net_return=float(row["net_return"]),
+        source_quote=row["source_quote"],
+    )
+    conn.execute(
+        "UPDATE pending_review SET review_state='approved' WHERE id=?",
+        (review_id,),
+    )
+    conn.commit()
+    return {"fund_id": row["fund_id"], "date": row["date"]}
+
+
+def reject_pending(
+    conn: sqlite3.Connection, review_id: int, reason: str = ""
+) -> None:
+    """人工审核拒绝: 只标状态, 不写 monthly_returns."""
+    conn.execute(
+        "UPDATE pending_review SET review_state='rejected', review_reason=? WHERE id=?",
+        (reason, review_id),
+    )
+    conn.commit()
+
+
+def list_gaps(conn: sqlite3.Connection, fund_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT missing_month, exhausted_levels, checked_at FROM confirmed_gaps "
+        "WHERE fund_id=? ORDER BY missing_month",
+        (fund_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
