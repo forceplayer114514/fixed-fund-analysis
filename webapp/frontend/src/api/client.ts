@@ -42,4 +42,31 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+
+  // ---- LLM 摄取 ----
+  startIngest: (data: import('../types').IngestRequest) =>
+    request<import('../types').IngestJob>('/api/ingest/funds', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getIngestJob: (jobId: string) =>
+    request<import('../types').IngestJob>(`/api/ingest/jobs/${jobId}`),
+
+  listPending: (fundId?: string) => {
+    const q = fundId ? `?fund_id=${encodeURIComponent(fundId)}` : ''
+    return request<import('../types').PendingReview[]>(`/api/pending${q}`)
+  },
+
+  approvePending: (reviewId: number) =>
+    request<Record<string, unknown>>(`/api/pending/${reviewId}/approve`, {
+      method: 'PATCH',
+    }),
+
+  rejectPending: (reviewId: number, reason?: string) => {
+    const q = reason ? `?reason=${encodeURIComponent(reason)}` : ''
+    return request<Record<string, unknown>>(`/api/pending/${reviewId}/reject${q}`, {
+      method: 'PATCH',
+    })
+  },
 }

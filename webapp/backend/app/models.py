@@ -138,3 +138,25 @@ class ConfirmedGap(Base):
     missing_month: Mapped[str] = mapped_column(String, nullable=False)
     exhausted_levels: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     checked_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))
+
+
+class PendingReview(Base):
+    """llm_ingest 侧建的 pending_review 表 ORM 映射（两闸未过的候选,人工审核用）。
+
+    schema 严格对齐 llm_ingest/store.py::ensure_tables_if_missing::pending_review.
+    review_state: 'pending' | 'approved' | 'rejected'.
+    extract_method: 'llm' (llm_ingest) / 未来可能 'code'/'solver'.
+    """
+    __tablename__ = "pending_review"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False)  # YYYY-MM-DD
+    net_return: Mapped[float] = mapped_column(Float, nullable=False)
+    source_quote: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    extract_method: Mapped[str] = mapped_column(String, nullable=False)
+    gate_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # 如 "q0r1f1a1"
+    review_state: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'pending'"))
+    review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    candidates_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 原始响应 + 四 gate reason
+    created_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))

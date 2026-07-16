@@ -41,11 +41,12 @@ def create_app(enable_scheduler: bool = True) -> FastAPI:
         allow_headers=["*"],
     )
 
-    from app.routers import funds, metrics, anomalies, rba
+    from app.routers import funds, metrics, anomalies, rba, ingest
     app.include_router(funds.router)
     app.include_router(metrics.router)
     app.include_router(anomalies.router)
     app.include_router(rba.router)
+    app.include_router(ingest.router)
 
     @app.get("/health")
     def health() -> dict:

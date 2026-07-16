@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
+import type { IngestJob, PendingReview } from '../types'
+
+const POLL_MS = 1500
 
 export default function FundManagement() {
   const funds = useStore(s => s.funds)
@@ -8,22 +11,53 @@ export default function FundManagement() {
   const fetchFunds = useStore(s => s.fetchFunds)
   const recomputeFund = useStore(s => s.recomputeFund)
   const deleteFund = useStore(s => s.deleteFund)
+
   const [recomputing, setRecomputing] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+
+  // 摄取表单
   const [addForm, setAddForm] = useState({
     fund_id: '',
     fund_name: '',
     apir_code: '',
     confirmed_url: '',
-    fetch_method: 'pdf',
-    url_type: '',
+    issuer: '',
+    issuer_domain: '',
+    asx_code: '',
   })
   const [addError, setAddError] = useState('')
+
+  // job 状态
+  const [job, setJob] = useState<IngestJob | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  // 审核抽屉
+  const [reviewFund, setReviewFund] = useState<string | null>(null)
+  const [pending, setPending] = useState<PendingReview[]>([])
+  const [pendingLoading, setPendingLoading] = useState(false)
 
   useEffect(() => {
     fetchFunds()
   }, [])
+
+  // job 轮询
+  useEffect(() => {
+    if (!job) return
+    if (job.state === 'succeeded' || job.state === 'failed') return
+    const t = setInterval(async () => {
+      try {
+        const j = await api.getIngestJob(job.job_id)
+        setJob(j)
+        if (j.state === 'succeeded') {
+          await fetchFunds()
+        }
+      } catch {
+        // ignore
+      }
+    }, POLL_MS)
+    return () => clearInterval(t)
+  }, [job?.job_id, job?.state])
 
   const handleRecompute = async (fundId: string) => {
     setRecomputing(fundId)
@@ -44,38 +78,70 @@ export default function FundManagement() {
     setDeleteConfirm(null)
   }
 
+  const openReview = async (fundId: string) => {
+    setReviewFund(fundId)
+    setPendingLoading(true)
+    try {
+      const list = await api.listPending(fundId)
+      setPending(list)
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-alert
+      alert((e as Error).message)
+    }
+    setPendingLoading(false)
+  }
+
+  const handleApprove = async (id: number) => {
+    await api.approvePending(id)
+    setPending(pending.filter(p => p.id !== id))
+    await fetchFunds()
+  }
+
+  const handleReject = async (id: number) => {
+    await api.rejectPending(id, '')
+    setPending(pending.filter(p => p.id !== id))
+    await fetchFunds()
+  }
+
   const handleAdd = async () => {
     setAddError('')
-    if (!addForm.fund_id || !addForm.fund_name || !addForm.confirmed_url || !addForm.url_type) {
-      setAddError('请填写所有必填字段')
+    if (!addForm.fund_id || !addForm.fund_name) {
+      setAddError('fund_id / 基金名 必填')
+      return
+    }
+    if (!addForm.confirmed_url && !addForm.issuer) {
+      setAddError('至少给"归档页 URL"或"发行商" — 后者会让 Gemini 联网自搜')
       return
     }
     if (addForm.apir_code && !/^[A-Z]{3}\d{4}AU$/.test(addForm.apir_code)) {
       setAddError('APIR 格式应为 3大写字母+4数字+AU（如 ETL5010AU）')
       return
     }
+    setSubmitting(true)
     try {
-      await api.createFund({
+      const j = await api.startIngest({
         fund_id: addForm.fund_id,
         fund_name: addForm.fund_name,
         apir_code: addForm.apir_code || null,
-        confirmed_url: addForm.confirmed_url,
-        fetch_method: addForm.fetch_method,
-        url_type: addForm.url_type,
+        confirmed_url: addForm.confirmed_url || null,
+        issuer: addForm.issuer || null,
+        issuer_domain: addForm.issuer_domain || null,
+        asx_code: addForm.asx_code || null,
       })
-      setShowAdd(false)
-      setAddForm({
-        fund_id: '',
-        fund_name: '',
-        apir_code: '',
-        confirmed_url: '',
-        fetch_method: 'pdf',
-        url_type: '',
-      })
-      await fetchFunds()
+      setJob(j)
     } catch (e: unknown) {
       setAddError((e as Error).message)
     }
+    setSubmitting(false)
+  }
+
+  const closeModal = () => {
+    setShowAdd(false)
+    setJob(null)
+    setAddForm({
+      fund_id: '', fund_name: '', apir_code: '',
+      confirmed_url: '', issuer: '', issuer_domain: '', asx_code: '',
+    })
   }
 
   return (
@@ -101,6 +167,7 @@ export default function FundManagement() {
               <th className="text-left py-3 px-4 text-gray-500 font-medium">APIR</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据截止</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据状态</th>
+              <th className="text-left py-3 px-4 text-gray-500 font-medium">待审</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">操作</th>
             </tr>
           </thead>
@@ -116,6 +183,18 @@ export default function FundManagement() {
                     <span className="text-red-600 text-xs font-medium">缺 {f.gap_count} 月</span>
                   ) : (
                     <span className="text-green-600 text-xs">完整</span>
+                  )}
+                </td>
+                <td className="py-3 px-4">
+                  {f.pending_count > 0 ? (
+                    <button
+                      className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 hover:bg-amber-100"
+                      onClick={() => openReview(f.fund_id)}
+                    >
+                      {f.pending_count} 待审
+                    </button>
+                  ) : (
+                    <span className="text-gray-300 text-xs">—</span>
                   )}
                 </td>
                 <td className="py-3 px-4">
@@ -150,8 +229,8 @@ export default function FundManagement() {
             ))}
             {funds.length === 0 && !fundsLoading && (
               <tr>
-                <td colSpan={6} className="py-10 text-center text-gray-400">
-                  暂无基金数据，请先通过 skills 端添加基金
+                <td colSpan={7} className="py-10 text-center text-gray-400">
+                  暂无基金。点右上"+ 添加基金"起 LLM 摄取任务。
                 </td>
               </tr>
             )}
@@ -159,86 +238,198 @@ export default function FundManagement() {
         </table>
       </div>
 
-      {/* 添加基金弹窗 */}
+      {/* 添加基金弹窗 (LLM 摄取版) */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto">
+          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-base font-medium">添加基金</h2>
-              <button className="text-gray-400 text-xl" onClick={() => setShowAdd(false)}>
+              <h2 className="text-base font-medium">添加基金 (LLM 摄取)</h2>
+              <button className="text-gray-400 text-xl" onClick={closeModal}>
                 &times;
               </button>
             </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">fund_id *</label>
-                <input
-                  className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                  value={addForm.fund_id}
-                  onChange={e => setAddForm({ ...addForm, fund_id: e.target.value })}
-                  placeholder="如 bentham_global_income_fund"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">基金名称 *</label>
-                <input
-                  className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                  value={addForm.fund_name}
-                  onChange={e => setAddForm({ ...addForm, fund_name: e.target.value })}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">APIR 代码</label>
-                <input
-                  className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                  value={addForm.apir_code}
-                  onChange={e => setAddForm({ ...addForm, apir_code: e.target.value })}
-                  placeholder="如 ETL5010AU"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">事实单 URL *</label>
-                <input
-                  className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                  value={addForm.confirmed_url}
-                  onChange={e => setAddForm({ ...addForm, confirmed_url: e.target.value })}
-                />
-              </div>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs text-gray-500 block mb-1">抓取方式 *</label>
-                  <select
-                    className="w-full text-sm border border-gray-200 rounded px-3 py-2 bg-white"
-                    value={addForm.fetch_method}
-                    onChange={e => setAddForm({ ...addForm, fetch_method: e.target.value })}
-                  >
-                    <option value="pdf">PDF</option>
-                    <option value="html">HTML</option>
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs text-gray-500 block mb-1">URL 类型 *</label>
+
+            {job ? (
+              <IngestProgress job={job} onClose={closeModal} />
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">fund_id *</label>
                   <input
                     className="w-full text-sm border border-gray-200 rounded px-3 py-2"
-                    value={addForm.url_type}
-                    onChange={e => setAddForm({ ...addForm, url_type: e.target.value })}
-                    placeholder="如 factsheet"
+                    value={addForm.fund_id}
+                    onChange={e => setAddForm({ ...addForm, fund_id: e.target.value })}
+                    placeholder="如 bentham_global_income_fund"
                   />
                 </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">基金名称 *</label>
+                  <input
+                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                    value={addForm.fund_name}
+                    onChange={e => setAddForm({ ...addForm, fund_name: e.target.value })}
+                    placeholder="如 Bentham Global Income Fund"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">APIR 代码</label>
+                  <input
+                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                    value={addForm.apir_code}
+                    onChange={e => setAddForm({ ...addForm, apir_code: e.target.value })}
+                    placeholder="如 ETL5010AU（选填）"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">
+                    归档页 URL <span className="text-gray-400">(选填 — 留空由 Gemini 自搜)</span>
+                  </label>
+                  <input
+                    className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                    value={addForm.confirmed_url}
+                    onChange={e => setAddForm({ ...addForm, confirmed_url: e.target.value })}
+                    placeholder="https://.../monthly-reports"
+                  />
+                </div>
+                <div className="border-t border-gray-100 pt-3">
+                  <div className="text-xs text-gray-500 mb-2">
+                    ↑ 留空则用下列信息让 Gemini 联网找归档页:
+                  </div>
+                  <div className="space-y-2">
+                    <input
+                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                      value={addForm.issuer}
+                      onChange={e => setAddForm({ ...addForm, issuer: e.target.value })}
+                      placeholder="发行商 (如 Bentham Asset Management)"
+                    />
+                    <input
+                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                      value={addForm.issuer_domain}
+                      onChange={e => setAddForm({ ...addForm, issuer_domain: e.target.value })}
+                      placeholder="发行商官网域名 (如 benthamam.com，选填)"
+                    />
+                    <input
+                      className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+                      value={addForm.asx_code}
+                      onChange={e => setAddForm({ ...addForm, asx_code: e.target.value })}
+                      placeholder="ASX 代码 (如 MXT，选填)"
+                    />
+                  </div>
+                </div>
+                {addError && <div className="text-xs text-red-500">{addError}</div>}
+                <button
+                  className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e] disabled:opacity-50"
+                  onClick={handleAdd}
+                  disabled={submitting}
+                >
+                  {submitting ? '起任务中…' : '开始 LLM 摄取'}
+                </button>
               </div>
-              {addError && <div className="text-xs text-red-500">{addError}</div>}
-              <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
-                ⚠ 仅注册基金元信息（名称/APIR/URL），不抓取月度数据。添加后需在 skills/ 目录运行 <code className="bg-amber-100 px-1 rounded">/add_fixed_fund</code> 抓取数据，再回到此处点"重算"。
-              </div>
-              <button
-                className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e]"
-                onClick={handleAdd}
-              >
-                确认添加
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 审核抽屉 */}
+      {reviewFund && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-base font-medium">
+                待审核: {reviewFund} ({pending.length} 条)
+              </h2>
+              <button className="text-gray-400 text-xl" onClick={() => setReviewFund(null)}>
+                &times;
               </button>
+            </div>
+            {pendingLoading && <div className="text-gray-400 text-sm">加载中…</div>}
+            {!pendingLoading && pending.length === 0 && (
+              <div className="text-gray-400 text-sm py-6 text-center">无待审记录</div>
+            )}
+            <div className="space-y-3">
+              {pending.map(p => (
+                <div key={p.id} className="border border-amber-200 bg-amber-50/40 rounded-lg p-3 text-sm">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <span className="font-medium">{p.date.slice(0, 7)}</span>{' '}
+                      <span className="text-gray-600">
+                        月度净收益: {(p.net_return * 100).toFixed(4)}%
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-500">gate: {p.gate_result ?? '—'}</div>
+                  </div>
+                  <div className="mt-1 text-xs text-red-600">未过闸: {p.review_reason ?? '—'}</div>
+                  {p.source_quote && (
+                    <div className="mt-2 text-xs text-gray-500 bg-white border border-gray-100 rounded p-2">
+                      <div className="text-gray-400 mb-1">source_quote:</div>
+                      <div className="whitespace-pre-wrap break-words">{p.source_quote}</div>
+                    </div>
+                  )}
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      className="text-xs bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700"
+                      onClick={() => handleApprove(p.id)}
+                    >
+                      通过 (写入 monthly_returns)
+                    </button>
+                    <button
+                      className="text-xs bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300"
+                      onClick={() => handleReject(p.id)}
+                    >
+                      拒绝
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
+      )}
+    </div>
+  )
+}
+
+function IngestProgress({ job, onClose }: { job: IngestJob; onClose: () => void }) {
+  const done = job.state === 'succeeded' || job.state === 'failed'
+  const badge = {
+    queued: 'bg-gray-100 text-gray-600',
+    discovering: 'bg-blue-100 text-blue-700',
+    ingesting: 'bg-blue-100 text-blue-700',
+    succeeded: 'bg-green-100 text-green-700',
+    failed: 'bg-red-100 text-red-700',
+  }[job.state]
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className={`text-xs px-2 py-0.5 rounded ${badge}`}>{job.state}</span>
+        <span className="text-xs text-gray-500">job_id: {job.job_id}</span>
+      </div>
+      {job.stats && (
+        <div className="text-xs bg-gray-50 border border-gray-100 rounded p-2">
+          <div>monthly: <b>{job.stats.monthly ?? 0}</b>  ·  pending: <b>{job.stats.pending ?? 0}</b>  ·  gap: <b>{job.stats.gap ?? 0}</b>  ·  download_fail: <b>{job.stats.download_fail ?? 0}</b></div>
+        </div>
+      )}
+      {job.error && (
+        <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded p-2">
+          {job.error}
+        </div>
+      )}
+      <div>
+        <div className="text-xs text-gray-500 mb-1">进度日志 (最近 {job.log_tail?.length ?? 0} 条):</div>
+        <div className="text-xs bg-black text-green-300 font-mono rounded p-2 max-h-64 overflow-auto">
+          {(job.log_tail ?? []).map((l, i) => (
+            <div key={i}>{l}</div>
+          ))}
+        </div>
+      </div>
+      {done && (
+        <button
+          className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e]"
+          onClick={onClose}
+        >
+          关闭
+        </button>
       )}
     </div>
   )

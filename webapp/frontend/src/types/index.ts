@@ -11,6 +11,8 @@ export interface Fund {
   has_metrics: boolean
   /** confirmed_gaps 表该基金行数（数据完整性标记，>0 表示有缺口） */
   gap_count: number
+  /** pending_review 表 state='pending' 行数（LLM 摄取两闸未过待人工审核） */
+  pending_count: number
 }
 
 /** 因数据缺口被排除对比的基金（compare/time-series 降级返回） */
@@ -122,4 +124,45 @@ export interface FundCreatePayload {
   fetch_method: string
   url_type: string
   max_pdf_pages?: number | null
+}
+
+/** LLM 摄取请求体 (POST /api/ingest/funds). confirmed_url 选填 (留空由 Gemini 自搜) */
+export interface IngestRequest {
+  fund_id: string
+  fund_name: string
+  apir_code?: string | null
+  confirmed_url?: string | null
+  issuer?: string | null
+  issuer_domain?: string | null
+  asx_code?: string | null
+  max_pdf_pages?: number | null
+  limit?: number | null
+}
+
+/** LLM 摄取任务状态 (GET /api/ingest/jobs/{id}) */
+export interface IngestJob {
+  job_id: string
+  fund_id: string
+  state: 'queued' | 'discovering' | 'ingesting' | 'succeeded' | 'failed'
+  started_at: string | null
+  finished_at: string | null
+  stats: { monthly?: number; pending?: number; gap?: number; download_fail?: number } | null
+  log_tail: string[] | null
+  error: string | null
+}
+
+/** pending_review 记录 (两闸未过, 待人工审核) */
+export interface PendingReview {
+  id: number
+  fund_id: string
+  fund_name: string | null
+  date: string  // YYYY-MM-DD
+  net_return: number
+  source_quote: string | null
+  extract_method: string
+  gate_result: string | null   // 如 "q0r1f1a1"
+  review_state: string
+  review_reason: string | null
+  candidates_json: string | null  // JSON string, 前端 parse 显示原始上下文
+  created_at: string | null
 }

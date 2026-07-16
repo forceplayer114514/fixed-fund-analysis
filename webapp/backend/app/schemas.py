@@ -41,8 +41,61 @@ class FundResponse(BaseModel):
     data_cutoff_month: Optional[str] = None  # 来自 fund_metrics.date_period 或最新 monthly_return
     has_metrics: bool = False
     gap_count: int = 0  # confirmed_gaps 表该基金行数（数据完整性标记）
+    pending_count: int = 0  # pending_review 表 state='pending' 行数（LLM 摄取两闸未过待人工审核）
 
     model_config = {"from_attributes": True}
+
+
+class PendingReviewResponse(BaseModel):
+    """/api/pending 返回；两闸未过的候选值供人工审核。"""
+    id: int
+    fund_id: str
+    fund_name: Optional[str] = None
+    date: str  # YYYY-MM-DD
+    net_return: float
+    source_quote: Optional[str] = None
+    extract_method: str
+    gate_result: Optional[str] = None
+    review_state: str
+    review_reason: Optional[str] = None
+    candidates_json: Optional[str] = None  # 原始响应 JSON
+    created_at: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class IngestRequest(BaseModel):
+    """POST /api/ingest/funds 请求体."""
+    fund_id: str
+    fund_name: str
+    apir_code: Optional[str] = None
+    confirmed_url: Optional[str] = None  # 选填；留空由 Gemini 联网自搜归档
+    issuer: Optional[str] = None
+    issuer_domain: Optional[str] = None
+    asx_code: Optional[str] = None
+    max_pdf_pages: Optional[int] = None
+    limit: Optional[int] = None  # 仅处理前 N 个链接 (调试)
+
+    @field_validator("apir_code")
+    @classmethod
+    def validate_apir(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        if not APIR_PATTERN.match(v):
+            raise ValueError(f"APIR 格式应为 3字母+4数字+AU（如 ETL5010AU），得到: {v}")
+        return v
+
+
+class IngestJobResponse(BaseModel):
+    """/api/ingest/jobs/{id} 返回。job 状态存 backend 内存字典。"""
+    job_id: str
+    fund_id: str
+    state: str  # 'queued' | 'discovering' | 'ingesting' | 'succeeded' | 'failed'
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    stats: Optional[dict] = None  # {'monthly': N, 'pending': N, 'gap': N, 'download_fail': N}
+    log_tail: Optional[list] = None  # 最后 N 条进度信息
+    error: Optional[str] = None
 
 
 class MonthlyReturnPatch(BaseModel):
