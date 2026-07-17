@@ -373,57 +373,50 @@ def probe(
     fund_id: Optional[str] = None,
     db_conn: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, object]:
-    """L3 兜底端到端. 输入 fund_name -> 输出结构化结果。
+    """L1 主源端到端 (Spec B: fundmonitors 从 L3 提到 L1). 输入 fund_name -> 输出结构化结果。
 
-    流程 (Spec A):
+    流程:
       A. 白名单短路: 给了 fund_id+db_conn 且 funds 表命中 fundmonitors_fund_id
-         -> 直接拼 URL fetch, 跳过 Tavily, 跳过 name guard (人工背书)。
+         -> 直接拼 URL fetch (人工背书, 信任 URL 匹配)。
       B. 否则走 Tavily: `site:fundmonitors.com <fund_name>` 拿 FundID+AccCode。
-      C. Tavily 通路 fetch 成功后, 用 `_name_match` 严格 AND 校验 markdown 首
-         2000 字含 fund_name 所有 token, 缺 token -> status='name_mismatch'
-         (防 SmarterMoney 类词面相近的错源)。
+      C. 抓到 markdown -> 抽 page_fund_name (供前端透明展示), 不做名字匹配 gate。
+         (Spec B 反 Spec A: 抓到啥就展示啥, 与输入名不一致由用户核对, 不再软挡。)
 
     返回 dict:
-      status: 'ok' | 'no_fundid' | 'paywall' | 'fetch_fail' | 'no_table'
-              | 'gate_fail' | 'name_mismatch'
+      status: 'ok' | 'no_fundid' | 'paywall' | 'fetch_fail' | 'no_table' | 'gate_fail'
       records: List[(date, net_return)] (成功时)
       ytd_map: Dict[year, ytd_decimal]
       url: 抓的 AJAX URL
-      errors: List[str] (gate_fail / name_mismatch 时)
+      page_fund_name: Optional[str] -- 页面上抓到的基金名, 供 UI 透明展示与输入名核对
+      errors: List[str] (gate_fail 时)
     """
     # A. 白名单短路
-    whitelisted = False
     hit: Optional[Tuple[int, str]] = None
     if fund_id and db_conn is not None:
         wl = _lookup_whitelist(db_conn, fund_id)
         if wl is not None:
             hit = wl
-            whitelisted = True
     # B. 未白名单 -> Tavily 通路
     if hit is None:
         hit = find_fundid_via_tavily(fund_name)
         if not hit:
             return {"status": "no_fundid", "records": [], "ytd_map": {},
-                    "url": None, "errors": []}
+                    "url": None, "page_fund_name": None, "errors": []}
     fid, acc = hit
     url = build_profile_url(fid, acc)
     md, status = fetch_profile_markdown(url)
     if status != "ok":
         return {"status": status, "records": [], "ytd_map": {},
-                "url": url, "errors": []}
-    # C. Tavily 通路才跑 name guard; 白名单命中信任 URL, 跳过 guard
-    if not whitelisted:
-        matched, reason = _name_match(fund_name, md or "")
-        if not matched:
-            return {"status": "name_mismatch", "records": [], "ytd_map": {},
-                    "url": url, "errors": [reason]}
+                "url": url, "page_fund_name": None, "errors": []}
+    # C. 抽页面基金名 (透明展示, 不做 gate)
+    page_name = _extract_page_fund_name(md)
     records, ytd_map = parse_html_monthly_table(md or "")
     if not records:
         return {"status": "no_table", "records": [], "ytd_map": ytd_map,
-                "url": url, "errors": []}
+                "url": url, "page_fund_name": page_name, "errors": []}
     ok, errs = gate_check_table(records, ytd_map)
     if not ok:
         return {"status": "gate_fail", "records": records, "ytd_map": ytd_map,
-                "url": url, "errors": errs}
+                "url": url, "page_fund_name": page_name, "errors": errs}
     return {"status": "ok", "records": records, "ytd_map": ytd_map,
-            "url": url, "errors": []}
+            "url": url, "page_fund_name": page_name, "errors": []}
