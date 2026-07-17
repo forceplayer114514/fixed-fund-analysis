@@ -21,8 +21,13 @@ def create_app(enable_scheduler: bool = True) -> FastAPI:
         """启动：建表 + 迁移 + 可选启动 RBA 调度器；关闭：停止调度器。"""
         init_db()
         # Spec B: 幂等迁移 (加 discovered_source_name 列)
+        import sys
         import sqlite3
         from pathlib import Path
+        # cwd 若是 webapp/backend, sys.path 无仓库根 -> llm_ingest 找不到, 主动塞
+        _repo_root = str(Path(__file__).resolve().parents[3])
+        if _repo_root not in sys.path:
+            sys.path.insert(0, _repo_root)
         from llm_ingest.migrations import spec_b_20260717 as _mig_b
         _db_path = Path(__file__).resolve().parents[3] / "data" / "fund_analysis.db"
         if _db_path.exists():

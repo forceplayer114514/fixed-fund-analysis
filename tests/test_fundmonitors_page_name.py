@@ -43,3 +43,18 @@ def test_share_class_variant_preserved():
     """Wholesale/Assisted 等 share class 后缀原样保留 (前端标红核对)。"""
     md = "# Coolabah Short Term Income Fund (Wholesale)"
     assert _extract_page_fund_name(md) == "Coolabah Short Term Income Fund (Wholesale)"
+
+
+def test_fund_phrase_fallback_for_fundmonitors_ajax_md():
+    """fundmonitors AJAX 返 HTML 转 md 无 heading, 抓首个 'Xxx Fund/Trust' 短语."""
+    md = (
+        "function DoCompare() { obj = document.comparefrm; ... }\n"
+        "Yarra Enhanced Income Fund Fund & Manager Details Investment Details\n"
+        "Yarra Capital Management | Total FUM for all funds:"
+    )
+    assert _extract_page_fund_name(md) == "Yarra Enhanced Income Fund"
+
+
+def test_fund_phrase_fallback_trust_variant():
+    md = "some prefix Gryphon Capital Income Trust more content"
+    assert _extract_page_fund_name(md) == "Gryphon Capital Income Trust"

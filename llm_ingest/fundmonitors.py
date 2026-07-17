@@ -24,6 +24,11 @@ FUNDMONITORS_HOST = "https://www.fundmonitors.com"
 # ---- Spec B: 页面基金名提取 (透明展示, 替代 Spec A name guard) ----
 _H1_RE = re.compile(r"^\s*#{1,3}\s+([^\n]+)", re.M)
 _BOLD_FIRST_RE = re.compile(r"\*\*([^*]{5,120})\*\*")
+# fundmonitors Full Profile AJAX 返 HTML 无 heading, 首个 "Xxx Fund/Trust" 短语兜底
+# 用 finditer + 取首个短匹配 (最少词) 避免贪婪吃到 "Fund Fund & Manager Details"
+_FUND_PHRASE_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9&\-]+(?:\s+[A-Z][A-Za-z0-9&\-]+){1,6}?\s+(?:Fund|Trust))\b"
+)
 
 
 def _extract_page_fund_name(markdown):
@@ -32,7 +37,8 @@ def _extract_page_fund_name(markdown):
     顺序:
       1. 首个 h1/h2/h3 标题 (最常见, `# Yarra Enhanced Income Fund`)
       2. 首个粗体串 (`**Yarra Enhanced Income Fund**`, 5~120 字符)
-      3. 找不到返 None (前端 fallback 到 fund_name)
+      3. 首个 "Xxx Yyy Fund/Trust" 短语 (fundmonitors AJAX HTML 转 md 无 heading 场景)
+      4. 找不到返 None (前端 fallback 到 fund_name)
 
     不做名字匹配, 不做过滤 -- 只把页面上的字面串拿出来给前端展示。
 
@@ -48,6 +54,10 @@ def _extract_page_fund_name(markdown):
     if m:
         return m.group(1).strip()
     m = _BOLD_FIRST_RE.search(markdown)
+    if m:
+        return m.group(1).strip()
+    # fundmonitors AJAX md fallback: 首个 "Xxx Fund/Trust" 短语
+    m = _FUND_PHRASE_RE.search(markdown)
     if m:
         return m.group(1).strip()
     return None
