@@ -63,6 +63,47 @@ def _extract_page_fund_name(markdown):
     return None
 
 
+# ---- L1 name-fuzzy 闸 (防错源) ----
+# 停用词: fundmonitors 页 + 生产 fund_name 两侧都常出现, 单独交集不构成绑定。
+_NAME_STOPWORDS = frozenset({
+    "fund", "trust", "the", "and", "of", "a", "an", "au", "aud",
+    "australia", "australian",
+    # 通用金融类别词 (不该单独作为绑定证据)
+    "income", "credit", "bond", "bonds", "capital",
+    "floating", "rate", "high", "yield", "enhanced",
+    "active", "long", "short", "smarter", "money",
+})
+
+
+def _name_tokens(name: str) -> frozenset:
+    """归一化基金名 -> 停用词过滤后的 token 集合. 用于 L1 name-fuzzy 闸."""
+    if not name:
+        return frozenset()
+    toks = re.findall(r"[a-z0-9]+", name.lower())
+    return frozenset(t for t in toks if t not in _NAME_STOPWORDS and len(t) >= 2)
+
+
+def _name_matches(page_name, fund_name):
+    """L1 name-fuzzy 闸: 去停用词后 token 交集非空即 OK.
+
+    2026-07-18 事故: Coolabah Assisted 走 Tavily 命中 Smarter Money Fund 页,
+    173 月错源入库. 加此闸: page_name 与 fund_name 完全无字面重叠 -> skip L1.
+
+    Returns:
+        (bool, str) — ok / 描述 (fail 时含双方 name 与交集调试)
+    """
+    if not page_name or not fund_name:
+        return (False, f"name_missing (page={page_name!r} fund={fund_name!r})")
+    p = _name_tokens(page_name)
+    f = _name_tokens(fund_name)
+    if not p or not f:
+        return (False, f"name_tokens_empty (p={p} f={f})")
+    inter = p & f
+    if not inter:
+        return (False, f"name_mismatch (page={page_name!r} fund={fund_name!r} inter=∅)")
+    return (True, f"name_ok inter={sorted(inter)}")
+
+
 def _lookup_whitelist(
     db_conn: sqlite3.Connection,
     fund_id: str,
@@ -420,6 +461,19 @@ def probe(
                 "url": url, "page_fund_name": None, "errors": []}
     # C. 抽页面基金名 (透明展示, 不做 gate)
     page_name = _extract_page_fund_name(md)
+    # C.1 L1 name-fuzzy 闸 (2026-07-18 事故防线):
+    # page_name 与 fund_name 完全无字面重叠 -> 拒绝入库 (错源).
+    # 白名单短路 (hit 来自 funds.fundmonitors_fund_id) 时豁免 -- 人工背书。
+    if fund_id and db_conn is not None:
+        wl_hit = _lookup_whitelist(db_conn, fund_id)
+    else:
+        wl_hit = None
+    if wl_hit is None:
+        ok_name, msg = _name_matches(page_name, fund_name)
+        if not ok_name:
+            return {"status": "name_mismatch", "records": [], "ytd_map": {},
+                    "url": url, "page_fund_name": page_name,
+                    "errors": [msg]}
     records, ytd_map = parse_html_monthly_table(md or "")
     if not records:
         return {"status": "no_table", "records": [], "ytd_map": ytd_map,
