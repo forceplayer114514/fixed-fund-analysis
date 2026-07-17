@@ -400,13 +400,13 @@ def probe(
       page_fund_name: Optional[str] -- 页面上抓到的基金名, 供 UI 透明展示与输入名核对
       errors: List[str] (gate_fail 时)
     """
-    # A. 白名单短路
+    # A. 白名单短路 (需 fund_id+acc_code 齐; 只有 fund_id 无 acc -> 走 Tavily 补 acc)
     hit: Optional[Tuple[int, str]] = None
     if fund_id and db_conn is not None:
         wl = _lookup_whitelist(db_conn, fund_id)
-        if wl is not None:
+        if wl is not None and wl[1]:  # acc_code 非空才短路
             hit = wl
-    # B. 未白名单 -> Tavily 通路
+    # B. 未白名单 (或 acc 空) -> Tavily 通路
     if hit is None:
         hit = find_fundid_via_tavily(fund_name)
         if not hit:
