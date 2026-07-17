@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from . import pdf as pdf_mod
 from .client import Client, DEFAULT_MAX_TOKENS
@@ -128,3 +129,75 @@ def extract_from_pdf(
         if not ex2.not_found:
             return ex2
     return ex
+
+
+# ---------- Spec D: 通道 dispatch ----------
+
+def _url_suffix(url_or_path: str) -> str:
+    """URL/路径 → 小写后缀 (含点), 无后缀 = ''."""
+    p = urlparse(url_or_path)
+    return Path(p.path).suffix.lower()
+
+
+def _read_local_or_none(url_or_path: str) -> Optional[bytes]:
+    """file:// url 或本地路径 → bytes; http(s) → None (由通道内部去下)."""
+    if url_or_path.startswith("file://"):
+        return Path(url_or_path[7:]).read_bytes()
+    p = urlparse(url_or_path)
+    if p.scheme in ("", "file"):
+        return Path(url_or_path).read_bytes()
+    return None
+
+
+def extract_from_source(
+    url_or_path: str,
+    expected_ym: str,
+    *,
+    client: Optional[Client] = None,
+    local_pdf_path: Optional[Path] = None,
+    html_text: Optional[str] = None,
+    csv_text: Optional[str] = None,
+    max_pages: int = 2,
+) -> Extraction:
+    """按 URL 后缀分派 PDF/HTML/CSV.
+
+    PDF: 用 local_pdf_path (已由上游 _run_ingest_job 处理下载/缓存)
+    HTML/CSV: 用 html_text/csv_text (已由上游 fetch), 或 file:// url 直读
+
+    上游用法:
+      # PDF 走本地路径 (已下载或本地缓存)
+      extract_from_source(url, ym, local_pdf_path=Path("..."))
+      # HTML/CSV: 直接传入 text 内容
+      extract_from_source(url, ym, html_text=html)
+      extract_from_source(url, ym, csv_text=csv)
+    """
+    ext = _url_suffix(url_or_path)
+    if ext == ".pdf":
+        if local_pdf_path is None:
+            raise ValueError(
+                "extract_from_source: PDF 通道需要 local_pdf_path (上游负责下载/兜底)"
+            )
+        return extract_from_pdf(
+            local_pdf_path, expected_ym, client=client, max_pages=max_pages,
+        )
+    if ext in (".html", ".htm"):
+        from .extract_html import extract_from_html
+        if html_text is None:
+            data = _read_local_or_none(url_or_path)
+            if data is None:
+                raise ValueError(
+                    "extract_from_source: HTML 通道需要 html_text 或 file:// URL"
+                )
+            html_text = data.decode("utf-8", errors="replace")
+        return extract_from_html(html_text, expected_ym, client=client)
+    if ext == ".csv":
+        from .extract_csv import extract_from_csv
+        if csv_text is None:
+            data = _read_local_or_none(url_or_path)
+            if data is None:
+                raise ValueError(
+                    "extract_from_source: CSV 通道需要 csv_text 或 file:// URL"
+                )
+            csv_text = data.decode("utf-8", errors="replace")
+        return extract_from_csv(csv_text, expected_ym, client=client)
+    raise ValueError(f"extract_from_source: 未支持后缀 {ext!r} (url={url_or_path!r})")

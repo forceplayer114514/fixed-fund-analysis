@@ -232,40 +232,92 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         if req.limit:
             links = links[: req.limit]
 
-        # ---- L2 PDF ingest 循环 ----
+        # ---- L2 数据源 ingest 循环 (PDF/HTML/CSV 3 通道) ----
         _job_update(jid, state="ingesting_l2_pdf")
         from pathlib import Path
         pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
 
         for i, (ym, url) in enumerate(links, 1):
-            pdf_path = pdf_dir / f"{ym}.pdf"
-            # Spec C1: file:// 表示 run_discovery L2.6 本地缓存兜底
-            if url.startswith("file://"):
-                from pathlib import Path as _Path
-                local_p = _Path(url[7:])
-                if not local_p.exists():
-                    stats["download_fail"] += 1
-                    store_mod.record_confirmed_gap(
-                        conn, fund_id=req.fund_id, missing_month=ym,
-                        exhausted_levels="local_cache_missing",
-                    )
-                    _job_log(jid, f"[{i}/{len(links)}] {ym} local cache MISSING {local_p}")
-                    continue
-                pdf_path = local_p
-            elif not pdf_path.exists():
-                ok = llm_cli._download_pdf(url, pdf_path)
-                if not ok:
-                    stats["download_fail"] += 1
-                    store_mod.record_confirmed_gap(
-                        conn, fund_id=req.fund_id, missing_month=ym,
-                        exhausted_levels="download_fail",
-                    )
-                    _job_log(jid, f"[{i}/{len(links)}] {ym} download FAIL")
-                    continue
+            # 按 URL 后缀分派通道 (Spec D)
+            low_url = url.lower()
+            u_no_qs = low_url.split("?", 1)[0]
+            if u_no_qs.endswith(".csv"):
+                channel = "csv"
+            elif u_no_qs.endswith((".html", ".htm")):
+                channel = "html"
+            else:
+                # 默认 PDF (无后缀 / .pdf / file://.../.pdf 都当 PDF)
+                channel = "pdf"
+
+            pdf_path = pdf_dir / f"{ym}.pdf"  # 仅 PDF 通道用
+            payload_text: Optional[str] = None  # HTML/CSV 通道装载
+
+            if channel == "pdf":
+                # Spec C1: file:// 表示 run_discovery L2.6 本地缓存兜底
+                if url.startswith("file://"):
+                    from pathlib import Path as _Path
+                    local_p = _Path(url[7:])
+                    if not local_p.exists():
+                        stats["download_fail"] += 1
+                        store_mod.record_confirmed_gap(
+                            conn, fund_id=req.fund_id, missing_month=ym,
+                            exhausted_levels="local_cache_missing",
+                        )
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} local cache MISSING {local_p}")
+                        continue
+                    pdf_path = local_p
+                elif not pdf_path.exists():
+                    ok = llm_cli._download_pdf(url, pdf_path)
+                    if not ok:
+                        stats["download_fail"] += 1
+                        store_mod.record_confirmed_gap(
+                            conn, fund_id=req.fund_id, missing_month=ym,
+                            exhausted_levels="download_fail",
+                        )
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} download FAIL")
+                        continue
+            else:
+                # HTML/CSV 通道: 抓取文本到内存 (可能过大, 上限由 extract_from_source 内部截)
+                if url.startswith("file://"):
+                    from pathlib import Path as _Path
+                    local_p = _Path(url[7:])
+                    if not local_p.exists():
+                        stats["download_fail"] += 1
+                        store_mod.record_confirmed_gap(
+                            conn, fund_id=req.fund_id, missing_month=ym,
+                            exhausted_levels=f"local_{channel}_missing",
+                        )
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} local {channel} MISSING {local_p}")
+                        continue
+                    payload_text = local_p.read_text(encoding="utf-8", errors="replace")
+                else:
+                    # 用 discover._fetch 与 discovery 层一致的 UA/超时
+                    try:
+                        from llm_ingest.discover import _fetch as _fetch_text
+                        payload_text = _fetch_text(url) or ""
+                    except Exception as e:  # noqa: BLE001
+                        payload_text = ""
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} fetch {channel} ERR: {e}")
+                    if not payload_text:
+                        stats["download_fail"] += 1
+                        store_mod.record_confirmed_gap(
+                            conn, fund_id=req.fund_id, missing_month=ym,
+                            exhausted_levels=f"{channel}_fetch_fail",
+                        )
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} fetch {channel} EMPTY")
+                        continue
+
             try:
-                ex = ex_mod.extract_from_pdf(
-                    pdf_path, ym, max_pages=req.max_pdf_pages or 2,
-                )
+                if channel == "pdf":
+                    ex = ex_mod.extract_from_pdf(
+                        pdf_path, ym, max_pages=req.max_pdf_pages or 2,
+                    )
+                else:
+                    ex = ex_mod.extract_from_source(
+                        url, ym,
+                        html_text=payload_text if channel == "html" else None,
+                        csv_text=payload_text if channel == "csv" else None,
+                    )
             except Exception as e:  # noqa: BLE001
                 store_mod.record_confirmed_gap(
                     conn, fund_id=req.fund_id, missing_month=ym,
@@ -274,8 +326,12 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 _job_log(jid, f"[{i}/{len(links)}] {ym} extract ERR: {e}")
                 continue
 
-            pdf_text = pdf_mod.full_text(pdf_path)
-            q = verify.check_quote(ex.source_quote, pdf_text, ex.net_return)
+            # 反捏造两道闸: PDF 走 pdf_text, HTML/CSV 走 payload_text
+            if channel == "pdf":
+                source_text = pdf_mod.full_text(pdf_path)
+            else:
+                source_text = payload_text or ""
+            q = verify.check_quote(ex.source_quote, source_text, ex.net_return)
             history = store_mod.load_monthly_history(conn, req.fund_id)
             r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
             dec = store_mod.write_extraction(
@@ -284,7 +340,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 monthly_history=history,
             )
             stats[dec.action] = stats.get(dec.action, 0) + 1
-            _job_log(jid, f"[{i}/{len(links)}] {ym} {dec.action} {dec.gate_summary}")
+            _job_log(jid, f"[{i}/{len(links)}] {ym} [{channel}] {dec.action} {dec.gate_summary}")
 
         conn.close()
         _job_update(jid, stats=stats)
