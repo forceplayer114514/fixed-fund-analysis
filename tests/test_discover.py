@@ -44,6 +44,20 @@ class TestParseYmFromText:
     def test_year_first_month_name(self):
         assert _parse_ym_from_text("2025-March") == "2025-03"
 
+    def test_underscore_month_name_year(self):
+        # Spec C1: Stake 命名 Accumulate_June_2025.pdf, \b 不识 _underscore, 用 (?:\b|_)
+        assert _parse_ym_from_text("Accumulate_June_2025.pdf") == "2025-06"
+
+    def test_month_name_two_digit_year(self):
+        # Stake: AccumulateReport_January26.pdf
+        assert _parse_ym_from_text("AccumulateReport_January26.pdf") == "2026-01"
+        assert _parse_ym_from_text("Accumulate_report_March26.pdf") == "2026-03"
+
+    def test_two_digit_year_out_of_range_rejected(self):
+        # 只接受 19..30 (2019-2030); 老年份不该被 2-digit 匹配
+        assert _parse_ym_from_text("something_January99.pdf") is None
+        assert _parse_ym_from_text("something_January05.pdf") is None
+
     def test_none_when_no_match(self):
         assert _parse_ym_from_text("nothing_relevant.pdf") is None
 

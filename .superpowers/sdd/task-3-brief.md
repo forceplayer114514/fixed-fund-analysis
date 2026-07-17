@@ -1,79 +1,118 @@
-# Task 3: 实现增量解析与自适应进程池 `parse_factsheet.py`
-
+### Task 3: 基础计算函数（年化收益、波动率、最大回撤）
 
 **Files:**
-- Modify: `scripts/parse_factsheet.py`
-- Test: `tests/test_parse_factsheet_incremental.py` (Create)
+- Create: `webapp/backend/app/calculations.py`
+- Create: `webapp/backend/tests/test_calculations.py`
 
 **Interfaces:**
-- Consumes: 本地 PDF 文件，`history_cache.json`
-- Produces: 合并并重新连乘 NAV 后的 time_series，保存到 `history_cache.json` 和 `{latest_month}.json`
+- Produces: `calculate_annualized_return(compounded_return: float, n_months: int, fund_name: str = "Unknown") -> float`、`calculate_annualized_volatility(returns: list[float], fund_name: str = "Unknown") -> float`、`calculate_max_drawdown(nav_series: list[float], fund_name: str = "Unknown") -> float`。行为与现有 `scripts/metrics.py` 完全一致（数值断言复用 `tests/test_metrics.py`）。
 
-- [ ] **Step 1: 创建测试用例验证增量合并与重算 NAV 逻辑**
+- [ ] **Step 1: 写失败测试 tests/test_calculations.py**
 
-Create: `tests/test_parse_factsheet_incremental.py`
 ```python
+"""基础计算函数测试，断言复用 tests/test_metrics.py 以保证移植精度。"""
 import pytest
+import math
 
-def merge_and_recalculate_nav(cache_series: list[dict], new_series: list[dict]) -> list[dict]:
-    # 合并
-    merged_map = {dp["date"]: dp for dp in cache_series}
-    for dp in new_series:
-        merged_map[dp["date"]] = dp
-    
-    # 排序
-    sorted_series = [merged_map[d] for d in sorted(merged_map.keys())]
-    
-    # 重算 NAV
-    current_nav = 1.0
-    for idx, dp in enumerate(sorted_series):
-        if idx == 0:
-            dp["nav"] = 1.0
-            dp["net_return"] = 0.0
-        else:
-            current_nav = current_nav * (1.0 + dp["net_return"])
-            dp["nav"] = current_nav
-    return sorted_series
+from app.calculations import (
+    calculate_annualized_return,
+    calculate_annualized_volatility,
+    calculate_max_drawdown,
+)
+
 
 @pytest.mark.unit
-def test_merge_and_recalculate_nav():
-    cache = [
-        {"date": "2020-01-31", "net_return": 0.0, "nav": 1.0},
-        {"date": "2020-02-29", "net_return": 0.01, "nav": 1.01}
-    ]
-    new_data = [
-        {"date": "2020-03-31", "net_return": 0.02, "nav": 1.0} # 新解析的临时 NAV 往往为 1.0
-    ]
-    result = merge_and_recalculate_nav(cache, new_data)
-    assert len(result) == 3
-    assert result[2]["nav"] == pytest.approx(1.01 * 1.02)
+def test_calculate_annualized_return():
+    assert calculate_annualized_return(1.1025, 6, "TestFund") == pytest.approx(0.21550625)
+    with pytest.raises(ValueError) as excinfo:
+        calculate_annualized_return(1.05, 0, "TestFund")
+    assert "[TestFund]" in str(excinfo.value) and "n_months=0" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_calculate_annualized_volatility():
+    assert calculate_annualized_volatility([0.01, 0.02, 0.03], "TestFund") == pytest.approx(0.03464101615)
+    assert calculate_annualized_volatility([0.01], "TestFund") == 0.0
+    assert calculate_annualized_volatility([], "TestFund") == 0.0
+
+
+@pytest.mark.unit
+def test_calculate_max_drawdown():
+    assert calculate_max_drawdown([100.0, 105.0, 94.5, 91.35, 110.0], "TestFund") == pytest.approx(-0.13)
+    with pytest.raises(ValueError) as excinfo:
+        calculate_max_drawdown([0.0, 10.0], "TestFund")
+    assert "peak=0.0" in str(excinfo.value)
+    assert calculate_max_drawdown([], "TestFund") == 0.0
 ```
 
-- [ ] **Step 2: 运行测试**
+- [ ] **Step 2: 运行测试验证失败**
 
-Run: `python3 -m pytest tests/test_parse_factsheet_incremental.py`
-Expected: PASS
+Run: `cd webapp/backend && python -m pytest tests/test_calculations.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'app.calculations'`）
 
-- [ ] **Step 3: 修改 `scripts/parse_factsheet.py` 以进行增量解析和自适应多进程**
+- [ ] **Step 3: 实现 app/calculations.py（基础部分）**
 
-- 在 `parse_bentham` 和 `parse_metrics` 中：
-  - 检查已记录在缓存中的月份，若无待解析新文件，直接返回缓存。
-  - 对于待解析新文件，若待处理数量 $\le 1$，直接在当前线程同步处理；若 $>1$，再使用进程池。
-  - 解析完成后，将新数据与缓存合并，并按日期排序。
-  - 重新连乘计算 NAV。
-  - 执行数据完整性/连续月份缺口检查（若有缺口则抛出错误）。
-  - 将最新合并数据回写回 `history_cache.json`。
+```python
+"""5维核心指标纯计算函数。无数据库依赖、无网络IO，仅接受 list[float]。
 
-- [ ] **Step 4: 运行 pytest 确保现有测试与新测试全部通过**
+移植自 scripts/metrics.py 并扩展为5维体系。所有函数保持与原实现数值一致。
+"""
+from __future__ import annotations
 
-Run: `python3 -m pytest tests/`
-Expected: PASS
 
-- [ ] **Step 5: 提交更改**
+def calculate_annualized_return(compounded_return: float, n_months: int,
+                                fund_name: str = "Unknown") -> float:
+    """复利年化收益率：(compounded_return) ** (12/n) - 1。"""
+    if n_months <= 0:
+        raise ValueError(f"[{fund_name}] n_months={n_months}, 无法计算年化收益率，时间序列月份数必须为正数")
+    return (compounded_return ** (12.0 / n_months)) - 1.0
+
+
+def calculate_annualized_volatility(returns: list[float],
+                                    fund_name: str = "Unknown") -> float:
+    """年化波动率：月度收益标准差 * sqrt(12)。"""
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean_r = sum(returns) / n
+    denominator = n - 1
+    if denominator <= 0:
+        raise ValueError(f"[{fund_name}] denominator={denominator} (n_months - 1), 无法计算年化波动率")
+    variance = sum((r - mean_r) ** 2 for r in returns) / denominator
+    return (variance * 12.0) ** 0.5
+
+
+def calculate_max_drawdown(nav_series: list[float],
+                           fund_name: str = "Unknown") -> float:
+    """绝对最大回撤：基于累计NAV序列，返回最深回撤比例（负数）。"""
+    if not nav_series:
+        return 0.0
+    max_dd = 0.0
+    peak = nav_series[0]
+    for nav in nav_series:
+        if nav > peak:
+            peak = nav
+        if peak < 1e-4:
+            raise ValueError(f"[{fund_name}] peak={peak} (低于 1e-4)，无法计算最大回撤，请检查该基金的 NAV 数据是否异常")
+        dd = (nav - peak) / peak
+        if dd < max_dd:
+            max_dd = dd
+    return max_dd
+```
+
+- [ ] **Step 4: 运行测试验证通过**
+
+Run: `cd webapp/backend && python -m pytest tests/test_calculations.py -v`
+Expected: 3 passed
+
+- [ ] **Step 5: 提交**
 
 ```bash
-git add scripts/parse_factsheet.py tests/test_parse_factsheet_incremental.py
-git commit -m "feat: add incremental parsing, NAV recalculation, and adaptive process pool"
+git add webapp/backend/app/calculations.py webapp/backend/tests/test_calculations.py
+git commit -m "feat(backend): add basic calculation functions (annualized return, volatility, max drawdown)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
+

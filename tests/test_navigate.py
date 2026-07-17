@@ -105,20 +105,27 @@ class _MockClient:
 
 
 class TestGeminiPickNextHop:
+    # 候选选无双强信号的组合, 保证 Gemini 挑 null 时不触发 fallback (专测 Gemini 判定).
+    # test_fallback_on_null 单独测强信号 fallback.
     CANDIDATES = [
-        ("Monthly Performance Report", "https://hellostake.com/legal/monthly-performance-report"),
+        ("Distributions", "https://hellostake.com/support/stake-accumulate/investing"),
         ("Fund Update", "https://hellostake.com/au/blog/fund-update"),
+    ]
+    # 双强信号候选 (anchor + URL 都命中 _NAV_STRONG_SIGNAL): 用于 fallback 单测
+    STRONG_CANDIDATES = [
+        ("Monthly Performance Report", "https://hellostake.com/legal/monthly-performance-report"),
+        ("Blog", "https://hellostake.com/au/blog/x"),
     ]
 
     def test_pick_valid_url(self):
         client = _MockClient(
-            '{"picked_url": "https://hellostake.com/legal/monthly-performance-report", "reason": "path 含 monthly"}'
+            '{"picked_url": "https://hellostake.com/support/stake-accumulate/investing", "reason": "?"}'
         )
         picked = _gemini_pick_next_hop(self.CANDIDATES, "Stake Accumulate", "https://x", client)
-        assert picked == "https://hellostake.com/legal/monthly-performance-report"
+        assert picked == "https://hellostake.com/support/stake-accumulate/investing"
 
     def test_hallucinated_url_rejected(self):
-        # Gemini 返一个不在 candidates 里的 URL -> 视作幻觉丢弃
+        # Gemini 返一个不在 candidates 里的 URL -> 视作幻觉丢弃; 无双强信号 -> None
         client = _MockClient(
             '{"picked_url": "https://hellostake.com/made-up-page", "reason": "?"}'
         )
@@ -145,14 +152,48 @@ class TestGeminiPickNextHop:
     def test_json_with_markdown_fence(self):
         # _parse_json_response 应该剥 ```json 围栏
         client = _MockClient(
-            '```json\n{"picked_url": "https://hellostake.com/legal/monthly-performance-report"}\n```'
+            '```json\n{"picked_url": "https://hellostake.com/support/stake-accumulate/investing"}\n```'
         )
         picked = _gemini_pick_next_hop(self.CANDIDATES, "Stake", "https://x", client)
-        assert picked == "https://hellostake.com/legal/monthly-performance-report"
+        assert picked == "https://hellostake.com/support/stake-accumulate/investing"
 
     def test_malformed_json(self):
         client = _MockClient("not json at all")
         assert _gemini_pick_next_hop(self.CANDIDATES, "Stake", "https://x", client) is None
+
+    def test_fallback_on_gemini_null_with_strong_signal(self):
+        """Spec C1 fallback: Gemini 返 null 但 top-1 anchor+URL 双命中强信号
+        (Stake 场景: Monthly Performance Report), 兜底返 top-1."""
+        client = _MockClient('{"picked_url": null, "reason": "保守"}')
+        picked = _gemini_pick_next_hop(
+            self.STRONG_CANDIDATES, "Stake", "https://hellostake.com/au/other", client,
+        )
+        assert picked == "https://hellostake.com/legal/monthly-performance-report"
+
+    def test_fallback_skips_self_reference(self):
+        """top-1 URL path 与 current_url 完全相同 (自指) -> 不走 fallback."""
+        client = _MockClient('{"picked_url": null}')
+        # top-1 URL path = current_url path -> 自指
+        cands = [
+            ("Monthly Performance Report", "https://hellostake.com/legal/monthly-performance-report"),
+        ]
+        assert _gemini_pick_next_hop(
+            cands, "Stake", "https://hellostake.com/legal/monthly-performance-report", client,
+        ) is None
+
+    def test_fallback_skips_au_prefix_self(self):
+        """/au/foo vs /foo 视作自指 (Stake au 站与国际站相同页)."""
+        client = _MockClient('{"picked_url": null}')
+        cands = [
+            ("Performance updates statement", "https://hellostake.com/support/x/performance-updates-and-statements/1"),
+        ]
+        picked = _gemini_pick_next_hop(
+            cands, "Stake",
+            "https://hellostake.com/au/support/x/performance-updates-and-statements/1",
+            client,
+        )
+        # anchor 无 STRONG_SIGNAL 命中 -> fallback 本就不触发 -> None
+        assert picked is None
 
 
 # ---------- navigate_one_hop (整合) ----------
@@ -200,10 +241,12 @@ class TestNavigateOneHop:
         assert client.calls == []
 
     def test_gemini_returns_none(self, monkeypatch):
+        """Gemini 返 null 且候选无双强信号 -> 无 fallback, 返 (None, None, [])."""
+        weak_html = '<a href="/legal/pds-info">PDS Info</a><a href="/support/x">Statement Update</a>'
         monkeypatch.setattr(nav, "_fetch", lambda url, timeout=30: "SHOULD-NOT-BE-CALLED")
         client = _MockClient('{"picked_url": null, "reason": "无合适"}')
         visited: Set[str] = {self.START_URL}
-        out = navigate_one_hop(self.START_URL, self.START_HTML, "Stake", None, visited, client)
+        out = navigate_one_hop(self.START_URL, weak_html, "Stake", None, visited, client)
         assert out == (None, None, [])
 
     def test_fetch_failure(self, monkeypatch):

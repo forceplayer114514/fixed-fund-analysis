@@ -1,84 +1,235 @@
-# Task 1: 优化 URL 探测 `discover_source.py`
-
+### Task 1: 项目脚手架
 
 **Files:**
-- Modify: `scripts/discover_source.py`
-- Test: `tests/test_discover_source.py` (Create)
+- Create: `webapp/frontend/package.json`
+- Create: `webapp/frontend/tsconfig.json`
+- Create: `webapp/frontend/tsconfig.app.json`
+- Create: `webapp/frontend/tsconfig.node.json`
+- Create: `webapp/frontend/vite.config.ts`
+- Create: `webapp/frontend/tailwind.config.js`
+- Create: `webapp/frontend/postcss.config.js`
+- Create: `webapp/frontend/index.html`
+- Create: `webapp/frontend/src/main.tsx`
+- Create: `webapp/frontend/src/vite-env.d.ts`
+- Create: `webapp/frontend/src/index.css`
 
 **Interfaces:**
-- Consumes: `fund_registry.yaml`
-- Produces: 能够快速探测 `confirmed_url` 是否可用，若可用则直接跳过搜索引擎检索。
+- Produces: 可运行的 Vite dev server，`pnpm run dev` 可启动
 
-- [ ] **Step 1: 编写测试用例验证快速探测逻辑**
-
-Create: `tests/test_discover_source.py`
-```python
-import pytest
-import requests
-from unittest.mock import patch, MagicMock
-
-# 模拟快速探测函数
-def quick_verify_url(url: str) -> bool:
-    try:
-        resp = requests.head(url, timeout=5, headers={"User-Agent": "Mozilla"})
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-@pytest.mark.unit
-def test_quick_verify_url_success():
-    with patch('requests.head') as mock_head:
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_head.return_value = mock_resp
-        assert quick_verify_url("https://example.com") is True
-
-@pytest.mark.unit
-def test_quick_verify_url_fail():
-    with patch('requests.head', side_effect=requests.RequestException):
-        assert quick_verify_url("https://example.com") is False
-```
-
-- [ ] **Step 2: 运行测试确保失败（本阶段创建测试将直接通过，无需失败）**
-
-Run: `python3 -m pytest tests/test_discover_source.py`
-Expected: PASS (测试本身只包含 mock 验证)
-
-- [ ] **Step 3: 修改 `scripts/discover_source.py` 以加入直连探测秒级跳过**
-
-Modify `scripts/discover_source.py` around line 345:
-```python
-    # Step 1: Check existing confirmed URL
-    confirmed_url = fund_info.get("confirmed_url")
-    if confirmed_url:
-        log_attempt(f"Registry has existing URL: {confirmed_url}. Checking with quick HEAD request...")
-        try:
-            # 轻量探测以提高速度
-            resp = requests.head(confirmed_url, headers=HEADERS, timeout=5)
-            is_alive = (resp.status_code == 200)
-        except Exception:
-            is_alive = False
-
-        if is_alive:
-            log_attempt(f"Quick check succeeded. Verifying content rules...")
-            if verify_url(confirmed_url, fund_id, fund_name, apir_code):
-                log_attempt(f"SUCCESS: Existing URL is verified and active: {confirmed_url}")
-                fund_info["verified_at"] = datetime.datetime.now().strftime("%Y-%m-%d")
-                fund_info["verification_signal"] = "Verified existing registry URL via quick probe"
-                save_registry(registry)
-                sys.exit(0)
-```
-
-- [ ] **Step 4: 运行 pytest 确保现有测试全部通过**
-
-Run: `python3 -m pytest tests/`
-Expected: PASS
-
-- [ ] **Step 5: 提交更改**
+- [ ] **Step 1: 初始化项目与安装依赖**
 
 ```bash
-git add scripts/discover_source.py tests/test_discover_source.py
-git commit -m "feat: add quick HEAD probe for source discovery to skip engine search"
+cd /Users/chong/Desktop/fixed_fund_analysis
+mkdir -p webapp/frontend && cd webapp/frontend
+```
+
+创建 `package.json`:
+
+```json
+{
+  "name": "fixed-fund-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "zustand": "^4.5.0",
+    "echarts": "^5.5.0",
+    "echarts-for-react": "^3.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
+```
+
+- [ ] **Step 2: 创建 Vite 配置**
+
+`vite.config.ts`:
+```typescript
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
+})
+```
+
+- [ ] **Step 3: 创建 Tailwind 配置**
+
+`tailwind.config.js`:
+```javascript
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}
+```
+
+`postcss.config.js`:
+```javascript
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+```
+
+- [ ] **Step 4: 创建 TypeScript 配置**
+
+`tsconfig.json`:
+```json
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+```
+
+`tsconfig.app.json`:
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+```
+
+`tsconfig.node.json`:
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}
+```
+
+- [ ] **Step 5: 创建入口文件**
+
+`index.html`:
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>固定收益基金分析</title>
+  </head>
+  <body class="bg-gray-50">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+`src/main.tsx`:
+```typescript
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import App from './App'
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </React.StrictMode>,
+)
+```
+
+`src/index.css`:
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+```
+
+`src/vite-env.d.ts`:
+```typescript
+/// <reference types="vite/client" />
+```
+
+`src/App.tsx`（最小版本，后续 Task 3 完善）:
+```typescript
+function App() {
+  return <div className="p-4 text-lg">固定收益基金分析</div>
+}
+export default App
+```
+
+- [ ] **Step 6: 安装依赖并验证**
+
+```bash
+cd /Users/chong/Desktop/fixed_fund_analysis/webapp/frontend
+npm install
+npx tsc -b --noEmit 2>&1 || true  # 预计有暂时错误因为组件尚未实现
+echo "Scaffold complete"
 ```
 
 ---
+

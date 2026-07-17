@@ -1,74 +1,151 @@
-# Task 2 Report: consistency_check A-group (1/2/3/4) + multi-field fixture
+# Task 2 Report: 数据库模型（6张表）
 
-## What was implemented
+## Status: DONE_WITH_CONCERNS
 
-Created a new self-contained module `skills/lib/consistency.py` implementing the A-group (document-internal, DB-independent) self-consistency checks plus a compound-validation helper, with B-group stubs reserved for Task 3.
+> DONE on all functional requirements. The "WITH_CONCERNS" flag is solely for a
+> necessary, semantically-equivalent adaptation to the available Python runtime
+> (see "Adaptation" below). All tests pass; the model definitions are functionally
+> identical to the brief.
 
-### Files changed (all new)
-- `skills/tests/fixtures/pdf_multifield.json` — synthetic multi-field monthly records fixture (CORRECTED version with `excess_net` / `excess_gross` split keys, all 4 A-group checks self-consistent).
-- `skills/tests/test_consistency_check.py` — 5 tests: A-group positive, Check 1 / 3 / 4 negatives, and fields-missing-skip case.
-- `skills/lib/consistency.py` — `consistency_check(...)` public entry + `_check_compound` helper + `_check_bgroup` / `_check_correlation` no-op stubs.
+## What I Implemented
 
-### Module surface (must stay stable for Tasks 3/4/5/7)
-- Public: `consistency_check(fund_id, records, conn, *, gross_records=None, benchmark_records=None, excess_records=None, excess_gross_records=None, growth_records=None, income_records=None, shareclass_prefix=None, rolling=None, corr_threshold=0.98, fee_diff_monthly_max=0.001) -> tuple[bool, list[str], list[str]]` returning `(pass, errors_block, errors_warn)`. `pass = (len(errors_block) == 0)`.
-- A-group (block-level, each skipped when its fields are absent, never fails on missing data):
-  - Check 1: `excess_net ≈ net - benchmark` (tol `_TOL = 0.0005`).
-  - Check 2: `excess_gross ≈ gross - benchmark` (tol `_TOL`).
-  - Check 3: `net < gross + 0.001` (fee-waiver tolerance).
-  - Check 4: `net ≈ growth + income` (tol `_TOL`).
-- Compound (block-level, A-group substitute for Plotly sources): runs only when `rolling` truthy AND `rolling.get("parse_error", True)` is falsy. Strict all-windows check (3mo/6mo/12mo/inception) at 0.5% threshold — every window must pass, not "at least one". Reuses `lib.extract.verify_monthly_vs_rolling` internally but re-implements the strict judgment per the brief.
-- B-group stubs: `_check_bgroup` (Checks 5/6) and `_check_correlation` (Check 7 warn) are `pass` no-ops; `_check_correlation` is always called (warn-level), `_check_bgroup` only when `shareclass_prefix` provided. Task 3 fills these.
+Overwrote the empty `webapp/backend/app/models.py` placeholder (left by Task 1)
+with the full 6-table SQLAlchemy 2.0 ORM, and created
+`webapp/backend/tests/test_models.py` (verbatim from the brief).
 
-## TDD evidence
+The 6 models, all inheriting `Base` (from `app.database`):
 
-### RED (Step 3)
-Command: `cd skills && /usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+1. **`Fund`** (`funds`) - PK `fund_id` (TEXT/String); `fund_name` UNIQUE NOT NULL;
+   `apir_code` UNIQUE NULLABLE (supports Stake-like funds with no APIR);
+   `confirmed_url`, `fetch_method`, `url_type` NOT NULL; `max_pdf_pages`,
+   `verified_at`, `created_at` (server_default `(datetime('now'))`).
+   `relationship`s: `monthly_returns`, `anomalies` (lists), `metrics`
+   (one-to-one, `uselist=False`), all `cascade="all, delete-orphan"`.
+2. **`MonthlyReturn`** (`monthly_returns`) - autoincrement PK; FK `fund_id`
+   `ondelete="CASCADE"`; composite `UniqueConstraint("fund_id","date", name="uq_fund_date")`;
+   `date`, `net_return`, `nav` NOT NULL; `commentary_truth` nullable.
+3. **`Anomaly`** (`anomalies`) - autoincrement PK; FK `fund_id` `ondelete="CASCADE"`;
+   `date, value, z_score, threshold_sigma, mean, stdev` NOT NULL.
+4. **`RbaCashRate`** (`rba_cash_rates`) - PK `date_period` (YYYY-MM); `rate` NOT NULL;
+   `updated_at` server_default. (No FK to funds - independent dimension table.)
+5. **`FundMetric`** (`fund_metrics`) - PK = FK `fund_id` `ondelete="CASCADE"`; full
+   5-dimension metric set (进攻/防守/性价比/体感/真实性辅助) with `orig_`/`un_` pairs,
+   `unsmoothing_coefficient_phi`, `is_geltner_applied`, `history_months`,
+   `is_short_history_warning`, `ljung_box_q`, `is_q_significant`, `updated_at`.
+6. **`AiReport`** (`ai_reports`) - autoincrement PK; `fund_ids` (Text, denormalized
+   list - no FK to funds per brief), `date_period`, `report_type`, `content`,
+   `created_at`.
+
+## Adaptation (the concern)
+
+The brief's model code uses PEP 604 union syntax (`str | None`, `int | None`,
+`FundMetric | None`). This is Python 3.10+ syntax. The only interpreter available
+on this machine is **Python 3.9.6** (macOS Command-Line Tools system Python);
+no `python3.10+`, no Homebrew Python, no project venv exists. With
+`from __future__ import annotations` the annotations become strings, but
+SQLAlchemy 2.0.51 actively resolves them and raises
+`MappedAnnotationError: Could not resolve all types within mapped annotation`.
+Without the future import, the class body raises
+`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`.
+
+To make the brief's code run on Python 3.9 I made the minimal, semantically-
+identical change: `X | None` -> `Optional[X]` (from `typing`), and kept
+`from __future__ import annotations` for uniform forward-ref resolution.
+Specifically: `apir_code`, `max_pdf_pages`, `verified_at`, `created_at` (Fund),
+`commentary_truth` (MonthlyReturn), `updated_at` (RbaCashRate, FundMetric),
+`created_at` (AiReport), and `metrics: Mapped[Optional["FundMetric"]]`.
+
+**No field names, column types, nullability, constraints, FKs, cascade rules, or
+relationships were changed.** The model layer is functionally identical to the
+brief. If a later task upgrades the runtime to Python 3.10+, the `Optional[X]`
+forms can be reverted to `X | None` with zero behavioral difference.
+
+This deviation was flagged in the report rather than silently applied, per
+project rule §六 (防范大模型自主决定并悄悄应用 changes to base data/logic).
+
+## TDD Evidence
+
+### RED (Step 2)
+
+Command:
 ```
-ERROR collecting tests/test_consistency_check.py
-tests/test_consistency_check.py:7: in <module>
-    from lib.consistency import consistency_check
-E   ModuleNotFoundError: No module named 'lib.consistency'
-!!! Interrupted: 1 error during collection !!!
+cd webapp/backend && python3 -m pytest tests/test_models.py -v
 ```
-
-### GREEN (Step 5)
-Command: `cd skills && /usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+Failing output (collection error):
 ```
-tests/test_consistency_check.py::test_agroup_all_pass PASSED             [ 20%]
-tests/test_consistency_check.py::test_check1_net_excess_mismatch_blocks PASSED [ 40%]
-tests/test_consistency_check.py::test_check3_net_not_less_than_gross_blocks PASSED [ 60%]
-tests/test_consistency_check.py::test_check4_total_return_decomposition_blocks PASSED [ 80%]
-tests/test_consistency_check.py::test_agroup_fields_missing_skips_not_fails PASSED [100%]
-============================== 5 passed in 0.02s ===============================
+ImportError while importing test module 'tests/test_models.py'.
+tests/test_models.py:5: in <module>
+    from app.models import Fund, MonthlyReturn, Anomaly, RbaCashRate, FundMetric, AiReport
+E   ImportError: cannot import name 'Fund' from 'app.models' (.../app/models.py)
+=========================== short test summary info ============================
+ERROR tests/test_models.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
 ```
+Why expected: Task 1 left `app/models.py` as a 0-byte placeholder so
+`conftest.py`'s `from app import models` would not ImportError. The module
+exists but defines no `Fund`, so the test's `from app.models import Fund` fails.
+This is the correct RED (the brief's literal "ModuleNotFoundError" wording does
+not apply because the module file exists; the task context predicted this exact
+error).
 
-### Full-suite regression
-`cd skills && /usr/bin/python3 -m pytest` -> `94 passed, 35 warnings in 0.24s` (warnings are pre-existing `PytestUnknownMarkWarning` from `test_strategies.py`, unrelated to this task).
+### GREEN (Step 4)
 
-## Commit
-`c97aa09 feat(consistency): A-group self-consistency checks 1/2/3/4 + compound validation` — 3 files, +300 lines.
-
-## Self-review findings
-- Return type is exactly `tuple[bool, list[str], list[str]]` (both the normal return and the empty-records early return `(False, ["无数据"], [])`). PASS.
-- A-group checks skip (not fail) when their fields are missing — each guarded by `if net and benchmark and excess_net:` style predicate; verified by `test_agroup_fields_missing_skips_not_fails`. PASS.
-- `_check_compound` runs only when `rolling` truthy AND `not rolling.get("parse_error", True)` — parse_error defaults to True when the key is absent, so compound is opt-in on a clean parse. PASS.
-- `_check_bgroup` and `_check_correlation` present as `pass` no-ops for Task 3. PASS.
-- No `if fund_id ==` special cases anywhere. PASS.
-- Tests use real JSON fixtures and the real `db_conn` tmp SQLite fixture (no mocks). PASS.
-- Test output pristine (5 passed, no warnings from new tests). PASS.
-
-## Fix: dead code removal
-
-Removed two dead lines in `_check_compound`:
-- `from lib.extract import verify_monthly_vs_rolling` (lazy import, only supported the dead call)
-- `short = verify_monthly_vs_rolling(records, rolling)` (assigned, never used)
-
-The strict 3mo/6mo/12mo/inception loop below remains unchanged.
-
-Test command: `/usr/bin/python3 -m pytest tests/test_consistency_check.py -v`
+Command:
 ```
-5 passed in 0.02s
+cd webapp/backend && python3 -m pytest tests/test_models.py tests/test_database.py -v
 ```
-All 5 tests pass, unchanged from baseline.
-- Minor: the brief's `_check_compound` calls `verify_monthly_vs_rolling(records, rolling)` and binds the result to `short` but never uses it (the strict re-implementation loop below is what actually reports errors). I kept this faithful to the brief; it is dead code but harmless. Task 3 or a later cleanup can remove the unused call if desired.
-- No other concerns. The interface contract is stable for downstream tasks.
+Passing output:
+```
+tests/test_models.py::test_insert_fund_and_returns PASSED                [ 14%]
+tests/test_models.py::test_fund_name_unique_constraint PASSED            [ 28%]
+tests/test_models.py::test_apir_code_nullable PASSED                     [ 42%]
+tests/test_models.py::test_monthly_return_unique_date_per_fund PASSED    [ 57%]
+tests/test_models.py::test_cascade_delete_fund_removes_children PASSED   [ 71%]
+tests/test_models.py::test_rba_cash_rate_upsert_style PASSED             [ 85%]
+tests/test_database.py::test_init_db_creates_all_tables PASSED           [100%]
+======================== 7 passed, 7 warnings in 0.03s =========================
+```
+The 7 warnings are all `PytestUnknownMarkWarning` for the unregistered
+`@pytest.mark.unit` marker - harmless and expected per the task context.
+
+`test_database.py` turned GREEN as a side effect: defining `Fund` means
+`init_db()` now creates the `funds` table, satisfying its assertion. Full suite
+(`python3 -m pytest tests/ -v`) confirms 7/7 passing with no regressions.
+
+## Files Changed
+
+- `webapp/backend/app/models.py` - overwrote empty placeholder with 6-model ORM
+  (modified, +~105 lines).
+- `webapp/backend/tests/test_models.py` - new file, verbatim from brief
+  (added, +~107 lines).
+
+Both committed in `9a7570d`.
+
+## Self-Review Findings
+
+- **Completeness:** All 6 models present with correct fields, PKs, FKs
+  (`ondelete="CASCADE"`), the composite UNIQUE on `(fund_id, date)`,
+  `fund_name` UNIQUE, `apir_code` nullable+UNIQUE, and cascade relationships.
+  `FundMetric` is one-to-one (`uselist=False`). `AiReport` has no FK to funds
+  (denormalized `fund_ids` Text) - matches the brief.
+- **Quality:** Clean, SQLAlchemy 2.0 style (`Mapped`/`mapped_column`/
+  `relationship`/`DeclarativeBase`), Chinese comments preserved, dimension
+  section comments kept verbatim.
+- **Discipline (YAGNI):** No models or fields beyond the brief. The only
+  addition is `from __future__ import annotations` + `from typing import Optional`
+  (justified above).
+- **Testing:** 6/6 model tests pass; `test_database.py` still passes; output
+  pristine (only the unregistered-mark warning).
+
+## Concerns
+
+1. **Python 3.9 adaptation** (detailed above): `Optional[X]` substituted for the
+   brief's `X | None`. Functionally identical; flag for awareness and in case a
+   later task standardizes on Python 3.10+.
+2. **No `pytest.ini`/`pyproject.toml` mark registration:** the
+   `@pytest.mark.unit` warnings persist. Not introduced by this task (Task 1's
+   `test_database.py` already uses the same marker). Registering the mark is out
+   of scope for Task 2 but could be a small follow-up.
+3. **`AiReport` is imported but unused** in `test_models.py` - this is verbatim
+   from the brief (the import itself exercises that the class exists). No test
+   currently asserts AiReport behavior; acceptable per the brief.

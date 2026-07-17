@@ -86,15 +86,24 @@ def _parse_ym_from_text(text: str) -> Optional[str]:
     m = re.search(r"(?<!\d)(20\d{2})[-_/]?(0[1-9]|1[0-2])(?!\d)", t)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
-    # 2) 月份名 + 年
+    # 2) 月份名 + 年 (\b 边界不识别 _underscore, 用 (?:\b|_) 兼容 Stake 命名)
     names = "|".join(list(_MONTHS.keys()) + list(_MONTHS_ABBR.keys()))
-    m = re.search(rf"\b({names})[\-_\s\.]*(20\d{{2}})", t)
+    m = re.search(rf"(?:\b|_)({names})[\-_\s\.]*(20\d{{2}})", t)
     if m:
         mon = _MONTHS.get(m.group(1)) or _MONTHS_ABBR.get(m.group(1))
         if mon:
             return f"{m.group(2)}-{mon:02d}"
-    # 3) 年 + 月份名
-    m = re.search(rf"(20\d{{2}})[\-_\s\.]*({names})\b", t)
+    # 2b) 月份名 + 2 位年 (Stake: AccumulateReport_January26.pdf)
+    m = re.search(rf"(?:\b|_)({names})[\-_\s\.]*(\d{{2}})(?!\d)", t)
+    if m:
+        mon = _MONTHS.get(m.group(1)) or _MONTHS_ABBR.get(m.group(1))
+        if mon:
+            yr2 = int(m.group(2))
+            # 只接受 19..30 范围内的 2 位年 (2019-2030 有效)
+            if 19 <= yr2 <= 30:
+                return f"20{yr2:02d}-{mon:02d}"
+    # 3) 年 + 月份名 (同样兼容 _)
+    m = re.search(rf"(20\d{{2}})[\-_\s\.]*({names})(?:\b|_)", t)
     if m:
         mon = _MONTHS.get(m.group(2)) or _MONTHS_ABBR.get(m.group(2))
         if mon:
@@ -657,6 +666,70 @@ def run_discovery(
         "no_archive": pointer.no_archive,
         "evidence": pointer.evidence,
     })
+
+    # L1.5 (Spec C1): archive_url 或 latest_pdf_url 非空但 aggregate 空 -> 页可能是
+    # "中转入口页" (Stake 场景: hellostake.com/.../performance-updates-and-statements/...
+    # 挂 <a href="/legal/monthly-performance-report">, 二级链接才有 PDF), 走 navigate
+    # 层让 Gemini 挑同域内链再抓 1 跳. no_archive 状态不再作 gate -- Stake v1 会判
+    # no_archive=True 但页确含月报入口内链.
+    _l15_seed = pointer.archive_url or pointer.latest_pdf_url
+    if not l1_links and _l15_seed:
+        try:
+            from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
+            from .discover2 import (
+                _rank_pdfs_by_name_match, _pdf_slug_match_count,
+                confirm_pdf_is_monthly_report,
+            )
+            visited: Set[str] = {_l15_seed}
+            nav_hops: List[Tuple[str, str]] = []
+            # 抓归档页全 HTML (parse_archive_page 那步用过, 但没保存下来)
+            arch_html = _fetch(_l15_seed) or ""
+            if arch_html:
+                next_url, _next_html, next_pdfs = navigate_one_hop(
+                    _l15_seed, arch_html, fund_name,
+                    pointer.issuer_domain_confirmed or issuer_domain,
+                    visited, client,
+                )
+                nav_hops.append((_l15_seed, next_url or "(no_pick)"))
+                if next_pdfs:
+                    next_pdfs = _rank_pdfs_by_name_match(next_pdfs, fund_name)
+                    # 尝试直接从文件名反解 ym (跳过 Gemini PDF 打样, 大批量场景省 tokens)
+                    nav_pairs: List[Tuple[str, str]] = []
+                    _NON_MONTHLY_HINTS = re.compile(
+                        r"(pds|tmd|target[-_]market|fsg|financial[-_]services|"
+                        r"whistle|research|lonsec|morningstar|zenith|policy|"
+                        r"guide|application|handbook|dictionary)",
+                        re.I,
+                    )
+                    for u in next_pdfs:
+                        fname = u.rsplit("/", 1)[-1]
+                        if _NON_MONTHLY_HINTS.search(fname):
+                            continue
+                        ym = _parse_ym_from_text(fname) or _parse_ym_from_text(u)
+                        if ym and _valid_ym(ym):
+                            nav_pairs.append((ym, u))
+                    if nav_pairs:
+                        obtained.update(ym for ym, _ in nav_pairs)
+                        aggregate.extend(nav_pairs)
+                        report.per_level_contribution["L1_nav"] = len(nav_pairs)
+                        report.per_level_source["L1_nav"] = next_url or ""
+                        # 更新 pointer 让下游知道真归档在哪
+                        pointer.archive_url = next_url
+                        pointer.discovered_pdfs = list(next_pdfs)
+                        pointer.raw["nav_hops"] = nav_hops
+                    report.evidence_log.append({
+                        "level": "L1_nav", "count": len(nav_pairs),
+                        "from_url": pointer.archive_url if not nav_pairs else "(navigated)",
+                        "to_url": next_url,
+                        "evidence": f"导航 1 跳, {len(next_pdfs)} 份 PDF, {len(nav_pairs)} 份反解 ym",
+                    })
+                else:
+                    report.evidence_log.append({
+                        "level": "L1_nav", "count": 0, "to_url": next_url,
+                        "evidence": "导航 1 跳后仍无 PDF",
+                    })
+        except Exception as e:  # noqa: BLE001
+            report.evidence_log.append({"level": "L1_nav", "error": str(e)})
 
     # 期望区间 (确定下界)
     if not inception_ym and l1_links:

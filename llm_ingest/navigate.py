@@ -34,6 +34,15 @@ _NAV_KEYWORDS = re.compile(
     re.I,
 )
 
+# 强信号 (排序用): anchor / URL 命中即高分, 挪到 candidates 前面让 LLM 更容易选
+_NAV_STRONG_SIGNAL = re.compile(
+    r"(monthly[\s\-_]*(?:performance[\s\-_]*)?report|"
+    r"monthly[\s\-_]*update|"
+    r"performance[\s\-_]*(?:update|report)|"
+    r"fund[\s\-_]*(?:monthly|report))",
+    re.I,
+)
+
 # ---- 排除路径 (URL 命中即丢) ----
 _NAV_EXCLUDE_PATTERNS = (
     "/login", "/logout", "/contact", "/subscribe", "/careers",
@@ -96,6 +105,21 @@ def _extract_candidate_links(
         out.append((anchor or "(no-text)", full))
         if len(out) >= NAV_MAX_CANDIDATES:
             break
+    # 按强信号 (anchor 或 URL 命中 _NAV_STRONG_SIGNAL) 排前, 让 Gemini 一眼看到最像的
+    def _score(item: Tuple[str, str]) -> int:
+        txt, u = item
+        s = 0
+        if _NAV_STRONG_SIGNAL.search(txt or ""):
+            s += 10
+        if _NAV_STRONG_SIGNAL.search(u):
+            s += 10
+        # 弱信号也算 (但排在强信号后)
+        if _NAV_KEYWORDS.search(txt or ""):
+            s += 2
+        if _NAV_KEYWORDS.search(urlparse(u).path):
+            s += 2
+        return s
+    out.sort(key=_score, reverse=True)
     return out
 
 
@@ -108,6 +132,9 @@ def _gemini_pick_next_hop(
     """让 Gemini 从 candidates 挑 1 条最像月报归档的 URL.
     严格校验: 返回值必须**字面**在 candidates 里, 否则视作幻觉丢弃 -> None.
     Gemini 报 picked_url=null / 解析失败 -> None.
+
+    Spec C1 fallback: Gemini 保守返 null 时, 若 top-1 是强信号命中且不是当前页
+    的语义等价 (path 相同), 兜底返回 top-1 (保证 Stake 场景可挑对).
     """
     if not candidates:
         return None
@@ -119,19 +146,40 @@ def _gemini_pick_next_hop(
         current_url=current_url,
         candidates_list=candidate_lines,
     )
+    picked: Optional[str] = None
     try:
         resp = client.messages(prompt, max_tokens=512)
+        obj = _parse_json_response(resp.text) or {}
+        p = obj.get("picked_url")
+        if p and p not in ("null", "None"):
+            url_set = {u for _, u in candidates}
+            if p in url_set:
+                picked = p
     except Exception:  # noqa: BLE001
-        return None
-    obj = _parse_json_response(resp.text) or {}
-    picked = obj.get("picked_url")
-    if not picked or picked in ("null", "None"):
-        return None
-    # 幻觉防护: picked 必须字面在 candidates 里
-    url_set = {u for _, u in candidates}
-    if picked not in url_set:
-        return None
-    return picked
+        pass
+
+    if picked:
+        return picked
+
+    # 兜底 (Stake 场景): Gemini 拒挑但 top-1 明显强信号, 且 URL path 不等于当前页
+    # (排除自指) -> 用 top-1. 保守: 仅当 anchor + URL 都有强信号才走兜底.
+    top_txt, top_url = candidates[0]
+    top_path = urlparse(top_url).path.rstrip("/").lower()
+    cur_path = urlparse(current_url).path.rstrip("/").lower()
+    # path 完全相同或一个是另一个的 /au 前缀变体, 判为自指
+    if top_path == cur_path or top_path == "/au" + cur_path or "/au" + top_path == cur_path:
+        # top-1 是自己, 试 top-2
+        if len(candidates) >= 2:
+            top_txt, top_url = candidates[1]
+            top_path = urlparse(top_url).path.rstrip("/").lower()
+            if top_path == cur_path:
+                return None
+        else:
+            return None
+    # 只在 top 强信号双命中时兜底 (anchor + URL 都要含强关键词)
+    if _NAV_STRONG_SIGNAL.search(top_txt) and _NAV_STRONG_SIGNAL.search(top_url):
+        return top_url
+    return None
 
 
 def navigate_one_hop(

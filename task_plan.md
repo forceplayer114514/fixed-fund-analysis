@@ -4,7 +4,7 @@
 在阶段 1 后端地基上构建 FastAPI 路由层：基金 CRUD、5维指标对比、NAV时序、异常纠错、RBA定时调度（10个端点）。**本阶段不做 LLM**（归 skills/cc 侧）。详细任务步骤见 `docs/superpowers/plans/2026-07-11-fastapi-api-layer.md`。
 
 ## Current Phase
-All 7 tasks complete - 准备整支 review + 合并 main
+阶段 2 完成，已合并 main（73 测试通过，4 个 review 修复）
 
 ## Environment Constraints (每步都须遵守)
 - **Python 3.9.6**：用 `Optional[X]`，禁 PEP 604 `X | None` 运行时。文件首行 `from __future__ import annotations`。用 `python3`/`pip3`。

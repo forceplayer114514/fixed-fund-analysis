@@ -1,93 +1,248 @@
-# Task 2: 实现差异化下载 `fetch_web.py`
-
+### Task 2: 数据库模型（6张表）
 
 **Files:**
-- Modify: `scripts/fetch_web.py`
-- Test: `tests/test_fetch_web.py` (Create)
+- Create: `webapp/backend/app/models.py`
+- Create: `webapp/backend/tests/test_models.py`
 
 **Interfaces:**
-- Consumes: `history_cache.json` 中的已有日期序列
-- Produces: 过滤后的待下载 PDF 链接列表，避免重复下载历史数据
+- Produces: ORM 模型类 `Fund`, `MonthlyReturn`, `Anomaly`, `RbaCashRate`, `FundMetric`, `AiReport`，字段名与 spec 第3节 schema 完全一致。`Fund` 主键 `fund_id` (TEXT)，`fund_name` UNIQUE。所有子表通过 `fund_id` 外键级联删除。
 
-- [ ] **Step 1: 创建测试用例验证下载链接差分逻辑**
+- [ ] **Step 1: 写失败测试 tests/test_models.py**
 
-Create: `tests/test_fetch_web.py`
 ```python
+"""验证6张表的ORM模型：插入、唯一约束、级联删除。"""
 import pytest
-import re
+from sqlalchemy.exc import IntegrityError
 
-def filter_pdf_links(pdf_links: list[tuple[str, str]], existing_dates: set[str], fund_id: str) -> list[tuple[str, str]]:
-    filtered = []
-    for text, url in pdf_links:
-        filename = url.split('/')[-1]
-        # 解析年份月份 (针对 Bentham: 20170131-GIF-Monthly-Report.pdf)
-        date_match = re.search(r'(\d{4})(\d{2})(\d{2})', filename)
-        if date_match:
-            date_str = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-            if date_str in existing_dates:
-                continue
-        # 针对 Metrics: 2605 - MXT Monthly Report.pdf
-        mxt_match = re.search(r'_(\d{2})(\d{2})', filename)
-        if mxt_match:
-            year = 2000 + int(mxt_match.group(1))
-            month = int(mxt_match.group(2))
-            # 构建 YYYY-MM
-            month_prefix = f"{year}-{month:02d}"
-            if any(d.startswith(month_prefix) for d in existing_dates):
-                continue
-        filtered.append((text, url))
-    return filtered
+from app.models import Fund, MonthlyReturn, Anomaly, RbaCashRate, FundMetric, AiReport
+
 
 @pytest.mark.unit
-def test_filter_pdf_links_bentham():
-    pdf_links = [
-        ("GIF Jan 2017", "https://example.com/20170131-GIF-Monthly-Report.pdf"),
-        ("GIF Feb 2017", "https://example.com/20170228-GIF-Monthly-Report.pdf")
-    ]
-    existing_dates = {"2017-01-31"}
-    filtered = filter_pdf_links(pdf_links, existing_dates, "bentham_global_income_fund")
-    assert len(filtered) == 1
-    assert "20170228" in filtered[0][1]
+def test_insert_fund_and_returns(db_session):
+    """能插入基金及其月度收益，并通过关系访问。"""
+    fund = Fund(fund_id="stake_accumulate", fund_name="Stake Accumulate",
+                confirmed_url="https://example.com", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund)
+    db_session.commit()
+
+    ret = MonthlyReturn(fund_id="stake_accumulate", date="2026-05-31",
+                        net_return=0.0053, nav=1.0053)
+    db_session.add(ret)
+    db_session.commit()
+
+    assert db_session.query(MonthlyReturn).count() == 1
+    assert fund.monthly_returns[0].net_return == pytest.approx(0.0053)
+
+
+@pytest.mark.unit
+def test_fund_name_unique_constraint(db_session):
+    """fund_name 唯一约束：重复插入同名基金应报错。"""
+    fund1 = Fund(fund_id="fund_a", fund_name="Duplicate Fund",
+                 confirmed_url="http://a", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund1)
+    db_session.commit()
+
+    fund2 = Fund(fund_id="fund_b", fund_name="Duplicate Fund",
+                 confirmed_url="http://b", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund2)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.unit
+def test_apir_code_nullable(db_session):
+    """apir_code 可为空（支持 Stake 等无 APIR 基金）。"""
+    fund = Fund(fund_id="stake", fund_name="Stake Fund",
+                apir_code=None, confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund)
+    db_session.commit()
+    assert fund.apir_code is None
+
+
+@pytest.mark.unit
+def test_monthly_return_unique_date_per_fund(db_session):
+    """同一基金同一月份不能重复插入。"""
+    fund = Fund(fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund)
+    db_session.commit()
+
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-05-31", net_return=0.01, nav=1.01))
+    db_session.commit()
+
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-05-31", net_return=0.02, nav=1.02))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+
+@pytest.mark.unit
+def test_cascade_delete_fund_removes_children(db_session):
+    """删除基金应级联删除其月度收益、异常、指标、AI报告。"""
+    fund = Fund(fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    db_session.add(fund)
+    db_session.commit()
+
+    db_session.add(MonthlyReturn(fund_id="f1", date="2026-05-31", net_return=0.01, nav=1.01))
+    db_session.add(Anomaly(fund_id="f1", date="2026-05-31", value=0.99,
+                           z_score=3.5, threshold_sigma=3.0, mean=0.01, stdev=0.02))
+    db_session.add(FundMetric(fund_id="f1", date_period="2026-05", history_months=1,
+                              is_short_history_warning=1, unsmoothing_coefficient_phi=0.0,
+                              is_geltner_applied=0, orig_annualized_excess_return=0.0,
+                              un_annualized_excess_return=0.0, orig_max_drawdown=0.0,
+                              un_max_drawdown=0.0, orig_omega_ratio=1.0, un_omega_ratio=1.0,
+                              orig_excess_win_rate=0.5, un_excess_win_rate=0.5,
+                              orig_max_underperform_months=1, un_max_underperform_months=1,
+                              orig_annualized_volatility=0.01, un_annualized_volatility=0.01,
+                              ljung_box_q=0.0, is_q_significant=0))
+    db_session.commit()
+
+    db_session.delete(fund)
+    db_session.commit()
+
+    assert db_session.query(MonthlyReturn).count() == 0
+    assert db_session.query(Anomaly).count() == 0
+    assert db_session.query(FundMetric).count() == 0
+
+
+@pytest.mark.unit
+def test_rba_cash_rate_upsert_style(db_session):
+    """RBA 利率表以 date_period 为主键。"""
+    db_session.add(RbaCashRate(date_period="2026-05", rate=0.0435))
+    db_session.commit()
+    assert db_session.query(RbaCashRate).count() == 1
 ```
 
-- [ ] **Step 2: 运行测试以验证逻辑正确性**
+- [ ] **Step 2: 运行测试验证失败**
 
-Run: `python3 -m pytest tests/test_fetch_web.py`
-Expected: PASS
+Run: `cd webapp/backend && python -m pytest tests/test_models.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'app.models'`）
 
-- [ ] **Step 3: 修改 `scripts/fetch_web.py` 以读取 `history_cache.json` 并过滤下载**
+- [ ] **Step 3: 实现 app/models.py**
 
-在 `scripts/fetch_web.py` 中引入 `load_cache_dates` 辅助函数：
 ```python
-def load_cache_dates(fund_id: str) -> set[str]:
-    cache_path = os.path.join(BASE_DIR, "data", "raw", fund_id, "history_cache.json")
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {dp["date"] for dp in data.get("time_series", [])}
-        except Exception:
-            pass
-    return set()
+"""数据库 ORM 模型：6张表，字段与 spec 第3节 schema 一致。"""
+from sqlalchemy import String, Float, Integer, Text, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class Fund(Base):
+    __tablename__ = "funds"
+
+    fund_id: Mapped[str] = mapped_column(String, primary_key=True)
+    fund_name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    apir_code: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    confirmed_url: Mapped[str] = mapped_column(Text, nullable=False)
+    fetch_method: Mapped[str] = mapped_column(String, nullable=False)
+    url_type: Mapped[str] = mapped_column(String, nullable=False)
+    max_pdf_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    verified_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str | None] = mapped_column(String, server_default="(datetime('now'))")
+
+    monthly_returns: Mapped[list["MonthlyReturn"]] = relationship(
+        back_populates="fund", cascade="all, delete-orphan")
+    anomalies: Mapped[list["Anomaly"]] = relationship(
+        back_populates="fund", cascade="all, delete-orphan")
+    metrics: Mapped["FundMetric | None"] = relationship(
+        back_populates="fund", cascade="all, delete-orphan", uselist=False)
+
+
+class MonthlyReturn(Base):
+    __tablename__ = "monthly_returns"
+    __table_args__ = (UniqueConstraint("fund_id", "date", name="uq_fund_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False)  # YYYY-MM-DD
+    net_return: Mapped[float] = mapped_column(Float, nullable=False)
+    nav: Mapped[float] = mapped_column(Float, nullable=False)
+    commentary_truth: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    fund: Mapped["Fund"] = relationship(back_populates="monthly_returns")
+
+
+class Anomaly(Base):
+    __tablename__ = "anomalies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    z_score: Mapped[float] = mapped_column(Float, nullable=False)
+    threshold_sigma: Mapped[float] = mapped_column(Float, nullable=False)
+    mean: Mapped[float] = mapped_column(Float, nullable=False)
+    stdev: Mapped[float] = mapped_column(Float, nullable=False)
+
+    fund: Mapped["Fund"] = relationship(back_populates="anomalies")
+
+
+class RbaCashRate(Base):
+    __tablename__ = "rba_cash_rates"
+
+    date_period: Mapped[str] = mapped_column(String, primary_key=True)  # YYYY-MM
+    rate: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[str | None] = mapped_column(String, server_default="(datetime('now'))")
+
+
+class FundMetric(Base):
+    __tablename__ = "fund_metrics"
+
+    fund_id: Mapped[str] = mapped_column(ForeignKey("funds.fund_id", ondelete="CASCADE"), primary_key=True)
+    date_period: Mapped[str] = mapped_column(String, nullable=False)
+    history_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_short_history_warning: Mapped[int] = mapped_column(Integer, nullable=False)
+    unsmoothing_coefficient_phi: Mapped[float] = mapped_column(Float, nullable=False)
+    is_geltner_applied: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 维度1：进攻
+    orig_annualized_excess_return: Mapped[float] = mapped_column(Float, nullable=False)
+    un_annualized_excess_return: Mapped[float] = mapped_column(Float, nullable=False)
+    # 维度2：防守
+    orig_max_drawdown: Mapped[float] = mapped_column(Float, nullable=False)
+    un_max_drawdown: Mapped[float] = mapped_column(Float, nullable=False)
+    # 维度3：性价比
+    orig_omega_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    un_omega_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    # 维度4：体感与煎熬度
+    orig_excess_win_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    un_excess_win_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    orig_max_underperform_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    un_max_underperform_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 维度5：真实性辅助
+    orig_annualized_volatility: Mapped[float] = mapped_column(Float, nullable=False)
+    un_annualized_volatility: Mapped[float] = mapped_column(Float, nullable=False)
+    ljung_box_q: Mapped[float] = mapped_column(Float, nullable=False)
+    is_q_significant: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[str | None] = mapped_column(String, server_default="(datetime('now'))")
+
+    fund: Mapped["Fund"] = relationship(back_populates="metrics")
+
+
+class AiReport(Base):
+    __tablename__ = "ai_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_ids: Mapped[str] = mapped_column(Text, nullable=False)
+    date_period: Mapped[str] = mapped_column(String, nullable=False)
+    report_type: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str | None] = mapped_column(String, server_default="(datetime('now'))")
 ```
-然后在 `fetch_bentham` 与 `fetch_metrics` 中过滤 `pdf_links`：
-```python
-    existing_dates = load_cache_dates(fund_id) # 传入对应 fund_id
-    filtered_links = []
-    # 针对不同文件名做不同匹配逻辑，如已存在则跳过
-    ...
-```
 
-- [ ] **Step 4: 运行 pytest 确保没有引入语法错误**
+- [ ] **Step 4: 运行测试验证通过**
 
-Run: `python3 -m pytest tests/`
-Expected: PASS
+Run: `cd webapp/backend && python -m pytest tests/test_models.py tests/test_database.py -v`
+Expected: 7 passed
 
-- [ ] **Step 5: 提交更改**
+- [ ] **Step 5: 提交**
 
 ```bash
-git add scripts/fetch_web.py tests/test_fetch_web.py
-git commit -m "feat: implement differential fetch using history cache dates"
+git add webapp/backend/app/models.py webapp/backend/tests/test_models.py
+git commit -m "feat(backend): add 6-table SQLAlchemy ORM models
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
 
 ---
+
