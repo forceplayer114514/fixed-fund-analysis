@@ -89,21 +89,45 @@ router = APIRouter(tags=["ingest"])
 
 # ---------- 摄取核心 (在 worker 线程调用) ----------
 
+def _trigger_recompute_if_needed(
+    jid: str, fund_id: str, stats: Dict[str, int], wrote_any: bool,
+) -> None:
+    """L1 或 L2 只要写了新月度就触发既有 recompute."""
+    if not (stats.get("monthly", 0) > 0 or wrote_any):
+        return
+    _job_log(jid, "recompute metrics ...")
+    try:
+        from app.database import SessionLocal
+        from app.metrics_pipeline import compute_and_store_metrics
+        sess = SessionLocal()
+        try:
+            compute_and_store_metrics(sess, fund_id)
+            _job_log(jid, "recompute ok")
+        except ValueError as e:
+            _job_log(jid, f"recompute skip: {e}")
+        finally:
+            sess.close()
+    except Exception as e:  # noqa: BLE001
+        _job_log(jid, f"recompute failed (ingest 已成功): {e}")
+
+
 def _run_ingest_job(jid: str, req: IngestRequest) -> None:
-    """worker 线程主循环. 内部懒 import llm_ingest, 避免影响 uvicorn 启动.
+    """worker 线程主循环 (Spec B: L1=fundmonitors 主源, L2=PDF fallback).
 
     步骤:
-      1. discover: 若给了 confirmed_url 直接当归档页, 否则 run_discovery.
-      2. upsert_fund.
-      3. 循环 links: 下载 -> 提取 -> 两闸 -> 写库 (monthly / pending / gap).
-      4. 成功后触发既有 recompute 逻辑 (调用 metrics_pipeline.compute_and_store_metrics).
+      1. upsert_fund (需在 L1 UPDATE discovered_source_name 前建行).
+      2. L1: fundmonitors.probe (fund_id+db_conn 走白名单短路; 否则 Tavily).
+         L1 status=ok -> write_table_records + UPDATE discovered_source_name +
+         触发 recompute + return, 跳过 L2 PDF 通路.
+      3. L2 PDF fallback: 老 L1 discovery + 循环 + 提取 + 两闸 (仅 L1 未覆盖时).
+      4. 成功后触发既有 recompute.
     """
     try:
-        _job_update(jid, state="discovering", started_at=datetime.utcnow().isoformat())
+        _job_update(jid, state="ingesting_l1_fundmonitors",
+                    started_at=datetime.utcnow().isoformat())
         _job_log(jid, "job start")
 
-        # 懒 import: llm_ingest 在仓库根, uvicorn cwd 可能是 webapp/backend/
-        # 主动把仓库根塞进 sys.path 保证 import 通 (webapp/backend/app/routers/ 上溯 4 层)
+        # 懒 import: llm_ingest 在仓库根
         import os
         _repo_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -113,14 +137,74 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         from llm_ingest import cli as llm_cli
         from llm_ingest import discover as disc_mod
         from llm_ingest import extract as ex_mod
+        from llm_ingest import fundmonitors as fm_mod
         from llm_ingest import pdf as pdf_mod
         from llm_ingest import store as store_mod
         from llm_ingest import verify
 
-        # ---- discovery ----
+        # ---- upsert fund (提前, 用于 L1 UPDATE discovered_source_name) ----
+        conn = store_mod.open_conn()
+        store_mod.ensure_tables_if_missing(conn)
+        # 幂等迁移: lifespan 没跑 (直调 job / 单测) 场景下自补一次
+        try:
+            from llm_ingest.migrations import spec_b_20260717 as _mig_b
+            _mig_b.apply(conn)
+        except Exception:  # noqa: BLE001
+            pass
+        cu = req.confirmed_url or req.issuer_domain or ""
+        store_mod.upsert_fund(
+            conn,
+            fund_id=req.fund_id,
+            fund_name=req.fund_name,
+            confirmed_url=cu,
+            apir_code=req.apir_code,
+            max_pdf_pages=req.max_pdf_pages,
+        )
+        _job_log(jid, f"upsert_fund: {req.fund_id}")
+
+        # ---- L1: fundmonitors 主源 (Spec B 反转优先级) ----
+        _job_log(jid, "L1 fundmonitors: probing ...")
+        l1_result: Dict[str, Any] = {"status": "skipped"}
+        try:
+            l1_result = fm_mod.probe(req.fund_name, fund_id=req.fund_id, db_conn=conn)
+        except Exception as e:  # noqa: BLE001
+            l1_result = {"status": f"exception:{type(e).__name__}",
+                         "page_fund_name": None, "records": [],
+                         "url": None, "errors": [str(e)]}
+        _job_log(jid, f"L1 fundmonitors: status={l1_result.get('status')}, "
+                      f"records={len(l1_result.get('records', []))}, "
+                      f"page_name={l1_result.get('page_fund_name')}")
+
+        stats = {"monthly": 0, "pending": 0, "gap": 0, "download_fail": 0}
+
+        if l1_result.get("status") == "ok":
+            n_written = store_mod.write_table_records(
+                conn, fund_id=req.fund_id,
+                records=l1_result["records"], source_url=l1_result["url"],
+            )
+            _job_log(jid, f"L1 fundmonitors: {n_written} 月入库")
+            # 记 discovered_source_name (供前端透明展示)
+            conn.execute(
+                "UPDATE funds SET discovered_source_name=? WHERE fund_id=?",
+                (l1_result.get("page_fund_name"), req.fund_id),
+            )
+            conn.commit()
+            stats["monthly"] = n_written
+            _job_log(jid, "L1 覆盖成功, 跳过 L2 PDF 通路")
+            conn.close()
+            _job_update(jid, stats=stats)
+            _trigger_recompute_if_needed(jid, req.fund_id, stats, True)
+            _job_update(jid, state="succeeded",
+                        finished_at=datetime.utcnow().isoformat())
+            _job_log(jid, f"done: {stats}")
+            return  # Spec B: L1 覆盖成功即 return, 无 L2 补差
+
+        _job_log(jid, "L1 未覆盖, 走 L2 PDF 通路 ...")
+
+        # ---- L2: 官网 PDF discovery + 循环 (原 L1 通路降级为 L2) ----
+        _job_update(jid, state="discovering_l2_pdf")
         links: List[tuple] = []
         if req.confirmed_url:
-            # 用户填了 URL: 当归档页, 直接 parse_archive_page
             _job_log(jid, f"parse_archive: {req.confirmed_url}")
             html = disc_mod._fetch(req.confirmed_url)
             if not html:
@@ -129,8 +213,6 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             links = [(str(ym), str(url)) for ym, url in parsed_links]
             _job_log(jid, f"parse_archive: {len(links)} links, unparseable={unp}, more_pages={has_more}")
         else:
-            # issuer 缺省用 fund_name 兜底 (Gemini 靠 fund_name+联网也能定位归档页,
-            # 只是 issuer 提示会让搜索更准。此处允许省略以降前端心智负担)。
             issuer_for_search = req.issuer or req.fund_name
             _job_log(jid, f"run_discovery: issuer={issuer_for_search}")
             rep = disc_mod.run_discovery(
@@ -144,64 +226,18 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
 
         if not links:
+            conn.close()
             raise ValueError("discovery 未产出任何 PDF 链接, 摄取无法进行")
 
         if req.limit:
             links = links[: req.limit]
 
-        # ---- upsert fund ----
-        conn = store_mod.open_conn()
-        store_mod.ensure_tables_if_missing(conn)
-        # confirmed_url 落库: 优先 req.confirmed_url, 否则用 issuer_domain 或第一个 link
-        cu = req.confirmed_url or req.issuer_domain or (links[0][1] if links else "")
-        store_mod.upsert_fund(
-            conn,
-            fund_id=req.fund_id,
-            fund_name=req.fund_name,
-            confirmed_url=cu,
-            apir_code=req.apir_code,
-            max_pdf_pages=req.max_pdf_pages,
-        )
-        _job_log(jid, f"upsert_fund: {req.fund_id}")
-
-        # ---- L3 兜底: fundmonitors 表格源 (在 PDF 通路前跑, 用它铺底 23 年历史, PDF 通路只补最新月) ----
-        # 触发条件: 未提供 confirmed_url 且 L1 links < 24 (未达 36 月最低所需数据一半)。
-        # 逻辑: Tavily 拿 FundID/AccCode -> curl_cffi 过 CF -> parse Historical Performance
-        # 表 -> gate_check_table (缺口/反捏造/字段/YTD) -> write_table_records 直入 monthly_returns。
-        # 付费墙/无 FundID/gate 失败 -> 跳过, 不阻塞 PDF 通路。
-        from llm_ingest import fundmonitors as fm_mod
-        l3_result: Dict[str, Any] = {"status": "skipped"}
-        if not req.confirmed_url and len(links) < 24:
-            _job_log(jid, "L3 fundmonitors: probing ...")
-            try:
-                l3_result = fm_mod.probe(req.fund_name, fund_id=req.fund_id, db_conn=conn)
-            except Exception as e:  # noqa: BLE001
-                l3_result = {"status": f"exception:{type(e).__name__}"}
-            _job_log(jid, f"L3 fundmonitors: status={l3_result.get('status')}, "
-                          f"records={len(l3_result.get('records', []))}")
-            if l3_result.get("status") == "ok":
-                n_written = store_mod.write_table_records(
-                    conn, fund_id=req.fund_id,
-                    records=l3_result["records"], source_url=l3_result["url"],
-                )
-                _job_log(jid, f"L3 fundmonitors: {n_written} 月入库 (bulk)")
-
-
-        # ---- ingest 循环 ----
-        _job_update(jid, state="ingesting")
-        stats = {"monthly": 0, "pending": 0, "gap": 0, "download_fail": 0}
+        # ---- L2 PDF ingest 循环 ----
+        _job_update(jid, state="ingesting_l2_pdf")
         from pathlib import Path
         pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
 
         for i, (ym, url) in enumerate(links, 1):
-            # L3 已铺 -> L1 PDF 通路跳过 (免同月既入 monthly_returns 又追 confirmed_gap)。
-            # Yarra 教训: 2025-06 官网挂的是 30 June 财年 PDF, L1 提取失败会写 gap,
-            # 但 L3 表格里 2025-06 明明是真实月度值 0.49%, 两表同月冲突前端标红。
-            l3_covered = ym in {k[:7] for k in store_mod.load_monthly_history(
-                conn, req.fund_id).keys()}
-            if l3_covered:
-                _job_log(jid, f"[{i}/{len(links)}] {ym} skip (L3 已入库)")
-                continue
             pdf_path = pdf_dir / f"{ym}.pdf"
             if not pdf_path.exists():
                 ok = llm_cli._download_pdf(url, pdf_path)
@@ -240,25 +276,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         conn.close()
         _job_update(jid, stats=stats)
 
-        # ---- 自动触发既有 recompute (若有足够月度数据) ----
-        # L3 bulk 入库不计入 stats["monthly"], 但已改动 monthly_returns, 故也要触发。
-        l3_wrote = l3_result.get("status") == "ok" and len(l3_result.get("records", [])) > 0
-        if stats["monthly"] > 0 or l3_wrote:
-            _job_log(jid, "recompute metrics ...")
-            try:
-                from app.database import SessionLocal
-                from app.metrics_pipeline import compute_and_store_metrics
-                sess = SessionLocal()
-                try:
-                    compute_and_store_metrics(sess, req.fund_id)
-                    _job_log(jid, "recompute ok")
-                except ValueError as e:
-                    # 月数不足等场景: 摄取仍成功, 只是指标计算跳过
-                    _job_log(jid, f"recompute skip: {e}")
-                finally:
-                    sess.close()
-            except Exception as e:  # noqa: BLE001
-                _job_log(jid, f"recompute failed (ingest 已成功): {e}")
+        _trigger_recompute_if_needed(jid, req.fund_id, stats, False)
 
         _job_update(jid, state="succeeded",
                     finished_at=datetime.utcnow().isoformat())
