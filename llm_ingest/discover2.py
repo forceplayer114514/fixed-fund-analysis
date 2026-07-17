@@ -427,12 +427,89 @@ def find_archive_v2(
                 discovered_pdfs=list(cand["pdf_urls"]),
             )
 
+    # ---- 步 6.5 (Spec C1): 无强候选 + single_pdfs 全灰 -> 自主导航 1 跳 ----
+    # 场景: Stake 归档页 hellostake.com/.../performance-updates-and-statements/... 抓下来
+    # 只含 8 份 PDS/TMD 静态 PDF (无月报), 而 <a href="/legal/monthly-performance-report">
+    # 明摆在页里, 点进去有 16 份月报 PDF. probe_urls 抽 0 PDF 走到这里.
+    from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
+    nav_hops: List[Tuple[str, str]] = []
+    visited: set = {p["url"] for p in probes}
+    # 选一个 "有 HTML 但无 PDF" 的探针作起跳点 (probes[0] 或最有 issuer 相关的)
+    nav_start = None
+    for p in probes:
+        if p.get("html_ok") and not p.get("pdf_urls"):
+            nav_start = p
+            break
+    if nav_start and len(visited) < MAX_TOTAL_FETCHES:
+        # 步 6.5.a: 重抓全量 HTML (probes 只留了 2000 字符 snippet, 不够挑链)
+        full_html = _fetch(nav_start["url"], timeout=FETCH_TIMEOUT)
+        if full_html:
+            next_url, next_html, next_pdfs = navigate_one_hop(
+                nav_start["url"], full_html, fund_name, domain, visited, client,
+            )
+            if next_pdfs:
+                next_pdfs = _rank_pdfs_by_name_match(next_pdfs, fund_name)
+                first_pdf = next_pdfs[0]
+                # slug 完全无关 -> 跳过打样, 节省一次 Gemini
+                if _pdf_slug_match_count(first_pdf, fund_name) > 0:
+                    ok, _ex = confirm_pdf_is_monthly_report(first_pdf, fund_name, client=client)
+                    if ok:
+                        nav_hops.append((nav_start["url"], next_url or ""))
+                        return ArchivePointer(
+                            archive_url=next_url,
+                            pagination_param=None,
+                            no_archive=False,
+                            latest_pdf_url=first_pdf,
+                            issuer_domain_confirmed=domain,
+                            evidence=f"导航命中: {nav_start['url']} -> {next_url} ({len(next_pdfs)} 份 PDF)",
+                            raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                                {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
+                            ]},
+                            search_sources=real_sources, search_queries=[],
+                            discovered_pdfs=list(next_pdfs),
+                        )
+            nav_hops.append((nav_start["url"], next_url or "(no_pick)"))
+
+        # 步 6.5.b: 首跳失败 -> 回主页 (issuer_domain 根) 重试 1 次
+        if domain and len(visited) < MAX_TOTAL_FETCHES:
+            home_url = domain if domain.startswith("http") else f"https://{domain}"
+            if home_url not in visited:
+                visited.add(home_url)
+                home_html = _fetch(home_url, timeout=FETCH_TIMEOUT)
+                if home_html:
+                    next_url2, _, next_pdfs2 = navigate_one_hop(
+                        home_url, home_html, fund_name, domain, visited, client,
+                    )
+                    if next_pdfs2:
+                        next_pdfs2 = _rank_pdfs_by_name_match(next_pdfs2, fund_name)
+                        first_pdf2 = next_pdfs2[0]
+                        if _pdf_slug_match_count(first_pdf2, fund_name) > 0:
+                            ok2, _ex2 = confirm_pdf_is_monthly_report(
+                                first_pdf2, fund_name, client=client,
+                            )
+                            if ok2:
+                                nav_hops.append((home_url, next_url2 or ""))
+                                return ArchivePointer(
+                                    archive_url=next_url2,
+                                    pagination_param=None,
+                                    no_archive=False,
+                                    latest_pdf_url=first_pdf2,
+                                    issuer_domain_confirmed=domain,
+                                    evidence=f"主页重试导航命中: {home_url} -> {next_url2} ({len(next_pdfs2)} 份 PDF)",
+                                    raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                                        {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
+                                    ]},
+                                    search_sources=real_sources, search_queries=[],
+                                    discovered_pdfs=list(next_pdfs2),
+                                )
+                    nav_hops.append((home_url, next_url2 or "(no_pick)"))
+
     # ---- 步 7: 全没通过打样 -> 返 no_archive 让上游走 L2/L3 ----
     return ArchivePointer(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,
-        evidence="top-N 探测未发现月报 PDF, 走 L2/L3 兜底",
-        raw={"ranked": ranked, "probes": [
+        evidence="top-N 探测 + 导航兜底均未发现月报 PDF, 走 L2/L3 兜底",
+        raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
             {"url": p["url"], "pdf_count": len(p["pdf_urls"]), "error": p.get("error")}
             for p in probes
         ]},
