@@ -47,3 +47,17 @@ if wl is not None and wl[1]:  # 只有 acc_code 非空才短路
 - Coolabah × 2 特殊通路 (Plotly HTML NAV)
 - Stake Accumulate 数据源探测
 - GCI fundmonitors 白名单探测 (现只有 L2 PDF 单月)
+
+## Y.6 GCI inception 重置
+
+- 老值 (Spec A/skills-era): 2018-05-21
+- 新值: **2019-01-31** (第一份真实 PDF `data/pdf_cache/gryphon_capital_income/2019-02.pdf` 覆盖的月末)
+- `inception_assumed=0` 保持 (真值, 非假设)
+
+## Y.8 全测
+
+`pytest tests/` 全绿: 109 passed (跳 test_ingest_priority_l1_l2.py 6 慢测) + 6 l1_l2 = 115 total.
+
+## Y.10 tag
+
+`git tag spec-b-done` 打上以标 Spec B 收官。
