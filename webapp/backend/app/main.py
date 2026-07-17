@@ -18,8 +18,19 @@ def create_app(enable_scheduler: bool = True) -> FastAPI:
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """启动：建表 + 可选启动 RBA 调度器；关闭：停止调度器。"""
+        """启动：建表 + 迁移 + 可选启动 RBA 调度器；关闭：停止调度器。"""
         init_db()
+        # Spec B: 幂等迁移 (加 discovered_source_name 列)
+        import sqlite3
+        from pathlib import Path
+        from llm_ingest.migrations import spec_b_20260717 as _mig_b
+        _db_path = Path(__file__).resolve().parents[3] / "data" / "fund_analysis.db"
+        if _db_path.exists():
+            _mc = sqlite3.connect(str(_db_path))
+            try:
+                _mig_b.apply(_mc)
+            finally:
+                _mc.close()
         scheduler = None
         if enable_scheduler and settings.SCHEDULER_ENABLED:
             from app.scheduler import start_scheduler
