@@ -55,6 +55,8 @@ PDF_DOWNLOAD_TIMEOUT = 30
 #  (a) .pdf 直链
 #  (b) href 里含 report/factsheet/monthly/performance 且是链接文本或路径特征
 _PDF_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
+_HTML_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.html?(?:\?[^"\']*)?)["\']', re.I)
+_CSV_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.csv(?:\?[^"\']*)?)["\']', re.I)
 _HTML_LINK_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>', re.I)
 _MONTHLY_HINTS = re.compile(
     r"(monthly|month-end|fund\s*report|fact\s*sheet|performance|report|update)",
@@ -90,6 +92,38 @@ def _extract_pdf_links(html: str, base_url: str) -> List[str]:
             continue
         seen.add(full)
         out.append(full)
+    return out
+
+
+def _extract_html_links(html: str, base_url: str) -> List[str]:
+    """抓页 HTML -> 候选 .html/.htm 归档链接 (Coolabah Plotly 报告场景).
+
+    只抽 href 后缀是 .html/.htm 的直链, 关键词命中的中转链保持原策略走
+    _extract_pdf_links (以免与 PDF 通道重复计算).
+    """
+    seen: set = set()
+    out: List[str] = []
+    for href in _HTML_HREF_RE.findall(html):
+        full = urljoin(base_url, href)
+        low = full.lower()
+        # 排掉自身归档索引页
+        if any(k in low for k in ("/login", "/contact", "/subscribe")):
+            continue
+        if full not in seen:
+            seen.add(full)
+            out.append(full)
+    return out
+
+
+def _extract_csv_links(html: str, base_url: str) -> List[str]:
+    """抓页 HTML -> 候选 .csv 直链 (unit price CSV 场景)."""
+    seen: set = set()
+    out: List[str] = []
+    for href in _CSV_HREF_RE.findall(html):
+        full = urljoin(base_url, href)
+        if full not in seen:
+            seen.add(full)
+            out.append(full)
     return out
 
 
