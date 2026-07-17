@@ -263,5 +263,48 @@ class TestRunDiscovery:
         assert not called["l2"], "无期望范围时 L2 不该被调"
 
 
+class TestL2LocalCacheFallback:
+    """Spec C1 Phase 3: run_discovery 空手时扫本地 pdf_cache 兜底."""
+
+    def test_gci_local_cache_hit(self, monkeypatch):
+        """GCI 88 份本地 PDF 应在 L1/L2 全空时经 L2.6 全部识别为 file:// links."""
+        from llm_ingest import discover as disc
+        ap = disc.ArchivePointer(
+            archive_url=None, pagination_param=None, no_archive=True,
+            latest_pdf_url=None, issuer_domain_confirmed=None, evidence="mock",
+            raw={},
+        )
+        monkeypatch.setattr(disc, "probe_l1_official", lambda *a, **kw: ([], ap, 0))
+        monkeypatch.setattr(disc, "probe_l2_wayback", lambda *a, **kw: [])
+        rep = disc.run_discovery(
+            "Gryphon Capital Income Trust", "Gryphon Capital",
+            fund_id="gryphon_capital_income",
+            issuer_domain="gcapinvest.com",
+        )
+        # 88 份历史 PDF 都应变成 file:// links (spec: data/pdf_cache/gryphon_capital_income/)
+        assert len(rep.links) >= 80, f"expected ≥80 local PDFs, got {len(rep.links)}"
+        assert all(url.startswith("file://") for _, url in rep.links)
+        assert rep.per_level_contribution.get("L_local", 0) >= 80
+        # evidence_log 应有 L_local 条
+        assert any(e.get("level") == "L_local" for e in rep.evidence_log)
+
+    def test_no_cache_dir_no_effect(self, monkeypatch):
+        """本地无 pdf_cache 目录时不 crash, links 依旧为 0."""
+        from llm_ingest import discover as disc
+        ap = disc.ArchivePointer(
+            archive_url=None, pagination_param=None, no_archive=True,
+            latest_pdf_url=None, issuer_domain_confirmed=None, evidence="mock",
+            raw={},
+        )
+        monkeypatch.setattr(disc, "probe_l1_official", lambda *a, **kw: ([], ap, 0))
+        monkeypatch.setattr(disc, "probe_l2_wayback", lambda *a, **kw: [])
+        rep = disc.run_discovery(
+            "Nonexistent Fund", "N",
+            fund_id="nonexistent_fund_xyz_no_dir",
+        )
+        assert rep.links == []
+        assert "L_local" not in rep.per_level_contribution
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

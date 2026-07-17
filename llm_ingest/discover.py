@@ -686,6 +686,29 @@ def run_discovery(
     # L3 (占位: 当前 return None, 保留接口)
     # 未来接入: 主会话或 discover CLI 传 fundmonitors_url, 走 records 直入库
 
+    # L2.6 (Spec C1): 全网 discovery 空手 -> 扫本地 pdf_cache 兜底.
+    # 场景: GCI 88 份 PDF 已在 data/pdf_cache/gryphon_capital_income/*.pdf, Y.5 wipe
+    # DB 后 discovery 若返 0 links, 这些现成 PDF 就没人管. 靠文件名反解 ym 作 links.
+    # url 用 file:// 让下游 (cli/routers.ingest) 跳过下载但仍走两道闸 -- 不绕闸.
+    if not aggregate:
+        cache_dir = Path(__file__).resolve().parent.parent / "data" / "pdf_cache" / fund_id
+        if cache_dir.exists():
+            local_pairs: List[Tuple[str, str]] = []
+            for p in sorted(cache_dir.glob("*.pdf")):
+                ym = _parse_ym_from_text(p.stem)
+                if ym and _valid_ym(ym):
+                    local_pairs.append((ym, f"file://{p.absolute()}"))
+            if local_pairs:
+                aggregate.extend(local_pairs)
+                obtained.update(ym for ym, _ in local_pairs)
+                report.per_level_contribution["L_local"] = len(local_pairs)
+                report.per_level_source["L_local"] = str(cache_dir)
+                report.evidence_log.append({
+                    "level": "L_local", "count": len(local_pairs),
+                    "cache_dir": str(cache_dir),
+                    "evidence": "全网 discovery 未产出, 回退本地 PDF 缓存",
+                })
+
     report.links = _dedup_links(aggregate)
     report.obtained = sorted(obtained)
     report.gaps = sorted(expected - obtained) if expected else []

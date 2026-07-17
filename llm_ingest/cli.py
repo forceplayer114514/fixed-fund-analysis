@@ -344,8 +344,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     for i, (ym, url) in enumerate(links, 1):
         pdf_path = pdf_dir / f"{ym}.pdf"
+        # Spec C1: file:// 表示本地缓存直接指路径 (run_discovery L2.6 fallback)
+        if url.startswith("file://"):
+            local_p = Path(url[7:])
+            if not local_p.exists():
+                stats["download_fail"] += 1
+                store_mod.record_confirmed_gap(
+                    conn, fund_id=fund_id, missing_month=ym,
+                    exhausted_levels="local_cache_missing",
+                )
+                print(f"[{i}/{len(links)}] {ym} local cache MISSING {local_p}", file=sys.stderr)
+                continue
+            pdf_path = local_p
         # 下载 (若本地已缓存则跳过)
-        if not pdf_path.exists():
+        elif not pdf_path.exists():
             ok = _download_pdf(url, pdf_path)
             if not ok:
                 stats["download_fail"] += 1

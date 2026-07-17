@@ -239,7 +239,20 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
 
         for i, (ym, url) in enumerate(links, 1):
             pdf_path = pdf_dir / f"{ym}.pdf"
-            if not pdf_path.exists():
+            # Spec C1: file:// 表示 run_discovery L2.6 本地缓存兜底
+            if url.startswith("file://"):
+                from pathlib import Path as _Path
+                local_p = _Path(url[7:])
+                if not local_p.exists():
+                    stats["download_fail"] += 1
+                    store_mod.record_confirmed_gap(
+                        conn, fund_id=req.fund_id, missing_month=ym,
+                        exhausted_levels="local_cache_missing",
+                    )
+                    _job_log(jid, f"[{i}/{len(links)}] {ym} local cache MISSING {local_p}")
+                    continue
+                pdf_path = local_p
+            elif not pdf_path.exists():
                 ok = llm_cli._download_pdf(url, pdf_path)
                 if not ok:
                     stats["download_fail"] += 1
