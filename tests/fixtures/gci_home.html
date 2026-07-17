@@ -1,0 +1,571 @@
+<!DOCTYPE html><html lang="en"><head>
+
+		<!-- Required meta tags -->
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	
+	<!-- Bootstrap CSS -->
+	<link href="/assets/css/bootstrap.css" rel="stylesheet">
+	<script src="https://kit.fontawesome.com/16ec668155.js" crossorigin="anonymous"></script><style media="all" id="fa-v4-font-face">/*!
+ * Font Awesome Pro 7.3.1 by @fontawesome - https://fontawesome.com
+ * License - https://fontawesome.com/license (Commercial License)
+ * Copyright 2026 Fonticons, Inc.
+ */@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-0.woff2) format("woff2");unicode-range:u+f001,u+f004-f005,u+f007-f008,u+f00c,u+f011-f012,u+f015,u+f018-f019,u+f01c,u+f023-f025,u+f02a,u+f02c-f031,u+f03a,u+f03d,u+f04a-f04e,u+f05b,u+f060-f064,u+f067-f068,u+f06b-f06d,u+f072,u+f075,u+f077-f078,u+f07b,u+f084,u+f086,u+f091,u+f093,u+f095,u+f09c,u+f0a3,u+f0ad,u+f0b0-f0b1,u+f0c0-f0c2,u+f128,u+f12a,u+f155,u+f283,u+f292,u+f295}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-1.woff2) format("woff2");unicode-range:u+f040,u+f0c6,u+f0c8-f0c9,u+f0cc,u+f0ce,u+f0d1,u+f0d7,u+f0dc,u+f0e0,u+f0e7-f0e8,u+f0f3,u+f106,u+f108-f109,u+f10e,u+f110-f111,u+f11e,u+f121,u+f126,u+f129,u+f12c-f12e,u+f130-f132,u+f135,u+f13d,u+f140,u+f145,u+f15b,u+f164,u+f188,u+f1ab,u+f1ad-f1ae,u+f1b2,u+f1b8,u+f1bb,u+f1c0,u+f1ce,u+f1d8,u+f1dc,u+f1e4-f1e6,u+f1eb-f1ec,u+f205,u+f217,u+f21a-f21d,u+f22d,u+f233-f234,u+f238,u+f246,u+f251,u+f275,u+f29e,u+f2a0,u+f2a7,u+f2bb,u+f2cc-f2cd,u+f2db}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-2.woff2) format("woff2");unicode-range:u+f112}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-3.woff2) format("woff2");unicode-range:u+f069,u+f1fa}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-15.woff2) format("woff2");unicode-range:u+f000,u+f002,u+f009-f00b,u+f00d-f00e,u+f010,u+f013,u+f01e,u+f021,u+f026-f029,u+f02b,u+f032-f039,u+f03b-f03c,u+f042-f043,u+f048-f049,u+f050-f05a,u+f05e,u+f06a,u+f071,u+f073-f074,u+f076,u+f079-f07a,u+f07c,u+f083,u+f085,u+f089,u+f08d,u+f098,u+f09e,u+f0a1,u+f0a8-f0ab,u+f0c3-f0c4,u+f0ca-f0cb,u+f0cd,u+f0d8-f0db,u+f0dd-f0de,u+f0e2-f0e3,u+f0e9-f0ea,u+f0ed-f0ee,u+f0f0-f0f2,u+f0f4,u+f0f9-f0fe,u+f100-f105,u+f107}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-16.woff2) format("woff2");unicode-range:u+f045,u+f10d,u+f11b,u+f120,u+f122,u+f124-f125,u+f127,u+f12b,u+f134,u+f137-f13a,u+f141-f144,u+f146,u+f14a-f14b,u+f14d,u+f153-f154,u+f157-f159,u+f15c-f15d,u+f162,u+f165,u+f182-f183,u+f187,u+f193,u+f197,u+f199,u+f19c-f19d,u+f1ac,u+f1b0,u+f1b3,u+f1b9-f1ba,u+f1cd,u+f1da,u+f1dd-f1de,u+f1e0-f1e2,u+f1f6,u+f1fb-f1fe,u+f200-f201,u+f204,u+f206-f207,u+f20b,u+f218,u+f21e,u+f221-f22c,u+f235-f236,u+f239,u+f240-f245,u+f249,u+f24e,u+f252-f253}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-solid-900-17.woff2) format("woff2");unicode-range:u+f0f5,u+f1b1,u+f250,u+f254,u+f25c,u+f26c,u+f276-f277,u+f279,u+f28b,u+f28d,u+f290-f291,u+f29a,u+f29d,u+f2a1-f2a4,u+f2a8,u+f2b6,u+f2b9,u+f2bd,u+f2c2,u+f2c7-f2cb,u+f2ce,u+f2d1,u+f2d3}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-brands-400-0.woff2) format("woff2");unicode-range:u+f08c,u+f099,u+f09b,u+f0d2,u+f13b,u+f167,u+f16a-f16d,u+f179-f17c,u+f17e,u+f18c,u+f19a-f19b,u+f1a0,u+f1b4,u+f1bc,u+f1be,u+f1e8,u+f1ed,u+f1f0-f1f1,u+f20e,u+f210,u+f213-f214,u+f230,u+f232,u+f23a,u+f26b,u+f270,u+f288,u+f299,u+f29b,u+f2a6,u+f2b0,u+f2c5-f2c6,u+f2e0}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-brands-400-1.woff2) format("woff2");unicode-range:u+f081-f082,u+f092,u+f0d3-f0d5,u+f0e1,u+f113,u+f136,u+f13c,u+f15a,u+f168-f169,u+f16e,u+f170-f174,u+f17d,u+f180-f181,u+f184,u+f189-f18b,u+f18d,u+f194,u+f198,u+f19e,u+f1a1-f1aa,u+f1b5-f1b7,u+f1bd,u+f1ca-f1cc,u+f1d0-f1d7,u+f1e7,u+f1e9,u+f1ee,u+f1f2-f1f5,u+f202-f203,u+f208-f209,u+f20d,u+f211-f212,u+f215-f216,u+f231,u+f237,u+f23b-f23e,u+f24b-f24c,u+f25e,u+f260-f261,u+f263-f26a,u+f26d-f26e,u+f27c-f27e,u+f280-f282,u+f284-f287,u+f289-f28a,u+f293-f294,u+f296-f298,u+f2a5,u+f2a9-f2ae,u+f2b1-f2b4,u+f2b8,u+f2c4,u+f2d5-f2da,u+f2dd-f2de}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-brands-400-2.woff2) format("woff2");unicode-range:u+f166}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-0.woff2) format("woff2");unicode-range:u+f006,u+f017,u+f03e,u+f06e,u+f08a,u+f097,u+f09d,u+f0a6,u+f0c5,u+f0e5-f0e6,u+f114,u+f11d,u+f2c0}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-1.woff2) format("woff2");unicode-range:u+f003,u+f016,u+f087,u+f096,u+f0a2,u+f0eb,u+f0f7-f0f8,u+f10c,u+f11c,u+f133,u+f14e,u+f186,u+f1c1-f1c3,u+f1d9,u+f1db,u+f1ea,u+f1f9,u+f20a,u+f24d,u+f25d,u+f2b5,u+f2bc,u+f2d2}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-15.woff2) format("woff2");unicode-range:u+f022,u+f044,u+f05c-f05d,u+f070,u+f094,u+f0a0,u+f0a4-f0a5,u+f0a7,u+f0c7,u+f115,u+f196,u+f29c}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-16.woff2) format("woff2");unicode-range:u+f01d,u+f046,u+f088,u+f0f6,u+f118-f11a,u+f147,u+f150-f152,u+f185,u+f191-f192,u+f1c4-f1c9,u+f1e3,u+f1f7,u+f247-f248,u+f24a}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-17.woff2) format("woff2");unicode-range:u+f014,u+f255-f25b,u+f271-f274,u+f278,u+f28c,u+f28e,u+f2b7,u+f2ba,u+f2be,u+f2c1,u+f2c3,u+f2d0,u+f2dc}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-18.woff2) format("woff2");unicode-range:u+f01a-f01b,u+f18e,u+f190,u+f2d4}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-regular-400-19.woff2) format("woff2");unicode-range:u+f27b}@font-face{font-family:"FontAwesome";font-display:block;src:url(https://ka-p.fontawesome.com/releases/v7.3.1/webfonts/pro-fa-v4compatibility.woff2) format("woff2");unicode-range:u+f041,u+f047,u+f065-f066,u+f07d-f07e,u+f080,u+f08b,u+f08e,u+f090,u+f09a,u+f0ac,u+f0ae,u+f0b2,u+f0d0,u+f0d6,u+f0e4,u+f0ec,u+f10a-f10b,u+f123,u+f13e,u+f148-f149,u+f14c,u+f156,u+f15e,u+f160-f161,u+f163,u+f175-f178,u+f195,u+f1f8,u+f219,u+f27a}</style><style media="all" id="fa-main">@charset "utf-8";.fak.fa-accountability,.fa-kit.fa-accountability{--fa:""}.fak.fa-applepodcast-48x48,.fa-kit.fa-applepodcast-48x48{--fa:""}.fak.fa-client-focus,.fa-kit.fa-client-focus{--fa:""}.fak.fa-excellence,.fa-kit.fa-excellence{--fa:""}.fak.fa-fair,.fa-kit.fa-fair{--fa:""}.fak.fa-linkedin-48x48,.fa-kit.fa-linkedin-48x48{--fa:""}.fak.fa-spotify-48x48,.fa-kit.fa-spotify-48x48{--fa:""}.fak.fa-twitter-48x48,.fa-kit.fa-twitter-48x48{--fa:""}.fak.fa-youtube-48x48,.fa-kit.fa-youtube-48x48{--fa:""}.fak,.fa-kit{--fa-family:"Font Awesome Kit";--fa-style:400;--_fa-family:var(--fa-family,var(--fa-style-family,"Font Awesome Kit"));-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;display:var(--fa-display,inline-block);font-family:var(--_fa-family);font-style:normal;font-synthesis:none;font-variant:normal;font-weight:var(--fa-style,400);line-height:1;text-align:center;text-rendering:auto;width:var(--fa-width,1.25em)}.fak:before,.fa-kit:before{content:var(--fa)/""}@supports not (content:''/''){.fak:before,.fa-kit:before{content:var(--fa)}}@font-face{font-family:Font Awesome Kit;font-style:normal;font-display:block;src:url(data:font/woff2;base64,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)format("woff2")}.fa-solid,.fa-regular,.fa-brands,.fa-classic,.fas,.far,.fab,.fal,.fat,.fad,.fadr,.fadl,.fadt,.fass,.fasr,.fasl,.fast,.fasds,.fasdr,.fasdl,.fasdt,.faslr,.faslpr,.fasldr,.faslpdr,.fapr,.fams,.favs,.fawsb,.fatl,.fans,.fands,.faes,.fagt,.fajr,.fajfr,.fajdr,.facr,.fausb,.faudsb,.faufsb,.fa-solid,.fa-semibold,.fa-regular,.fa-light,.fa-thin,.fa-brands,.fa-classic,.fa-duotone,.fa-sharp,.fa-sharp-duotone,.fa-chisel,.fa-etch,.fa-graphite,.fa-jelly,.fa-jelly-duo,.fa-jelly-fill,.fa-mosaic,.fa-notdog,.fa-notdog-duo,.fa-pixel,.fa-slab,.fa-slab-duo,.fa-slab-press,.fa-slab-press-duo,.fa-thumbprint,.fa-utility,.fa-utility-duo,.fa-utility-fill,.fa-vellum,.fa-whiteboard,.fa{--_fa-family:var(--fa-family,var(--fa-style-family,"Font Awesome 7 Pro"));-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;display:var(--fa-display,inline-block);font-family:var(--_fa-family);font-feature-settings:normal;font-style:normal;font-synthesis:none;font-variant:normal;font-weight:var(--fa-style,900);line-height:1;text-align:center;text-rendering:auto;width:var(--fa-width,1.25em)}:is(.fas,.fass,.far,.fasr,.fal,.fasl,.fat,.fast,.fad,.fadr,.fadl,.fadt,.fasds,.fasdr,.fasdl,.fasdt,.fab,.faslr,.faslpr,.fasldr,.faslpdr,.fapr,.fams,.favs,.fawsb,.fatl,.fans,.fands,.faes,.fagt,.fajr,.fajfr,.fajdr,.facr,.fausb,.faudsb,.faufsb,.fa-solid,.fa-semibold,.fa-regular,.fa-light,.fa-thin,.fa-brands,.fa-classic,.fa-duotone,.fa-sharp,.fa-sharp-duotone,.fa-chisel,.fa-etch,.fa-graphite,.fa-jelly,.fa-jelly-duo,.fa-jelly-fill,.fa-mosaic,.fa-notdog,.fa-notdog-duo,.fa-pixel,.fa-slab,.fa-slab-duo,.fa-slab-press,.fa-slab-press-duo,.fa-thumbprint,.fa-utility,.fa-utility-duo,.fa-utility-fill,.fa-vellum,.fa-whiteboard,.fa):before{content:var(--fa)/""}@supports not (content:""/""){:is(.fas,.fass,.far,.fasr,.fal,.fasl,.fat,.fast,.fad,.fadr,.fadl,.fadt,.fasds,.fasdr,.fasdl,.fasdt,.fab,.faslr,.faslpr,.fasldr,.faslpdr,.fapr,.fams,.favs,.fawsb,.fatl,.fans,.fands,.faes,.fagt,.fajr,.fajfr,.fajdr,.facr,.fausb,.faudsb,.faufsb,.fa-solid,.fa-semibold,.fa-regular,.fa-light,.fa-thin,.fa-brands,.fa-classic,.fa-duotone,.fa-sharp,.fa-sharp-duotone,.fa-chisel,.fa-etch,.fa-graphite,.fa-jelly,.fa-jelly-duo,.fa-jelly-fill,.fa-mosaic,.fa-notdog,.fa-notdog-duo,.fa-pixel,.fa-slab,.fa-slab-duo,.fa-slab-press,.fa-slab-press-duo,.fa-thumbprint,.fa-utility,.fa-utility-duo,.fa-utility-fill,.fa-vellum,.fa-whiteboard,.fa):before{content:var(--fa)}}:is(.fad,.fa-duotone,.fadr,.fadl,.fadt,.fasds,.fa-sharp-duotone,.fasdr,.fasdl,.fasdt,.fatl,.fa-thumbprint,.fands,.fa-notdog-duo,.fajdr,.fa-jelly-duo,.faudsb,.fa-utility-duo,.fasldr,.fa-slab-duo,.faslpdr,.fa-slab-press-duo,.favs,.fa-vellum):after{content:var(--fa)/"";font-feature-settings:"ss01"}@supports not (content:""/""){:is(.fad,.fa-duotone,.fadr,.fadl,.fadt,.fasds,.fa-sharp-duotone,.fasdr,.fasdl,.fasdt,.fatl,.fa-thumbprint,.fands,.fa-notdog-duo,.fajdr,.fa-jelly-duo,.faudsb,.fa-utility-duo,.fasldr,.fa-slab-duo,.faslpdr,.fa-slab-press-duo,.favs,.fa-vellum):after{content:var(--fa)}}.fa-1x{font-size:1em}.fa-2x{font-size:2em}.fa-3x{font-size:3em}.fa-4x{font-size:4em}.fa-5x{font-size:5em}.fa-6x{font-size:6em}.fa-7x{font-size:7em}.fa-8x{font-size:8em}.fa-9x{font-size:9em}.fa-10x{font-size:10em}.fa-2xs{font-size:.625em;line-height:.1em;vertical-align:.225em}.fa-xs{font-size:.75em;line-height:.0833333em;vertical-align:.125em}.fa-sm{font-size:.875em;line-height:.0714286em;vertical-align:.0535715em}.fa-lg{font-size:1.25em;line-height:.05em;vertical-align:-.075em}.fa-xl{font-size:1.5em;line-height:.0416667em;vertical-align:-.125em}.fa-2xl{font-size:2em;line-height:.03125em;vertical-align:-.1875em}.fa-width-auto{--fa-width:auto}.fa-fw,.fa-width-fixed{--fa-width:1.25em}.fa-canvas-square{padding-block:.125em;margin-block-end:-.125em}.fa-canvas-roomy{padding-block:.25em;padding-inline:.125em;margin-block-end:-.25em;box-sizing:content-box}.fa-ul{list-style-type:none;margin-inline-start:var(--fa-li-margin,2.5em);padding-inline-start:0}.fa-ul>li{position:relative}.fa-li{inset-inline-start:calc(-1*var(--fa-li-width,2em));position:absolute;text-align:center;width:var(--fa-li-width,2em);line-height:inherit}.fa-border{border-color:var(--fa-border-color,#eee);border-radius:var(--fa-border-radius,.1em);border-style:var(--fa-border-style,solid);border-width:var(--fa-border-width,.0625em);box-sizing:var(--fa-border-box-sizing,content-box);padding:var(--fa-border-padding,.1875em .25em)}.fa-pull-left,.fa-pull-start{float:inline-start;margin-inline-end:var(--fa-pull-margin,.3em)}.fa-pull-right,.fa-pull-end{float:inline-end;margin-inline-start:var(--fa-pull-margin,.3em)}.fa-beat{animation-name:fa-beat;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-bounce{animation-name:fa-bounce;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,cubic-bezier(.28,.84,.42,1))}.fa-fade{animation-name:fa-fade;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-beat-fade{animation-name:fa-beat-fade;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-flip{animation-name:fa-flip;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1.5s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-flip-360{animation-name:fa-flip-360;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-shake{animation-name:fa-shake;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,.75s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out)}.fa-spin{animation-name:fa-spin;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,2s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,linear)}.fa-spin-reverse{--fa-animation-direction:reverse}.fa-pulse,.fa-spin-pulse{animation-name:fa-spin;animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,steps(8))}.fa-spin-snap{animation-name:fa-spin-snap;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,3s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,linear)}.fa-spin-snap-4{animation-name:fa-spin-snap-4;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,2.4s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,linear)}.fa-spin-snap-8{animation-name:fa-spin-snap-8;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,4s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,linear)}.fa-buzz{animation-name:fa-buzz;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,.6s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,linear)}.fa-wag{animation-name:fa-wag;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,.9s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-out);transform-origin:bottom}.fa-float{animation-name:fa-float;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,3s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-in-out);will-change:transform}.fa-swing{animation-name:fa-swing;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,1.2s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-out);transform-origin:top}.fa-jello{animation-name:fa-jello;animation-delay:var(--fa-animation-delay,0s);animation-direction:var(--fa-animation-direction,normal);animation-duration:var(--fa-animation-duration,.9s);animation-iteration-count:var(--fa-animation-iteration-count,infinite);animation-timing-function:var(--fa-animation-timing,ease-out)}@media (prefers-reduced-motion:reduce){.fa-beat,.fa-bounce,.fa-fade,.fa-beat-fade,.fa-flip,.fa-flip-360,.fa-pulse,.fa-shake,.fa-spin,.fa-spin-pulse,.fa-buzz,.fa-float,.fa-jello,.fa-spin-snap,.fa-spin-snap-4,.fa-spin-snap-8,.fa-swing,.fa-wag{animation:none!important;transition:none!important}}@keyframes fa-beat{0%{transform:scale(1)}25%{transform:scale(calc(1.25*var(--fa-beat-scale,1.25)))}45%{transform:scale(calc(1.22*var(--fa-beat-scale,1.22)))}65%{transform:scale(calc(1.25*var(--fa-beat-scale,1.25)))}90%{transform:scale(1)}}@keyframes fa-bounce{0%{transform:scale(1)translateY(0);animation-timing-function:var(--fa-animation-timing)}14%{transform:scale(var(--fa-bounce-start-scale-x,1.06),var(--fa-bounce-start-scale-y,.94))translateY(var(--fa-bounce-anticipation,3px));animation-timing-function:cubic-bezier(.33,0,.66,.33)}32%{transform:scale(var(--fa-bounce-jump-scale-x,.94),var(--fa-bounce-jump-scale-y,1.12))translateY(calc(-1*var(--fa-bounce-height,.5em)));animation-timing-function:cubic-bezier(.33,.66,.66,1)}52%{transform:scale(1,1)translateY(calc(-1*var(--fa-bounce-height,.5em)*1.1));animation-timing-function:cubic-bezier(.5,0,1,.5)}70%{transform:scale(var(--fa-bounce-land-scale-x,1.06),var(--fa-bounce-land-scale-y,.92))translateY(0);animation-timing-function:cubic-bezier(.33,.33,.66,1)}85%{transform:scale(.98,1.04)translateY(calc(-2px*var(--fa-bounce-rebound,1)));animation-timing-function:cubic-bezier(.33,0,.66,1)}to{transform:scale(1)translateY(0)}}@keyframes fa-fade{0%{opacity:1;transform:scale(1);animation-timing-function:cubic-bezier(.2,0,.4,1)}40%{opacity:var(--fa-fade-opacity,.4);transform:scale(.98);animation-timing-function:cubic-bezier(.4,0,.6,1)}to{opacity:1;transform:scale(1)}}@keyframes fa-beat-fade{0%{opacity:var(--fa-beat-fade-opacity,.4);transform:scale(1);animation-timing-function:cubic-bezier(.2,0,.4,1)}25%{opacity:calc(var(--fa-beat-fade-opacity,.4) + .4);transform:scale(var(--fa-beat-fade-scale,1.28));animation-timing-function:cubic-bezier(.4,0,.6,1)}45%{opacity:1;transform:scale(var(--fa-beat-fade-scale,1.25));animation-timing-function:cubic-bezier(.4,0,.2,1)}65%{opacity:calc(var(--fa-beat-fade-opacity,.4) + .4);transform:scale(var(--fa-beat-fade-scale,1.28));animation-timing-function:cubic-bezier(.4,0,.6,1)}to{opacity:var(--fa-beat-fade-opacity,.4);transform:scale(1)}}@keyframes fa-flip{0%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),0deg);animation-timing-function:cubic-bezier(.2,0,.4,1)}8%{transform:perspective(2em)scale(var(--fa-flip-anticipation-scale,.95))rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),0deg);animation-timing-function:cubic-bezier(.33,0,.66,.33)}35%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),calc(var(--fa-flip-angle,-360deg)*.6));animation-timing-function:linear}65%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),calc(var(--fa-flip-angle,-360deg)*.5));animation-timing-function:cubic-bezier(.33,.66,.66,1)}92%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),calc(var(--fa-flip-angle,-360deg)*var(--fa-flip-overshoot,1.04)));animation-timing-function:cubic-bezier(.33,0,.66,1)}to{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),var(--fa-flip-angle,-360deg))}}@keyframes fa-flip-360{0%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),0deg);animation-timing-function:cubic-bezier(.2,0,.4,1)}8%{transform:perspective(2em)scale(var(--fa-flip-anticipation-scale,.95))rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),0deg);animation-timing-function:cubic-bezier(.33,0,.66,.33)}50%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),calc(var(--fa-flip-angle,-360deg)*.6));animation-timing-function:cubic-bezier(.33,.66,.66,1)}80%{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),calc(var(--fa-flip-angle,-360deg)*var(--fa-flip-overshoot,1.04)));animation-timing-function:cubic-bezier(.33,0,.66,1)}to{transform:perspective(2em)scale(1)rotate3d(var(--fa-flip-x,0),var(--fa-flip-y,1),var(--fa-flip-z,0),var(--fa-flip-angle,-360deg))}}@keyframes fa-shake{0%{transform:rotate(0);animation-timing-function:cubic-bezier(.2,0,.8,1)}8%{transform:rotate(35deg)translate(1px);animation-timing-function:cubic-bezier(.3,0,.7,1)}20%{transform:rotate(-22deg)translate(-1px);animation-timing-function:cubic-bezier(.3,0,.7,1)}35%{transform:rotate(15deg)translate(1px);animation-timing-function:cubic-bezier(.3,0,.7,1)}50%{transform:rotate(-9deg);animation-timing-function:cubic-bezier(.4,0,.6,1)}65%{transform:rotate(5deg);animation-timing-function:cubic-bezier(.4,0,.6,1)}78%{transform:rotate(-3deg);animation-timing-function:cubic-bezier(.4,0,.6,1)}90%{transform:rotate(1deg);animation-timing-function:cubic-bezier(.4,0,.2,1)}to{transform:rotate(0)}}@keyframes fa-spin{0%{transform:rotate(0)}to{transform:rotate(360deg)}}@keyframes fa-spin-snap{0%{transform:rotate(0);animation-timing-function:cubic-bezier(0,0,.2,1)}12%{transform:rotate(60deg);animation-timing-function:cubic-bezier(.8,0,1,1)}16.67%{transform:rotate(60deg);animation-timing-function:cubic-bezier(0,0,.2,1)}28.67%{transform:rotate(120deg);animation-timing-function:cubic-bezier(.8,0,1,1)}33.33%{transform:rotate(120deg);animation-timing-function:cubic-bezier(0,0,.2,1)}45.33%{transform:rotate(180deg);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:rotate(180deg);animation-timing-function:cubic-bezier(0,0,.2,1)}62%{transform:rotate(240deg);animation-timing-function:cubic-bezier(.8,0,1,1)}66.67%{transform:rotate(240deg);animation-timing-function:cubic-bezier(0,0,.2,1)}78.67%{transform:rotate(300deg);animation-timing-function:cubic-bezier(.8,0,1,1)}83.33%{transform:rotate(300deg);animation-timing-function:cubic-bezier(0,0,.2,1)}95.33%{transform:rotate(360deg);animation-timing-function:cubic-bezier(.8,0,1,1)}to{transform:rotate(360deg)}}@keyframes fa-spin-snap-4{0%{transform:rotate(0);animation-timing-function:cubic-bezier(0,0,.2,1)}15%{transform:rotate(90deg);animation-timing-function:cubic-bezier(.8,0,1,1)}25%{transform:rotate(90deg);animation-timing-function:cubic-bezier(0,0,.2,1)}40%{transform:rotate(180deg);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:rotate(180deg);animation-timing-function:cubic-bezier(0,0,.2,1)}65%{transform:rotate(270deg);animation-timing-function:cubic-bezier(.8,0,1,1)}75%{transform:rotate(270deg);animation-timing-function:cubic-bezier(0,0,.2,1)}90%{transform:rotate(360deg);animation-timing-function:cubic-bezier(.8,0,1,1)}to{transform:rotate(360deg)}}@keyframes fa-spin-snap-8{0%{transform:rotate(0);animation-timing-function:cubic-bezier(0,0,.2,1)}9%{transform:rotate(45deg);animation-timing-function:cubic-bezier(.8,0,1,1)}12.5%{transform:rotate(45deg);animation-timing-function:cubic-bezier(0,0,.2,1)}21.5%{transform:rotate(90deg);animation-timing-function:cubic-bezier(.8,0,1,1)}25%{transform:rotate(90deg);animation-timing-function:cubic-bezier(0,0,.2,1)}34%{transform:rotate(135deg);animation-timing-function:cubic-bezier(.8,0,1,1)}37.5%{transform:rotate(135deg);animation-timing-function:cubic-bezier(0,0,.2,1)}46.5%{transform:rotate(180deg);animation-timing-function:cubic-bezier(.8,0,1,1)}50%{transform:rotate(180deg);animation-timing-function:cubic-bezier(0,0,.2,1)}59%{transform:rotate(225deg);animation-timing-function:cubic-bezier(.8,0,1,1)}62.5%{transform:rotate(225deg);animation-timing-function:cubic-bezier(0,0,.2,1)}71.5%{transform:rotate(270deg);animation-timing-function:cubic-bezier(.8,0,1,1)}75%{transform:rotate(270deg);animation-timing-function:cubic-bezier(0,0,.2,1)}84%{transform:rotate(315deg);animation-timing-function:cubic-bezier(.8,0,1,1)}87.5%{transform:rotate(315deg);animation-timing-function:cubic-bezier(0,0,.2,1)}96.5%{transform:rotate(360deg);animation-timing-function:cubic-bezier(.8,0,1,1)}to{transform:rotate(360deg)}}@keyframes fa-buzz{0%{transform:translate(0)rotate(0);animation-timing-function:cubic-bezier(.1,0,.9,1)}5%{transform:translateX(var(--fa-buzz-distance,4px))rotate(.5deg)}10%{transform:translateX(calc(-1*var(--fa-buzz-distance,4px)))rotate(-.5deg)}15%{transform:translateX(var(--fa-buzz-distance,4px))rotate(.3deg)}20%{transform:translateX(calc(-1*var(--fa-buzz-distance,4px)))rotate(-.3deg)}25%{transform:translateX(calc(var(--fa-buzz-distance,4px)*.7))rotate(.2deg)}30%{transform:translateX(calc(-1*var(--fa-buzz-distance,4px)*.7))rotate(-.2deg)}35%{transform:translateX(calc(var(--fa-buzz-distance,4px)*.4))rotate(.1deg)}40%{transform:translate(0)rotate(0)}to{transform:translate(0)rotate(0)}}@keyframes fa-wag{0%{transform:rotate(0);animation-timing-function:cubic-bezier(.2,0,.6,1)}12%{transform:rotate(var(--fa-wag-angle,12deg));animation-timing-function:cubic-bezier(.4,0,.2,1)}24%{transform:rotate(2deg);animation-timing-function:cubic-bezier(.2,0,.6,1)}36%{transform:rotate(calc(var(--fa-wag-angle,12deg)*.85));animation-timing-function:cubic-bezier(.4,0,.2,1)}48%{transform:rotate(1deg);animation-timing-function:cubic-bezier(.2,0,.6,1)}58%{transform:rotate(calc(var(--fa-wag-angle,12deg)*.6));animation-timing-function:cubic-bezier(.4,0,.2,1)}68%{transform:rotate(0)}to{transform:rotate(0)}}@keyframes fa-float{0%{transform:translateY(0)translateX(0)rotate(0deg)scale(var(--fa-float-squash-x,1.02),var(--fa-float-squash-y,.98));animation-timing-function:cubic-bezier(.33,0,.66,.33)}15%{transform:translateY(calc(-.4*var(--fa-float-height,6px)))translateX(var(--fa-float-drift,1px))rotate(var(--fa-float-tilt,1deg))scale(1,1);animation-timing-function:cubic-bezier(.33,.66,.66,1)}35%{transform:translateY(calc(-1*var(--fa-float-height,6px)))translateX(0)rotate(0deg)scale(var(--fa-float-stretch-x,.98),var(--fa-float-stretch-y,1.03));animation-timing-function:cubic-bezier(.5,0,.5,0)}50%{transform:translateY(calc(-.92*var(--fa-float-height,6px)))translateX(calc(-.5*var(--fa-float-drift,1px)))rotate(calc(-.5*var(--fa-float-tilt,1deg)))scale(.995,1.01);animation-timing-function:cubic-bezier(.33,0,.66,.33)}70%{transform:translateY(calc(-.3*var(--fa-float-height,6px)))translateX(calc(-1*var(--fa-float-drift,1px)))rotate(calc(-1*var(--fa-float-tilt,1deg)))scale(1,1);animation-timing-function:cubic-bezier(.33,.66,.66,1)}90%{transform:translateY(calc(.05*var(--fa-float-height,6px)))translateX(0)rotate(0deg)scale(var(--fa-float-squash-x,1.02),var(--fa-float-squash-y,.98));animation-timing-function:cubic-bezier(.33,0,.66,1)}to{transform:translateY(0)translateX(0)rotate(0deg)scale(var(--fa-float-squash-x,1.02),var(--fa-float-squash-y,.98))}}@keyframes fa-swing{0%{transform:rotate(0);animation-timing-function:cubic-bezier(.2,0,.8,1)}8%{transform:rotate(var(--fa-swing-angle,22deg));animation-timing-function:cubic-bezier(.3,0,.7,1)}18%{transform:rotate(calc(-1*var(--fa-swing-angle,22deg)*.85));animation-timing-function:cubic-bezier(.3,0,.7,1)}28%{transform:rotate(calc(var(--fa-swing-angle,22deg)*.65));animation-timing-function:cubic-bezier(.35,0,.65,1)}38%{transform:rotate(calc(-1*var(--fa-swing-angle,22deg)*.45));animation-timing-function:cubic-bezier(.4,0,.6,1)}48%{transform:rotate(calc(var(--fa-swing-angle,22deg)*.25));animation-timing-function:cubic-bezier(.4,0,.6,1)}56%{transform:rotate(calc(-1*var(--fa-swing-angle,22deg)*.1));animation-timing-function:cubic-bezier(.4,0,.6,1)}64%{transform:rotate(0)}to{transform:rotate(0)}}@keyframes fa-jello{0%{transform:scale(1);animation-timing-function:cubic-bezier(.2,0,.8,1)}12%{transform:scale(var(--fa-jello-scale-x,1.15),calc(2 - var(--fa-jello-scale-x,1.15)));animation-timing-function:cubic-bezier(.3,0,.7,1)}24%{transform:scale(calc(2 - var(--fa-jello-scale-y,1.12)),var(--fa-jello-scale-y,1.12));animation-timing-function:cubic-bezier(.3,0,.7,1)}36%{transform:scale(calc(1 + (var(--fa-jello-scale-x,1.15) - 1)*.5),calc(2 - (1 + (var(--fa-jello-scale-x,1.15) - 1)*.5)));animation-timing-function:cubic-bezier(.4,0,.6,1)}48%{transform:scale(calc(2 - (1 + (var(--fa-jello-scale-y,1.12) - 1)*.3)),calc(1 + (var(--fa-jello-scale-y,1.12) - 1)*.3));animation-timing-function:cubic-bezier(.4,0,.6,1)}58%{transform:scale(1.02,.98);animation-timing-function:cubic-bezier(.4,0,.2,1)}68%{transform:scale(1)}to{transform:scale(1)}}.fa-rotate-90{transform:rotate(90deg)}.fa-rotate-180{transform:rotate(180deg)}.fa-rotate-270{transform:rotate(270deg)}.fa-flip-horizontal{transform:scaleX(-1)}.fa-flip-vertical{transform:scaleY(-1)}.fa-flip-both,.fa-flip-horizontal.fa-flip-vertical{transform:scale(-1)}.fa-rotate-by{transform:rotate(var(--fa-rotate-angle,0))}.fa-stack{display:inline-block;height:2em;line-height:2em;position:relative;vertical-align:middle;width:2.5em}.fa-stack-1x,.fa-stack-2x{--fa-width:100%;inset:0;position:absolute;text-align:center;width:var(--fa-width);z-index:var(--fa-stack-z-index,auto)}.fa-stack-1x{line-height:inherit}.fa-stack-2x{font-size:2em}.fa-inverse{color:var(--fa-inverse,#fff)}.fa-chevron-right{--fa:""}:root,:host{--fa-family-classic:"Font Awesome 7 Pro";--fa-font-regular:normal 400 1em/1 var(--fa-family-classic);--fa-style-family-classic:var(--fa-family-classic)}@font-face{font-family:"Font Awesome 7 Pro";font-weight:400;font-style:normal;font-display:block;src:url(data:font/woff2;base64,d09GMk9UVE8AAAOEAAkAAAAAB5wAAAM+AAAdAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYCJAQGBmADCAWHeQA+ByANg1WFeQMjUjASAf6ZYBOZ8wU+QZEQ+o7dTngda4sWQyP8xWwesBK+43IA1vQsnud/7X/73JlvjpuHAqGYNl2dUEiw+pBoEAmJn9HK84X92v6JWajeqmlTQSKv4hbJ0MpR0naOKlw6Owncj58bKb62/YmBN89maXKI3b7gISfm/3LamJjA//+EU7rVWIPm1jVBTrAXZWtZdAHHAWb34gjmMHYZA3iJwFRwfWDLPz0FjN4V765uNXlQg04FhDSthjyg9Z8xQ3BPhRMUdW7klTalKLCjKAgTPaFoqwBkEAA7z58+mmb2op9n2pZp7ICpmmec0Q1/PjscxLhsApiEgBh2VUDR4beAykzvBdQmuS2gzUqfBbQb76WAbkusFNBjvEkCBtshHNpWSd04KOOfBzGnj6Do34PKrrVBbU3fQZtb+4F2y9YDul1oB3osa+ngIBQMNfzdpT0Xd8D7uy+a+Jo+uZWcLYxpYXISNs3/H5CZWXrfk1xBxTQZvHlgGvP1cjJBI2dAE2PFSvULzGRZFdE1mdjvsCavHwWhK65tJhP5+XE1acVJHXaNqqnc2UE9JtGIm1T6WOlDOTk4MsCWE2CE3RnQ9UI0dkNVbjdKWkcotOfDKQwE8ty7bu6IwAvJWDS4YZoBJVZ6uEopcJJjd6ARA1J3BTAYu7o4MYIufHRogjGFq6uHKXLoDlV9wxjOVEyJ3/u2pH2RIN4eq1kiinbqd7ocd2NViZZYog7stg0/m8LsQDtGiS44h6GgwhhqSSs0FvHb/VEWI7FDC8j1gQ8U7SAqASbqmjJJYGJmQUXJyhSSqCLTVDJdLTM0sW57bPSQ529YuefMroU1itJn5/LBIbv27PFvLolaaNqPSXGLOjb382CpuZ4mnnblgcyTteipPYo6c6wxOWkmZ4wOFwWdzrWty6rIhUSeU4ky/d0k/j68rOdN2k2iAJul9rtY0D4BIUvwNlGewxVG5oLgJdT9E92mQqoM3QiWX+DFx8vLBwz8CdpPPPfRNmCb0aI1GLQgf4Npo/+MT54ctm3u8Fcm7/kppqenhs2VcLH25HSG03PDyTnuLpJWPgzt2o1UFUycn9/ionI+440okXce+fEaAwAA)format("woff2")}.far{--fa-family:var(--fa-family-classic);--fa-style:400}.fa-classic{--fa-family:var(--fa-family-classic)}.fa-regular{--fa-style:400}</style>
+
+	<title>Barings ABF Australia - Home</title>
+	
+	<meta name="description" content="Barings ABF Australia - Home">
+	<meta name="keywords" content="Barings ABF Australia - Home">
+	
+	<link rel="canonical" href="https://gcapinvest.com/">
+	
+	<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/vue@2/dist/vue.js"></script>
+	
+<link rel="apple-touch-icon" sizes="180x180" href="/assets/favicon_io/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon_io/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon_io/favicon-16x16.png">
+<link rel="manifest" href="/assets/favicon_io/site.webmanifest">
+  </head>
+  <body>
+
+<a href="#" id="top"><i class="fas fa-chevron-up"></i></a>
+
+<nav class="navbar sticky-top navbar-expand-xl navbar-light bg-light pb-3">
+  <div class="container d-flex align-items-end">
+    <a class="navbar-brand" href="/">
+	    <img src="/assets/images/barings-logo-final.svg" alt="Gryphon Capital Investments">
+	</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="modal" data-bs-target="#mobile-nav">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+	    <div class="d-flex justify-content-between align-items-end w-100 mb-2">
+																													<a class="category-menu  " id="category-menu-link-2" data-num="2" href="/about-gryphon/">About</a>
+																														<a class="category-menu  " id="category-menu-link-3" data-num="3" href="/our-lit/">Our LIT (ASX:GCI)</a>
+																																																																		<a class="category-menu  " id="category-menu-link-26" data-num="26" href="https://www.barings.com/en-au/institutional/content/barings-liquidity-investment-strategy/why-invest-in-blis?utm_source=gryphon-website&amp;utm_medium=display&amp;utm_campaign=real_estate&amp;utm_content=realestate_hub_gryphon" target="_blank">BLIS FUND</a>
+																														<a class="category-menu  " id="category-menu-link-21" data-num="21" href="https://www.barings.com/en-au/guest/sustainability/our-commitment?utm_source=gryphon-website&amp;utm_medium=display&amp;utm_campaign=sustainability&amp;utm_content=sustainability_hub_our-commitment" target="_blank">Sustainability</a>
+																														<a class="category-menu  " id="category-menu-link-5" data-num="5" href="/news-insights/">News</a>
+																														<a class="category-menu  " id="category-menu-link-6" data-num="6" href="https://www.barings.com/en-au/guest/contact/contact-barings" target="_blank">Contact</a>
+																																																												    </div>
+
+    </div>
+  </div>
+</nav>
+<section class="d-none d-lg-block">
+				<div class="collapse  fixed-menu" data-num="2" id="categories-2">
+			<section>
+				<div class="container">
+					<ul class="list-group list-group-horizontal d-flex ">
+													<a id="panel-link-23" class="list-group-item flex-fill py-3" href="/about-gryphon/#about">About</a>
+													<a id="panel-link-97" class="list-group-item flex-fill py-3" href="/about-gryphon/#more-about-barings">More about Barings</a>
+													<a id="panel-link-24" class="list-group-item flex-fill py-3" href="/about-gryphon/#values-and-culture">Values &amp; Culture</a>
+													<a id="panel-link-25" class="list-group-item flex-fill py-3" href="/about-gryphon/#history">History</a>
+													<a id="panel-link-26" class="list-group-item flex-fill py-3" href="/about-gryphon/#our-team">Our Team</a>
+											</ul>
+				</div>
+			</section>
+		</div>
+				<div class="collapse  fixed-menu" data-num="3" id="categories-3">
+			<section>
+				<div class="container">
+					<ul class="list-group list-group-horizontal d-flex ">
+													<a id="panel-link-68" class="list-group-item flex-fill py-3" href="/our-lit/#overview">Overview</a>
+													<a id="panel-link-38" class="list-group-item flex-fill py-3" href="/our-lit/#about">About</a>
+													<a id="panel-link-17" class="list-group-item flex-fill py-3" href="/our-lit/#who-is-gci-for">Who is GCI for?</a>
+													<a id="panel-link-18" class="list-group-item flex-fill py-3" href="/our-lit/#why-invest">Why Invest?</a>
+													<a id="panel-link-19" class="list-group-item flex-fill py-3" href="/our-lit/#external-ratings">External Ratings</a>
+													<a id="panel-link-20" class="list-group-item flex-fill py-3" href="/our-lit/#performance">Performance</a>
+													<a id="panel-link-21" class="list-group-item flex-fill py-3" href="/our-lit/#the-latest">The Latest</a>
+													<a id="panel-link-22" class="list-group-item flex-fill py-3" href="/our-lit/#document-library">Document Library</a>
+											</ul>
+				</div>
+			</section>
+		</div>
+														</section>
+
+<div class="modal fade" id="mobile-nav" tabindex="-1" aria-labelledby="mobile-navigation" aria-hidden="true">
+  <div class="modal-dialog modal-fullscreen modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="exampleModalLabel">
+	        <img src="/assets/images/barings-logo-allwhite-final.svg" alt="Barings" style="width: 80%;height: auto;">
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+
+																														<a class="category-menu " id="category-menu-link-2" data-num="2" data-bs-toggle="collapse" role="button" href="#mobile-categories-2" data-target="#mobile-categories-2" aria-expanded="false" aria-controls="mobile-categories-2">
+													
+						About						</a>
+												<div class="collapse  mobile-menu" data-num="2" id="mobile-categories-2">
+							<ul class="list-group">
+																											<a id="panel-link-23" class="mobile-nav-link list-group-item py-2" href="/about-gryphon/#about">About</a>
+																			<a id="panel-link-97" class="mobile-nav-link list-group-item py-2" href="/about-gryphon/#more-about-barings">More about Barings</a>
+																			<a id="panel-link-24" class="mobile-nav-link list-group-item py-2" href="/about-gryphon/#values-and-culture">Values &amp; Culture</a>
+																			<a id="panel-link-25" class="mobile-nav-link list-group-item py-2" href="/about-gryphon/#history">History</a>
+																			<a id="panel-link-26" class="mobile-nav-link list-group-item py-2" href="/about-gryphon/#our-team">Our Team</a>
+																								</ul>
+						</div>
+					
+
+																										<a class="category-menu " id="category-menu-link-3" data-num="3" data-bs-toggle="collapse" role="button" href="#mobile-categories-3" data-target="#mobile-categories-3" aria-expanded="false" aria-controls="mobile-categories-3">
+													
+						Our LIT (ASX:GCI)						</a>
+												<div class="collapse  mobile-menu" data-num="3" id="mobile-categories-3">
+							<ul class="list-group">
+																											<a id="panel-link-68" class="mobile-nav-link list-group-item py-2" href="/our-lit/#overview">Overview</a>
+																			<a id="panel-link-38" class="mobile-nav-link list-group-item py-2" href="/our-lit/#about">About</a>
+																			<a id="panel-link-17" class="mobile-nav-link list-group-item py-2" href="/our-lit/#who-is-gci-for">Who is GCI for?</a>
+																			<a id="panel-link-18" class="mobile-nav-link list-group-item py-2" href="/our-lit/#why-invest">Why Invest?</a>
+																			<a id="panel-link-19" class="mobile-nav-link list-group-item py-2" href="/our-lit/#external-ratings">External Ratings</a>
+																			<a id="panel-link-20" class="mobile-nav-link list-group-item py-2" href="/our-lit/#performance">Performance</a>
+																			<a id="panel-link-21" class="mobile-nav-link list-group-item py-2" href="/our-lit/#the-latest">The Latest</a>
+																			<a id="panel-link-22" class="mobile-nav-link list-group-item py-2" href="/our-lit/#document-library">Document Library</a>
+																								</ul>
+						</div>
+					
+
+																																																														<a class="category-menu " id="category-menu-link-26" data-num="26" href="https://www.barings.com/en-au/institutional/content/barings-liquidity-investment-strategy/why-invest-in-blis?utm_source=gryphon-website&amp;utm_medium=display&amp;utm_campaign=real_estate&amp;utm_content=realestate_hub_gryphon" target="_blank" data-target="#mobile-categories-26" aria-expanded="false" aria-controls="mobile-categories-26">
+													
+						BLIS FUND						</a>
+						
+
+																										<a class="category-menu " id="category-menu-link-21" data-num="21" href="https://www.barings.com/en-au/guest/sustainability/our-commitment?utm_source=gryphon-website&amp;utm_medium=display&amp;utm_campaign=sustainability&amp;utm_content=sustainability_hub_our-commitment" target="_blank" data-target="#mobile-categories-21" aria-expanded="false" aria-controls="mobile-categories-21">
+													
+						Sustainability						</a>
+						
+
+																										<a class="category-menu " id="category-menu-link-5" data-num="5" href="/news-insights/" data-target="#mobile-categories-5" aria-expanded="false" aria-controls="mobile-categories-5">
+													
+						News						</a>
+												<div class="collapse  mobile-menu" data-num="5" id="mobile-categories-5">
+							<ul class="list-group">
+															</ul>
+						</div>
+					
+
+																										<a class="category-menu " id="category-menu-link-6" data-num="6" href="https://www.barings.com/en-au/guest/contact/contact-barings" target="_blank" data-target="#mobile-categories-6" aria-expanded="false" aria-controls="mobile-categories-6">
+													
+						Contact						</a>
+												<div class="collapse  mobile-menu" data-num="6" id="mobile-categories-6">
+							<ul class="list-group">
+															</ul>
+						</div>
+					
+
+																																																						
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+    
+<div id="banner" data-num="1" class="panel bg-primary ">
+	 <!-- Image Banner -->
+	<section id="image-banner" style="background-image: url('/cmsb/uploads/barings-hero-image.jpg')" ;="">
+
+		<div class="container">
+			<div class="row item d-flex justify-content-start align-items-center">
+				<div class="col-md-6 py-5">
+					<h1>Gryphon Capital Investments is now Barings Asset-Based Finance Australia</h1>
+<p>As an Asset-Based Finance (ABF) specialist, we seek to anchor our clients’ fixed income portfolios with low volatility absolute returns.</p>
+<p><a href="/about-gryphon/" class="btn btn-arrow btn-success">Read more</a></p>				</div>			
+			</div>
+		</div>
+		
+	</section>
+	<section id="image-banner-mobile" style="background-image: url('/cmsb/uploads/hero-image-mobile-copy.jpg')" ;="">
+
+		<div class="container">
+			<div class="row item d-flex justify-content-start align-items-center">
+				<div class="col py-5">
+					<h1>Gryphon Capital Investments is now Barings Asset-Based Finance Australia</h1>
+<p>As an Asset-Based Finance (ABF) specialist, we seek to anchor our clients’ fixed income portfolios with low volatility absolute returns.</p>
+<p><a href="/about-gryphon/" class="btn btn-arrow btn-success">Read more</a></p>				</div>			
+			</div>
+		</div>
+		
+	</section>
+	</div>    
+<div id="intro" data-num="2" class="panel bg-light pt-5 pb-5">
+	 <!-- Standard Text -->
+		<div class="container-fluid">
+			<div class="container">
+					<div class="row d-flex align-items-center">
+						<div class="col">
+						<h2 style="text-align: left;">About Barings Asset-Based Finance Australia (formerly Gryphon Capital Investments)</h2>
+<p>Barings ABF Australia&nbsp; is the Australian ABF investment platform of Barings, one of the world’s leading alternative asset managers, with over US$502 billion in assets under management and more than 1,400 external clients and 2,000 professionals globally.</p>
+<p>Barings ABF Australia forms part of Barings’ Global ABF platform, which manages approximately US$58 billion in assets under management and invests in residential, commercial and consumer asset‑based investments across public and private markets.</p>
+<p>The Australian ABF team is a leading participant in the domestic securitisation market, investing across the capital structure from AAA to below investment grade. The team is active across public term transactions, private warehouse facilities and whole loan investments, demonstrating longstanding market presence, deep sector expertise and a disciplined, active approach to portfolio construction and risk management.</p>
+<p>*As of 30 June 2026</p>						</div>
+					</div>
+				</div>
+		</div>
+	</div>    
+<div id="feed" data-num="3" class="panel bg-info pt-5 pb-5">
+	 <!-- Custom -->
+				<section id="gryphon-feed">
+	<div class="container">
+		<div class="row item d-flex justify-content-start align-items-top">
+			<div class="col-md-6">
+				<h2>Gryphon Capital Income Trust</h2>
+<p>GCI’s primary objective is to generate consistent and sustainable monthly income, while maintaining a strong focus on capital preservation.</p>
+<p><a href="/our-lit/" class="btn btn-primary">Read More</a></p>			</div>			
+			<div class="col-md-3">
+				<hr>
+				<p class="feedTitle">ASX Code</p>
+				<p class="snapshot">GCI</p>
+
+				<hr>
+				<p class="feedTitle">Latest Unit Price
+				</p><p class="snapshot">$2.08</p>
+
+				<hr>
+								<p class="feedTitle">Market Capitalisation
+				</p><p class="snapshot">$1,323 million</p>
+			</div>			
+			<div class="col-md-3">
+				<hr>
+				<p class="feedTitle">Listed
+				</p><p class="snapshot">May 2018</p>
+
+				<hr>
+				<p class="feedTitle">Latest NTA Per Unit
+				</p><p class="snapshot">$2.01</p>
+
+				<hr>
+				<p class="feedTitle">Distribution p.a.<sup>*</sup></p>
+				<p class="snapshot">7.80%<br><span class="small"><sup>*</sup> YTD May 2026 distributions as % of NTA</span></p>
+			</div>			
+		</div>
+	</div>
+	
+</section>	</div>    
+<div id="latest-investment" data-num="4" class="panel bg-light pt-5 pb-5">
+	 <!-- Custom -->
+				<div class="container">
+		<div class="row d-flex align-items-center">
+		<div class="col-md-6">
+			<h5>Investment Update</h5>
+			<h2>GCI Investment Update June 2026</h2>
+			<p>Our monthly investment updates provide the latest information about Gryphon's LIT (ASX: GCI), including distributions and fund performance.</p>
+
+						<a href="/cmsb/uploads/gci-inv-update-jun-2026.pdf" target="_blank" class="btn btn-primary btn-arrow mr-3 mb-4">Download</a>
+			
+			
+		</div>
+		<div class="col-md-6">
+						<img src="/cmsb/media/investment-update-(barings).jpg" alt="GCI Investment Update June 2026" class="img-fluid">
+					</div>
+	</div>
+	</div>	</div>    
+<div id="featured-news" data-num="5" class="panel bg-primary pt-5 pb-5">
+	 <!-- Custom -->
+				<div class="container">
+		<div class="row d-flex align-items-center">
+		<div class="col-md-6">
+						<img src="/cmsb/uploads/rmba-arrears.jpg" alt="Securitisation Arrears: A Barometer of Consumer Well-Being" class="img-fluid mb-4">
+					</div>
+		<div class="col-md-6">
+			<h5>Gryphon Insight</h5>
+			<h2>Securitisation Arrears: A Barometer of Consumer Well-Being</h2>
+			<p></p>
+			<a href="/resources/market-update-gryphon-capital-jul25/" class="btn btn-info btn-arrow">VIEW MORE</a>
+		</div>
+	</div>
+	</div>	</div>    
+<div id="latest-videos" data-num="6" class="panel bg-light pt-5 pb-5">
+	 <!-- Custom -->
+				<div class="container">
+	<div class="row">
+		<div class="col">
+			<h2>Latest Video Insights</h2>
+		</div>
+	</div>
+	<div class="row">
+			<div class="col-md-4 mb-5">
+			<a href="/resources/gryphoninsightfeb25/" class="">
+						<img src="/cmsb/uploads/thumbprint-v2.png" alt="Asset-backed Securities (ABS) 101" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/gryphoninsightfeb25/" class=""><h4>Asset-backed Securities (ABS) 101</h4></a>
+			<p class="date">18 February 2025</p>
+		</div>
+			<div class="col-md-4 mb-5">
+			<a href="/resources/gryphoninsightsep24/" class="">
+						<img src="/cmsb/uploads/thumb.jpg" alt="Gryphon Portfolio Manager Ashley Burtenshaw Interviewed by The Inside Network" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/gryphoninsightsep24/" class=""><h4>Gryphon Portfolio Manager Ashley Burtenshaw Interviewed by The Inside Network</h4></a>
+			<p class="date">20 September 2024</p>
+		</div>
+			<div class="col-md-4 mb-5">
+			<a href="/resources/marketupdateapr23/" class="">
+						<img src="/cmsb/uploads/thumbnail-the-unnecessary-fear.png" alt="The Unnecessary Fear - addressing the market fear surrounding rising mortgage rates" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/marketupdateapr23/" class=""><h4>The Unnecessary Fear - addressing the market fear surrounding rising mortgage rates</h4></a>
+			<p class="date">19 April 2023</p>
+		</div>
+			<div class="col-md-4 mb-5">
+			<a href="/resources/marketupdatesep22/" class="">
+						<img src="/cmsb/uploads/thumbnail-market-update-sep-2022.png" alt="GCI Market Update - September 2022" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/marketupdatesep22/" class=""><h4>GCI Market Update - September 2022</h4></a>
+			<p class="date">07 September 2022</p>
+		</div>
+			<div class="col-md-4 mb-5">
+			<a href="/resources/gryphoninsightsep22/" class="">
+						<img src="/cmsb/uploads/thumbnail-no-payment-shock-sep-2022.png" alt="Gryphon Insight - No Payment Shock September 2022" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/gryphoninsightsep22/" class=""><h4>Gryphon Insight - No Payment Shock September 2022</h4></a>
+			<p class="date">05 May 2022</p>
+		</div>
+			<div class="col-md-4 mb-5">
+			<a href="/resources/esgvideo/" class="">
+						<img src="/cmsb/uploads/screenshot-esg.png" alt="Gryphon and ESG" class="img-fluid">
+						</a>
+			<h5>Video Insight</h5>
+			<a href="/resources/esgvideo/" class=""><h4>Gryphon and ESG</h4></a>
+			<p class="date">09 March 2022</p>
+		</div>
+		</div>
+	<div class="row">
+		<div class="col">
+			<a href="news-insights/?filter_category=2#p33" class="btn btn-arrow btn-primary">View All</a>
+		</div>
+	</div>
+</div>	</div>
+
+
+<section class="bg-info py-5 footer2">
+	<div class="container">
+		<div class="row">
+			<div class="col-md-8">
+				<h2>Who We Are</h2>
+<p>Barings is a $502 billion* global alternative asset manager that partners with institutional, insurance, and wealth clients, and supports leading businesses with flexible financing solutions. The firm, a subsidiary of MassMutual and MS&amp;AD, seeks to deliver excess returns by leveraging its global scale and capabilities across credit, real assets, capital solutions and emerging markets</p>
+<p>*As of 30 June 2026</p>
+<p><a href="https://www.barings.com/en-au/guest/contact/contact-barings">Contact Us</a></p>			</div>
+			<div class="col-md-4 social">
+				<h2>Follow Us</h2>
+				<p>
+					<a href="https://www.linkedin.com/company/barings/" target="_blank" class=""><i class="fa-kit fa-linkedin-48x48"></i></a>
+					<a href="https://x.com/Barings" target="_blank" class=""><i class="fa-kit fa-twitter-48x48"></i></a>
+					<a href="https://podcasts.apple.com/us/podcast/streaming-income-a-podcast-from-barings/id1449496233" target="_blank" class=""><i class="fa-kit fa-applepodcast-48x48"></i></a>
+					<a href="https://open.spotify.com/show/7wv1GJCQHcggXDdMHbhRlY" target="_blank" class=""><i class="fa-kit fa-spotify-48x48"></i></a>
+					<a href="https://www.youtube.com/@Barings" target="_blank" class=""><i class="fa-kit fa-youtube-48x48"></i></a>
+				</p>
+			</div>
+		</div>
+	</div>
+</section>
+<footer class="footer">
+	<div class="container py-4">
+		<div class="row">
+			<div class="col d-flex justify-content-start">
+					<a href="https://www.barings.com/en-au/guest/content/privacy-notice" class="pe-4">Privacy Notice</a>
+					<a href="https://www.barings.com/en-au/guest/content/cookies-notice" class="pe-4">Cookie Notice</a>
+					<a href="https://www.barings.com/en-au/guest/content/terms-and-conditionshttps://www.barings.com/en-au/guest/content/important-disclosures" class="pe-4">Terms &amp; Conditions</a>
+					<a href="https://www.barings.com/en-au/guest/content/important-disclosures" class="pe-4">Important Disclosures</a>
+					<a href="https://www.barings.com/en-au/guest/sitemap" class="pe-4">Site Map</a>
+			</div>
+		</div>
+	</div>
+</footer>
+<div class="disclaimer">
+	<div class="container py-4">
+	<div class="row">
+		<div class="col">
+			<p>The opinions and other information contained herein, whether express or implied are made in good faith in relation to the facts known at the time of preparation and are subject to change without notice. <strong>PAST PERFORMANCE IS NOT NECESSARILY INDICATIVE OF FUTURE RESULTS</strong>. All monetary figures are in USD unless otherwise specified.</p>
+<p>This material should not be construed as a recommendation, and Barings is not soliciting any action based upon such information. This information is general in nature and does not take into account your objectives, financial situation or needs. You should consider the Product Disclosure Statement before making any investment decision. Additionally, the strategies and funds may not be available to all investor types in all jurisdictions. In some jurisdictions this website may contain advertising.</p>
+<p>Copyright © 2026 Barings. The BARINGS name and logo design are trademarks of Barings and are registered in U.S. Patent and Trademark Office and in other countries around the world. All rights are reserved.</p>		</div>
+	</div>
+	</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.0-beta2/dist/js/bootstrap.bundle.min.js" integrity="sha384-b5kHyXgcpbZJO/tY9Ul7kGkf1S0CWuKcCD38l8YkeH8z8QjE0GmW1gYU5S9FOnJ0" crossorigin="anonymous"></script>
+
+
+<script>
+
+	$.fn.isInViewport = function() {
+		var elementTop = $(this).offset().top;
+		var elementBottom = elementTop + $(this).outerHeight()-300;
+
+		var viewportTop = $(window).scrollTop();
+		var viewportBottom = viewportTop + $(window).height();
+
+		return elementBottom > viewportTop && elementTop < viewportBottom;
+	};
+
+	$(document).ready( function() {
+		updateActiveNav();
+		updateAnimationClass();
+		$(window).on('resize scroll', function() {
+			updateActiveNav();
+			updateAnimationClass();
+		});
+
+
+		$('#resource-confirm-link').click(function() {
+			$('#consent-to-resource').modal('hide');
+		});
+
+		function updateAnimationClass() {
+			$('.animated').each(function() {
+				if ($(this).isInViewport()) {
+					var animationClass = $(this).data('animation');
+					$(this).addClass(animationClass);
+				} else {
+					$(this).removeClass(animationClass);
+				}
+			});
+		}
+
+		function updateActiveNav() {
+			var activePanelFound = false;
+			$('.panel').each(function() {
+				var activeNum = $(this).data('num');
+				if ($(this).isInViewport() && !activePanelFound && $('#panel-link-'+activeNum).length) {
+					$('#panel-link-'+activeNum).addClass('active');
+					activePanelFound = true;
+				} else {
+					$('#panel-link-'+activeNum).removeClass('active');
+				}
+			});
+		}
+
+									$('#mobile-categories-1').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+												$('#mobile-categories-2').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+												$('#mobile-categories-3').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+																																$('#mobile-categories-26').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+												$('#mobile-categories-21').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+												$('#mobile-categories-5').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+												$('#mobile-categories-6').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+																																$('#mobile-categories-16').on('show.bs.collapse', function () {
+					var num = $(this).data('num');
+					$('.category-menu').each(function() {
+						console.log(this);
+						var subNum = $(this).data('num');
+						if(subNum != num) {
+							$("#mobile-categories-"+subNum).collapse("hide");
+						}
+					});
+				});
+					
+		$('.mobile-nav-link').click(function(event) {
+			event.preventDefault();
+			var currentLink = this;
+			var link        = $(currentLink).attr('href');
+			console.log(link);
+			window.location.href = link;
+			setTimeout(function () {
+				//location.reload();
+				console.log('hiding')
+				$('#mobile-nav').modal('hide');
+			}, 500);
+
+		})
+
+	});
+
+	</script>
+<script src="/assets/js/jquery.matchHeight.js" type="text/javascript"></script>
+<script>
+$(function() {
+	$('.box').matchHeight();
+});	
+</script>
+<div style="display:none;" class="modal" id="consent-to-resource" tabindex="-1">
+	<div class="modal-dialog modal-xl">
+		<div class="modal-content">
+			<div class="modal-header">
+				<h5 class="modal-title">Consent</h5>
+				<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+			</div>
+			<div class="modal-body">
+				<div id="resource-confirm-content"></div>
+				<p class="text-center">
+					<a target="_blank" id="resource-confirm-link" href="" class="btn btn-info">Yes</a>
+					<a href="#" data-bs-dismiss="modal" aria-label="Close" class="btn btn-info">No</a>
+				</p>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script type="text/javascript">
+    $(window).on('load',function(){
+        $('#alert-module124').modal('show');
+    });
+</script>		
+
+  
+</body></html>
