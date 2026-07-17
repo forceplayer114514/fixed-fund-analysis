@@ -21,65 +21,36 @@ from typing import Dict, List, Optional, Tuple
 FUNDMONITORS_HOST = "https://www.fundmonitors.com"
 
 
-# ---- name guard: 防 Tavily 词面搜返错源 ----
-# 停用词: 品牌无关或跨基金通用词, 匹配时忽略
-_STOPWORDS = frozenset({
-    "the", "fund", "trust", "pty", "ltd", "limited", "unit", "class",
-    "wholesale", "retail", "institutional", "capital", "management",
-})
+# ---- Spec B: 页面基金名提取 (透明展示, 替代 Spec A name guard) ----
+_H1_RE = re.compile(r"^\s*#{1,3}\s+([^\n]+)", re.M)
+_BOLD_FIRST_RE = re.compile(r"\*\*([^*]{5,120})\*\*")
 
 
-def _tokenize(name: str) -> List[str]:
-    """把基金名切成 name-guard 用的 token 列表。
+def _extract_page_fund_name(markdown):
+    """从 fundmonitors Full Profile markdown 抽页面上的基金名 (供透明展示)。
 
-    规则:
-      - 大小写不敏感 (统一转小写)
-      - 剔括号内容 (含 share class 变体: `(Wholesale)`, `(Assisted)` 等)
-      - 保留连字符复合词 (`floating-rate` 视为单 token, 不再拆)
-      - 剔停用词 (`_STOPWORDS`)
-      - 剔长度 < 3 的短 token (如 `us`, `au`)
+    顺序:
+      1. 首个 h1/h2/h3 标题 (最常见, `# Yarra Enhanced Income Fund`)
+      2. 首个粗体串 (`**Yarra Enhanced Income Fund**`, 5~120 字符)
+      3. 找不到返 None (前端 fallback 到 fund_name)
+
+    不做名字匹配, 不做过滤 -- 只把页面上的字面串拿出来给前端展示。
+
+    Args:
+        markdown: fundmonitors 页面 markdown, 可能为 None/空串
+
+    Returns:
+        Optional[str] 页面基金名 (原样保留 share class 后缀), 找不到返 None
     """
-    if not name:
-        return []
-    # 1. 先剔括号内容 (包含 share class 后缀)
-    s = re.sub(r"\([^)]*\)", " ", name).lower()
-    # 2. 只用非 [a-z0-9-] 的字符切分, 让连字符复合词整块保留
-    raw = re.split(r"[^a-z0-9\-]+", s)
-    out: List[str] = []
-    for tok in raw:
-        tok = tok.strip("-").strip()
-        if not tok:
-            continue
-        if tok in _STOPWORDS:
-            continue
-        if len(tok) < 3:
-            continue
-        out.append(tok)
-    return out
-
-
-def _name_match(
-    query_name: str,
-    markdown: str,
-    head_chars: int = 2000,
-) -> Tuple[bool, str]:
-    """严格 AND: query_name 的所有 token 必须在 markdown 首 head_chars 字全命中。
-
-    返回 (matched, reason):
-      - ('ok') 命中
-      - ('missing_tokens:xxx,yyy') 缺 token
-      - ('no_tokens_after_stopword_filter') 查询名剔完停用词后空
-    大小写不敏感; 连字符复合词按整块子串匹配 (查 `floating-rate`, md 里
-    只有 `floating rate` 空格分开 -> 不认, 避免 SmarterMoney 类误判)。
-    """
-    tokens = _tokenize(query_name)
-    if not tokens:
-        return (False, "no_tokens_after_stopword_filter")
-    head = (markdown or "")[:head_chars].lower()
-    missing = [t for t in tokens if t not in head]
-    if missing:
-        return (False, "missing_tokens:" + ",".join(missing))
-    return (True, "ok")
+    if not markdown:
+        return None
+    m = _H1_RE.search(markdown)
+    if m:
+        return m.group(1).strip()
+    m = _BOLD_FIRST_RE.search(markdown)
+    if m:
+        return m.group(1).strip()
+    return None
 
 
 def _lookup_whitelist(
