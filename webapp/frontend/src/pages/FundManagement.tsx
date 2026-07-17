@@ -172,6 +172,7 @@ export default function FundManagement() {
             <tr className="border-b-2 border-gray-100 bg-gray-50">
               <th className="text-left py-3 px-4 text-gray-500 font-medium">基金 ID</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">基金名称</th>
+              <th className="text-left py-3 px-4 text-gray-500 font-medium">数据源基金名</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">APIR</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据截止</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据状态</th>
@@ -184,6 +185,22 @@ export default function FundManagement() {
               <tr key={f.fund_id} className={`border-b border-gray-50 ${f.gap_count > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
                 <td className="py-3 px-4 text-gray-500 text-xs">{f.fund_id}</td>
                 <td className="py-3 px-4 font-medium">{f.fund_name}</td>
+                <td
+                  className={
+                    f.discovered_source_name
+                      && f.discovered_source_name !== f.fund_name
+                      ? "py-3 px-4 text-red-600 font-semibold"
+                      : "py-3 px-4 text-gray-500"
+                  }
+                  title={
+                    f.discovered_source_name
+                      && f.discovered_source_name !== f.fund_name
+                      ? `输入名: ${f.fund_name}\n抓到名: ${f.discovered_source_name}\n请核对是否为同一基金`
+                      : undefined
+                  }
+                >
+                  {f.discovered_source_name ?? '—'}
+                </td>
                 <td className="py-3 px-4 text-gray-500">{f.apir_code ?? '—'}</td>
                 <td className="py-3 px-4 text-gray-500">{f.data_cutoff_month ?? '—'}</td>
                 <td className="py-3 px-4">
@@ -237,7 +254,7 @@ export default function FundManagement() {
             ))}
             {funds.length === 0 && !fundsLoading && (
               <tr>
-                <td colSpan={7} className="py-10 text-center text-gray-400">
+                <td colSpan={8} className="py-10 text-center text-gray-400">
                   暂无基金。点右上"+ 添加基金"起 LLM 摄取任务。
                 </td>
               </tr>
