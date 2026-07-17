@@ -201,17 +201,44 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
 
         _job_log(jid, "L1 未覆盖, 走 L2 PDF 通路 ...")
 
-        # ---- L2: 官网 PDF discovery + 循环 (原 L1 通路降级为 L2) ----
+        # ---- L2: 官网 discovery + 循环 (原 L1 通路降级为 L2) ----
         _job_update(jid, state="discovering_l2_pdf")
         links: List[tuple] = []
+        # Spec D: 单文件多月 HTML/CSV 场景 (Coolabah Plotly 类)
+        # 预抓一次, 缓存到 payload_cache; 每月复用
+        payload_cache: Dict[str, str] = {}  # url -> text (HTML/CSV)
         if req.confirmed_url:
-            _job_log(jid, f"parse_archive: {req.confirmed_url}")
-            html = disc_mod._fetch(req.confirmed_url)
-            if not html:
-                raise ValueError(f"无法抓取归档页 {req.confirmed_url}")
-            parsed_links, has_more, hint, unp = disc_mod.parse_archive_page(html)
-            links = [(str(ym), str(url)) for ym, url in parsed_links]
-            _job_log(jid, f"parse_archive: {len(links)} links, unparseable={unp}, more_pages={has_more}")
+            _cu_low = req.confirmed_url.lower().split("?", 1)[0]
+            if _cu_low.endswith((".html", ".htm", ".csv")) and req.inception_month:
+                # 单文件多月: 从 inception 到当前 (下月-1) 枚举 ym
+                _job_log(jid, f"single_file_multi_month: {req.confirmed_url}")
+                from datetime import datetime as _dt
+                _today = _dt.utcnow()
+                # 目标最近月末 = 上个月 (确保数据已发布)
+                _end_ym_dt = _today.replace(day=1)
+                # 回退一月
+                if _end_ym_dt.month == 1:
+                    _end_ym_dt = _end_ym_dt.replace(year=_end_ym_dt.year - 1, month=12)
+                else:
+                    _end_ym_dt = _end_ym_dt.replace(month=_end_ym_dt.month - 1)
+                _end_ym = f"{_end_ym_dt.year:04d}-{_end_ym_dt.month:02d}"
+                months = disc_mod._month_range(req.inception_month, _end_ym)
+                links = [(m, req.confirmed_url) for m in months]
+                _job_log(jid, f"single_file_multi_month: {len(links)} months to try")
+                # 预抓
+                _text = disc_mod._fetch(req.confirmed_url) or ""
+                if not _text:
+                    raise ValueError(f"无法抓取 {req.confirmed_url}")
+                payload_cache[req.confirmed_url] = _text
+                _job_log(jid, f"pre-fetched {len(_text)} chars, {len(links)} months")
+            else:
+                _job_log(jid, f"parse_archive: {req.confirmed_url}")
+                html = disc_mod._fetch(req.confirmed_url)
+                if not html:
+                    raise ValueError(f"无法抓取归档页 {req.confirmed_url}")
+                parsed_links, has_more, hint, unp = disc_mod.parse_archive_page(html)
+                links = [(str(ym), str(url)) for ym, url in parsed_links]
+                _job_log(jid, f"parse_archive: {len(links)} links, unparseable={unp}, more_pages={has_more}")
         else:
             issuer_for_search = req.issuer or req.fund_name
             _job_log(jid, f"run_discovery: issuer={issuer_for_search}")
@@ -278,7 +305,9 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         continue
             else:
                 # HTML/CSV 通道: 抓取文本到内存 (可能过大, 上限由 extract_from_source 内部截)
-                if url.startswith("file://"):
+                if url in payload_cache:
+                    payload_text = payload_cache[url]
+                elif url.startswith("file://"):
                     from pathlib import Path as _Path
                     local_p = _Path(url[7:])
                     if not local_p.exists():
@@ -290,6 +319,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         _job_log(jid, f"[{i}/{len(links)}] {ym} local {channel} MISSING {local_p}")
                         continue
                     payload_text = local_p.read_text(encoding="utf-8", errors="replace")
+                    payload_cache[url] = payload_text
                 else:
                     # 用 discover._fetch 与 discovery 层一致的 UA/超时
                     try:
@@ -306,6 +336,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         )
                         _job_log(jid, f"[{i}/{len(links)}] {ym} fetch {channel} EMPTY")
                         continue
+                    payload_cache[url] = payload_text
 
             try:
                 if channel == "pdf":

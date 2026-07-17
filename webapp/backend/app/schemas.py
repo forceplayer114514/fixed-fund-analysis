@@ -81,6 +81,9 @@ class IngestRequest(BaseModel):
     asx_code: Optional[str] = None
     max_pdf_pages: Optional[int] = None
     limit: Optional[int] = None  # 仅处理前 N 个链接 (调试)
+    # Spec D: confirmed_url 是单文件多月 HTML/CSV 时, 需给 inception_month
+    # (YYYY-MM), 会从 inception 到当月枚举 ym, 对同一 URL 逐月调 LLM 提取.
+    inception_month: Optional[str] = None
 
     @field_validator("apir_code")
     @classmethod

@@ -182,3 +182,45 @@ def test_llm_returns_garbage_extraction_marks_parse_error():
     assert ex.not_found is True
     assert ex.net_return is None
     assert ex.parse_error is not None
+
+
+# --------------------- 8. Plotly shrink (Coolabah 3.9MB HTML) ---------------------
+
+def test_plotly_shrink_centers_on_ym():
+    """含 var data = [ + expected_ym 命中 → 以 ym 为中心切片, 前后各 60KB."""
+    from llm_ingest.extract_html import _shrink_plotly_html
+    # 大量填充 + Plotly script + ym 靠中间
+    padding = "x" * 200_000
+    ym_block = '"2026-05-31: $101.65"'
+    html = (
+        f"<html><head><style>{padding}</style></head><body>"
+        f'<script>var data = [{{"name":"FRHY","text":[{ym_block}]}}];</script>'
+        f"{padding}</body></html>"
+    )
+    shrunk = _shrink_plotly_html(html, "2026-05")
+    # 应含 "shrunk Plotly HTML" 标记
+    assert "shrunk Plotly HTML" in shrunk
+    # 应含 ym block
+    assert "2026-05-31: $101.65" in shrunk
+    # 长度应远小于原 HTML
+    assert len(shrunk) < len(html) / 2
+
+
+def test_plotly_shrink_no_plotly_returns_orig():
+    """非 Plotly HTML → 返原 HTML 不变."""
+    from llm_ingest.extract_html import _shrink_plotly_html
+    html = "<p>May 2026 0.5% net</p>"
+    assert _shrink_plotly_html(html, "2026-05") == html
+
+
+def test_plotly_shrink_no_ym_hit_takes_head():
+    """有 var data 无 ym 命中 → 取 data 数组头 120KB."""
+    from llm_ingest.extract_html import _shrink_plotly_html
+    padding = "y" * 500_000
+    html = (
+        f"<html><body><script>var data = [{{\"name\":\"F\",\"text\":[\"other\"]}}];"
+        f"{padding}</script></body></html>"
+    )
+    shrunk = _shrink_plotly_html(html, "2026-05")
+    assert "shrunk Plotly HTML" in shrunk
+    assert len(shrunk) < len(html)
