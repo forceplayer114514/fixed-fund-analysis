@@ -13,6 +13,8 @@ export interface Fund {
   gap_count: number
   /** pending_review 表 state='pending' 行数（LLM 摄取两闸未过待人工审核） */
   pending_count: number
+  /** Spec B: fundmonitors 页面实际抓到的基金名 (与 fund_name 不同时前端标红) */
+  discovered_source_name?: string | null
 }
 
 /** 因数据缺口被排除对比的基金（compare/time-series 降级返回） */

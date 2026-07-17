@@ -42,6 +42,8 @@ class FundResponse(BaseModel):
     has_metrics: bool = False
     gap_count: int = 0  # confirmed_gaps 表该基金行数（数据完整性标记）
     pending_count: int = 0  # pending_review 表 state='pending' 行数（LLM 摄取两闸未过待人工审核）
+    # Spec B: fundmonitors 页面实际抓到的基金名 (透明展示; 与 fund_name 不同时前端标红)
+    discovered_source_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
