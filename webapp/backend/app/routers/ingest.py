@@ -153,11 +153,17 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         except Exception:  # noqa: BLE001
             pass
         cu = req.confirmed_url or req.issuer_domain or ""
+        # 保留已有 url_type (Coolabah performance_report_html 等)
+        _existing_row = conn.execute(
+            "SELECT url_type FROM funds WHERE fund_id=?", (req.fund_id,)
+        ).fetchone()
+        _preserve_url_type = (_existing_row[0] if _existing_row else None) or "archive"
         store_mod.upsert_fund(
             conn,
             fund_id=req.fund_id,
             fund_name=req.fund_name,
             confirmed_url=cu,
+            url_type=_preserve_url_type,
             apir_code=req.apir_code,
             max_pdf_pages=req.max_pdf_pages,
         )
@@ -210,7 +216,18 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         payload_cache: Dict[str, str] = {}  # url -> text (HTML/CSV)
         if req.confirmed_url:
             _cu_low = req.confirmed_url.lower().split("?", 1)[0]
-            if _cu_low.endswith((".html", ".htm", ".csv")) and req.inception_month:
+            # 分派: (1) 扩展名 .html/.htm/.csv 或 (2) funds.url_type 值为
+            # performance_report_html / performance_report_csv (Coolabah 无扩
+            # 展的 Plotly 页) 均走 single_file_multi_month
+            _url_type_row = conn.execute(
+                "SELECT url_type FROM funds WHERE fund_id=?", (req.fund_id,)
+            ).fetchone()
+            _url_type = (_url_type_row[0] if _url_type_row else "") or ""
+            _is_single_file_html = (
+                _cu_low.endswith((".html", ".htm", ".csv"))
+                or _url_type in ("performance_report_html", "performance_report_csv")
+            )
+            if _is_single_file_html and req.inception_month:
                 # 单文件多月: 从 inception 到当前 (下月-1) 枚举 ym
                 _job_log(jid, f"single_file_multi_month: {req.confirmed_url}")
                 from datetime import datetime as _dt
@@ -266,13 +283,17 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
 
         for i, (ym, url) in enumerate(links, 1):
-            # 按 URL 后缀分派通道 (Spec D)
+            # 按 URL 后缀分派通道 (Spec D); 无后缀 URL 兜底看 funds.url_type
             low_url = url.lower()
             u_no_qs = low_url.split("?", 1)[0]
             if u_no_qs.endswith(".csv"):
                 channel = "csv"
             elif u_no_qs.endswith((".html", ".htm")):
                 channel = "html"
+            elif locals().get("_url_type") == "performance_report_html":
+                channel = "html"
+            elif locals().get("_url_type") == "performance_report_csv":
+                channel = "csv"
             else:
                 # 默认 PDF (无后缀 / .pdf / file://.../.pdf 都当 PDF)
                 channel = "pdf"

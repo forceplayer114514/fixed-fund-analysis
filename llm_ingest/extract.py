@@ -165,7 +165,18 @@ def extract_from_source(
     csv_text: Optional[str] = None,
     max_pages: int = 2,
 ) -> Extraction:
-    """按 URL 后缀分派 PDF/HTML/CSV. 三通道走同一 extract_unified.md."""
+    """按 URL 后缀分派 PDF/HTML/CSV. 三通道走同一 extract_unified.md.
+
+    Coolabah 类无扩展的 HTML performance page: 上游若已传 html_text/csv_text,
+    优先按内容通道走, 忽略无扩展 URL.
+    """
+    # 上游已明示通道 (html_text/csv_text 非空) 走内容通道, 绕过后缀检测
+    if html_text is not None:
+        from .extract_html import extract_from_html
+        return extract_from_html(html_text, expected_ym, client=client)
+    if csv_text is not None:
+        from .extract_csv import extract_from_csv
+        return extract_from_csv(csv_text, expected_ym, client=client)
     ext = _url_suffix(url_or_path)
     if ext == ".pdf":
         if local_pdf_path is None:

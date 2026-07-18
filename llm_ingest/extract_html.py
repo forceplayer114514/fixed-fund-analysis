@@ -55,8 +55,8 @@ def _shrink_plotly_html(html: str, expected_ym: str) -> str:
     # (1) 最强锚: hovertext NAV 序列 `<br />{ym}` — trace 内每月一条, 密集
     hover_hit = html.find(f"<br />{expected_ym}")
     if hover_hit > 0:
-        lo = max(0, hover_hit - 15_000)
-        hi = min(len(html), hover_hit + 5_000)
+        lo = max(0, hover_hit - 60_000)
+        hi = min(len(html), hover_hit + 60_000)
         header = "<!-- shrunk Plotly HTML (hovertext anchor) -->\n"
         return header + html[lo:hi]
     # (2) 定位 data 段起点
