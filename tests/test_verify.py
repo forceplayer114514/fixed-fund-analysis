@@ -20,6 +20,7 @@ from llm_ingest.verify import (
     _prev_yms,
     check_anti_fabrication,
     check_field_type,
+    check_fund_name_token,
     check_quote_tokens,
     check_rolling,
 )
@@ -124,6 +125,42 @@ def test_nav_pair_tokens_both_in_quote():
     doc = quote  # HTML 直接就是 doc
     r = check_quote_tokens(tokens, quote, doc)
     assert r.passed
+
+
+# ---------- check_fund_name_token: 独立闸, 不要求在 source_quote 里 ----------
+
+def test_fund_name_token_none_passes():
+    """fund_name_text 未转写 (None) -> pass, 不阻塞."""
+    r = check_fund_name_token(None, "some doc text")
+    assert r.passed
+    assert r.reason == "no_fund_name_text"
+
+
+def test_fund_name_token_found_in_doc_passes():
+    """基金名出现在抬头, 不要求在 source_quote (跟数值行不是同一段落)."""
+    doc = "Stake Accumulate Fund\nMonthly Report\n...\nNet Return (%) 0.65"
+    r = check_fund_name_token("Stake Accumulate Fund", doc)
+    assert r.passed, r.reason
+
+
+def test_fund_name_token_hallucinated_fails():
+    """文档里根本没这个名字 -> 幻觉, 判 fail."""
+    r = check_fund_name_token("Totally Made Up Fund", "Net Return (%) 0.65")
+    assert not r.passed
+    assert "fund_name_not_in_doc" in r.reason
+
+
+def test_fund_name_token_empty_doc_fails():
+    r = check_fund_name_token("Stake Accumulate Fund", "")
+    assert not r.passed
+    assert "empty_doc_text" in r.reason
+
+
+def test_fund_name_token_pymupdf_space_tolerated():
+    """PDF 抽取常见空格怪癖 (数字/符号周边), 名字本身也走同一 _flatten 归一化."""
+    r = check_fund_name_token("Stake Accumulate Fund",
+                              "Stake  Accumulate   Fund\nNet Return")
+    assert r.passed, r.reason
 
 
 # ---------- check_rolling: 十进制 ----------

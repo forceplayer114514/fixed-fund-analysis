@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,6 +180,101 @@ def upsert_fund(
         ),
     )
     conn.commit()
+
+
+def slugify_fund_id(name: str) -> str:
+    """基金名 -> fund_id slug. 小写, 非字母数字 -> 下划线, 去首尾, 折叠连续下划线。
+
+    从 webapp/backend/app/routers/ingest.py::_slugify_fund_id 下沉于此, 供
+    ingest.py (start_ingest 首次生成) 与 rename_fund_id 的调用方 (拿到官方
+    名称后重新生成) 两处共用, 不留两份实现。
+
+    例: 'Bentham Global Income Fund' -> 'bentham_global_income_fund'
+    """
+    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    s = re.sub(r"_+", "_", s)
+    return s or "fund"
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """sqlite_master 查表是否存在. anomalies/fund_metrics 由 webapp 的 SQLAlchemy
+    建, ensure_tables_if_missing 不建这两张 -- rename 前必须先探测, 否则空库/
+    纯 llm_ingest 单测环境 UPDATE 会报 'no such table'。"""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+_RENAME_CHILD_TABLES = (
+    "monthly_returns", "anomalies", "fund_metrics",
+    "confirmed_gaps", "pending_review",
+)
+
+
+def rename_fund_id(
+    conn: sqlite3.Connection,
+    old_fund_id: str,
+    new_fund_id: str,
+    new_fund_name: str,
+) -> bool:
+    """discovery/L1 拿到官方名称后, 把临时 fund_id/fund_name 换成正式值.
+
+    返回 True = 已 rename, False = 跳过 (new==old / fund_id 撞车 / fund_name
+    撞车 -- funds.fund_name 有 UNIQUE 约束)。
+
+    顺序 (PRAGMA foreign_keys=ON, SQLite FK 默认 NO ACTION, 必须先建新父行才能
+    把子表指过去, 不能直接 UPDATE funds SET fund_id=):
+      1. new_fund_id 已存在 于 funds, 或 new_fund_name 被别的 fund_id 占用 ->
+         放弃, 不动数据, 返回 False.
+      2. 动态读旧行全部列 (不硬编码列名, 防未来 migration 加列漏字段), 按新
+         fund_id/fund_name 插一份新行, 其余列原样复制.
+      3. 对存在的子表 UPDATE fund_id=old -> new.
+      4. DELETE 旧 funds 行.
+      5. 一次性 conn.commit() (前面步骤都不提交, 失败靠调用方 conn.rollback()
+         保证整体原子性)。
+    不动 pdf_cache 目录 (调用方 I/O 层面自己 rename, 这里只管 DB)。
+    """
+    if new_fund_id == old_fund_id:
+        return False
+    if conn.execute(
+        "SELECT 1 FROM funds WHERE fund_id=?", (new_fund_id,)
+    ).fetchone() is not None:
+        return False
+    if conn.execute(
+        "SELECT 1 FROM funds WHERE fund_name=? AND fund_id<>?",
+        (new_fund_name, old_fund_id),
+    ).fetchone() is not None:
+        return False
+
+    old_row = conn.execute(
+        "SELECT * FROM funds WHERE fund_id=?", (old_fund_id,)
+    ).fetchone()
+    if old_row is None:
+        return False
+
+    cols = list(old_row.keys())
+    values = [
+        new_fund_id if c == "fund_id"
+        else new_fund_name if c == "fund_name"
+        else old_row[c]
+        for c in cols
+    ]
+    placeholders = ",".join("?" * len(cols))
+    conn.execute(
+        f"INSERT INTO funds ({','.join(cols)}) VALUES ({placeholders})",
+        values,
+    )
+
+    for table in _RENAME_CHILD_TABLES:
+        if _table_exists(conn, table):
+            conn.execute(
+                f"UPDATE {table} SET fund_id=? WHERE fund_id=?",
+                (new_fund_id, old_fund_id),
+            )
+
+    conn.execute("DELETE FROM funds WHERE fund_id=?", (old_fund_id,))
+    conn.commit()
+    return True
 
 
 # ---------- monthly_returns + NAV 重算 ----------

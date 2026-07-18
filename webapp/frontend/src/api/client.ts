@@ -53,6 +53,9 @@ export const api = {
   getIngestJob: (jobId: string) =>
     request<import('../types').IngestJob>(`/api/ingest/jobs/${jobId}`),
 
+  listActiveJobs: () =>
+    request<{ job_id: string; fund_id: string; state: string }[]>('/api/ingest/jobs/active'),
+
   listPending: (fundId?: string) => {
     const q = fundId ? `?fund_id=${encodeURIComponent(fundId)}` : ''
     return request<import('../types').PendingReview[]>(`/api/pending${q}`)

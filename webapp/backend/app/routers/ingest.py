@@ -12,7 +12,6 @@ job 用 threading (BackgroundTasks 会阻塞后续请求处理).
 from __future__ import annotations
 
 import json
-import re
 import sys
 import threading
 import time
@@ -74,14 +73,46 @@ def _job_log(jid: str, msg: str) -> None:
             del tail[: len(tail) - _LOG_TAIL_MAX]
 
 
-def _slugify_fund_id(name: str) -> str:
-    """基金名 -> fund_id slug. 小写, 非字母数字 -> 下划线, 去首尾, 折叠连续下划线。
+def _upsert_fund_preserving_url_type(conn, store_mod, fund_id: str, fund_name: str,
+                                     req: IngestRequest) -> None:
+    """upsert_fund, 但保留已有 url_type (不被 upsert_fund 默认 'archive' 覆盖
+    Coolabah 类 performance_report_html/csv)。
 
-    例: 'Bentham Global Income Fund' -> 'bentham_global_income_fund'
+    start_ingest (请求处理同步代码, 让新行立刻对 GET /api/funds 可见, 否则
+    表格状态列的角标找不到归属行) 和 _run_ingest_job (worker 线程, 补全
+    confirmed_url/apir_code 等) 两处都要用, 抽出来避免各写一份 preserve 逻辑。
     """
-    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    s = re.sub(r"_+", "_", s)
-    return s or "fund"
+    cu = req.confirmed_url or req.issuer_domain or ""
+    existing_row = conn.execute(
+        "SELECT url_type FROM funds WHERE fund_id=?", (fund_id,)
+    ).fetchone()
+    preserve_url_type = (existing_row[0] if existing_row else None) or "archive"
+    store_mod.upsert_fund(
+        conn,
+        fund_id=fund_id,
+        fund_name=fund_name,
+        confirmed_url=cu,
+        url_type=preserve_url_type,
+        apir_code=req.apir_code,
+        max_pdf_pages=req.max_pdf_pages,
+    )
+
+
+def _import_llm_ingest_store():
+    """把仓库根加进 sys.path (若尚未在), 返回 llm_ingest.store 模块.
+
+    llm_ingest 在仓库根, webapp/backend 进程默认 sys.path 不含它。start_ingest
+    (请求处理同步代码) 与 _run_ingest_job (worker 线程) 都需要 store.slugify_fund_id
+    /rename_fund_id, 抽出这一份 bootstrap 避免两处各写一遍。
+    """
+    import os
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from llm_ingest import store as store_mod
+    return store_mod
 
 
 router = APIRouter(tags=["ingest"])
@@ -127,20 +158,15 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                     started_at=datetime.utcnow().isoformat())
         _job_log(jid, "job start")
 
-        # 懒 import: llm_ingest 在仓库根
-        import os
-        _repo_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-        )
-        if _repo_root not in sys.path:
-            sys.path.insert(0, _repo_root)
+        # 懒 import: llm_ingest 在仓库根 (_import_llm_ingest_store 顺带把仓库根
+        # 加进 sys.path, 后面几个 llm_ingest 子模块 import 才不会失败)
+        store_mod = _import_llm_ingest_store()
         from llm_ingest import cli as llm_cli
         from llm_ingest import discover as disc_mod
         from llm_ingest import extract as ex_mod
         from llm_ingest import fundmonitors as fm_mod
         from llm_ingest import parsers as parsers_mod
         from llm_ingest import pdf as pdf_mod
-        from llm_ingest import store as store_mod
         from llm_ingest import verify
 
         # ---- upsert fund (提前, 用于 L1 UPDATE discovered_source_name) ----
@@ -152,21 +178,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             _mig_b.apply(conn)
         except Exception:  # noqa: BLE001
             pass
-        cu = req.confirmed_url or req.issuer_domain or ""
-        # 保留已有 url_type (Coolabah performance_report_html 等)
-        _existing_row = conn.execute(
-            "SELECT url_type FROM funds WHERE fund_id=?", (req.fund_id,)
-        ).fetchone()
-        _preserve_url_type = (_existing_row[0] if _existing_row else None) or "archive"
-        store_mod.upsert_fund(
-            conn,
-            fund_id=req.fund_id,
-            fund_name=req.fund_name,
-            confirmed_url=cu,
-            url_type=_preserve_url_type,
-            apir_code=req.apir_code,
-            max_pdf_pages=req.max_pdf_pages,
-        )
+        _upsert_fund_preserving_url_type(conn, store_mod, req.fund_id, req.fund_name, req)
         _job_log(jid, f"upsert_fund: {req.fund_id}")
 
         # ---- L1: fundmonitors 主源 (Spec B 反转优先级) ----
@@ -196,6 +208,26 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 (l1_result.get("page_fund_name"), req.fund_id),
             )
             conn.commit()
+
+            # ---- 自动纠名: page_fund_name 已过 _name_matches 闸 (probe 内部),
+            # 与用户输入名字面关联可控, 借此把 fund_id/fund_name 换成正式值 ----
+            page_fund_name = l1_result.get("page_fund_name")
+            if page_fund_name:
+                new_id = store_mod.slugify_fund_id(page_fund_name)
+                if new_id != req.fund_id:
+                    if store_mod.rename_fund_id(conn, req.fund_id, new_id, page_fund_name):
+                        old_id = req.fund_id
+                        req = req.model_copy(update={"fund_id": new_id, "fund_name": page_fund_name})
+                        _job_update(jid, fund_id=new_id)
+                        from pathlib import Path as _Path
+                        old_dir = _Path(llm_cli.PDF_ROOT) / old_id
+                        new_dir = _Path(llm_cli.PDF_ROOT) / new_id
+                        if old_dir.exists():
+                            old_dir.rename(new_dir)
+                        _job_log(jid, f"renamed: {old_id} -> {new_id}")
+                    else:
+                        _job_log(jid, f"rename_skipped: {new_id} 已被占用")
+
             stats["monthly"] = n_written
             _job_log(jid, "L1 覆盖成功, 跳过 L2 PDF 通路")
             conn.close()
@@ -281,6 +313,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         _job_update(jid, state="ingesting_l2_pdf")
         from pathlib import Path
         pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
+        rename_attempted = False  # 只在本 job 内尝试一次自动纠名 (L2 通路)
 
         for i, (ym, url) in enumerate(links, 1):
             # 按 URL 后缀分派通道 (Spec D); 无后缀 URL 兜底看 funds.url_type
@@ -386,6 +419,34 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 source_text = pdf_mod.full_text(pdf_path)
             else:
                 source_text = payload_text or ""
+
+            # ---- 自动纠名 (L2 通路, 只尝试一次): fund_name_text 独立走
+            # check_fund_name_token (只需是 doc_text 子串, 不进闸1/闸2, 不影响
+            # 上面数值提取), 再用 _name_matches 做同页多基金混淆的兜底防线 ----
+            if not rename_attempted and ex.fund_name_text and not ex.not_found:
+                name_ok = verify.check_fund_name_token(ex.fund_name_text, source_text)
+                fuzzy_ok, _fuzzy_reason = fm_mod._name_matches(ex.fund_name_text, req.fund_name)
+                if name_ok.passed and fuzzy_ok:
+                    conn.execute(
+                        "UPDATE funds SET discovered_source_name=? WHERE fund_id=?",
+                        (ex.fund_name_text, req.fund_id),
+                    )
+                    conn.commit()
+                    new_id = store_mod.slugify_fund_id(ex.fund_name_text)
+                    if new_id != req.fund_id:
+                        if store_mod.rename_fund_id(conn, req.fund_id, new_id, ex.fund_name_text):
+                            old_id = req.fund_id
+                            req = req.model_copy(update={"fund_id": new_id, "fund_name": ex.fund_name_text})
+                            _job_update(jid, fund_id=new_id)
+                            old_dir, new_dir = pdf_dir, Path(llm_cli.PDF_ROOT) / new_id
+                            if old_dir.exists():
+                                old_dir.rename(new_dir)
+                            pdf_dir = new_dir
+                            _job_log(jid, f"renamed: {old_id} -> {new_id}")
+                        else:
+                            _job_log(jid, f"rename_skipped: {new_id} 已被占用")
+                rename_attempted = True
+
             q = verify.check_quote_tokens(
                 parsers_mod.collect_text_tokens(ex.raw),
                 ex.source_quote,
@@ -428,15 +489,40 @@ def start_ingest(req: IngestRequest):
     fund_name = (req.fund_name or "").strip()
     if not fund_name:
         raise HTTPException(status_code=400, detail="fund_name 必填")
-    fund_id = (req.fund_id or "").strip() or _slugify_fund_id(fund_name)
+    store_mod = _import_llm_ingest_store()
+    fund_id = (req.fund_id or "").strip() or store_mod.slugify_fund_id(fund_name)
     # 回填 req 让下游 worker 一致 (pydantic v2 model_copy)
     req = req.model_copy(update={"fund_id": fund_id, "fund_name": fund_name})
+
+    # 同步 upsert 一次: 让这一行立刻对 GET /api/funds 可见, 否则表格状态列
+    # (轮询 /api/ingest/jobs/active 按 fund_id 关联) 在 worker 线程真正跑到
+    # upsert_fund 之前的整段时间里找不到归属行, 新加的基金看起来"消失"了。
+    conn = store_mod.open_conn()
+    store_mod.ensure_tables_if_missing(conn)
+    _upsert_fund_preserving_url_type(conn, store_mod, fund_id, fund_name, req)
+    conn.close()
+
     jid = _job_new(fund_id)
     t = threading.Thread(target=_run_ingest_job, args=(jid, req), daemon=True,
                          name=f"ingest-{jid}")
     t.start()
     with _JOBS_LOCK:
         return IngestJobResponse(**_JOBS[jid])
+
+
+@router.get("/api/ingest/jobs/active")
+def list_active_jobs():
+    """列当前非终态 job, 供前端表格级轮询把活跃摄取状态关联到基金行.
+
+    必须注册在 `/api/ingest/jobs/{job_id}` 之前 -- 否则 Starlette 按注册顺序
+    匹配, 会把 'active' 当成 job_id 传进那个动态路由, 永远 404。
+    """
+    terminal = {"succeeded", "failed"}
+    with _JOBS_LOCK:
+        return [
+            {"job_id": j["job_id"], "fund_id": j["fund_id"], "state": j["state"]}
+            for j in _JOBS.values() if j["state"] not in terminal
+        ]
 
 
 @router.get("/api/ingest/jobs/{job_id}", response_model=IngestJobResponse)

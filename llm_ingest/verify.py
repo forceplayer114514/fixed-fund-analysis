@@ -96,6 +96,27 @@ def check_quote_tokens(
     return QuoteCheck(True, "ok_tokens")
 
 
+# ---------- 独立闸: check_fund_name_token (纠名用, 不进闸1/闸2) ----------
+
+def check_fund_name_token(fund_name_text: Optional[str], doc_text: str) -> QuoteCheck:
+    """fund_name_text (若非空) 必须是 doc_text 的子串 (归一化后), 防幻觉.
+
+    与 check_quote_tokens 不同: 不要求出现在 source_quote 里 -- 基金名通常在
+    文档抬头/封面, 与数值所在的 source_quote 段落不是同一处, 不参与净值四闸
+    判定 (不进 parsers.collect_text_tokens), 只用来决定是否可信到可以拿它去
+    改 fund_id/fund_name (rename_fund_id)。
+    """
+    if not fund_name_text:
+        return QuoteCheck(True, "no_fund_name_text")
+    if not doc_text:
+        return QuoteCheck(False, "empty_doc_text")
+    t = _flatten(fund_name_text)
+    d = _flatten(doc_text)
+    if not t or t not in d:
+        return QuoteCheck(False, f"fund_name_not_in_doc:{fund_name_text[:60]!r}")
+    return QuoteCheck(True, "ok")
+
+
 # ---------- 闸 2: check_rolling (十进制单位) ----------
 
 @dataclass(frozen=True)

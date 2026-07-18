@@ -145,7 +145,8 @@ export interface IngestRequest {
 export interface IngestJob {
   job_id: string
   fund_id: string
-  state: 'queued' | 'discovering' | 'ingesting' | 'succeeded' | 'failed'
+  state: 'queued' | 'ingesting_l1_fundmonitors' | 'discovering_l2_pdf'
+    | 'ingesting_l2_pdf' | 'succeeded' | 'failed'
   started_at: string | null
   finished_at: string | null
   stats: { monthly?: number; pending?: number; gap?: number; download_fail?: number } | null

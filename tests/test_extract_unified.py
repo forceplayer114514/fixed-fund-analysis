@@ -202,5 +202,79 @@ def test_rolling_text_converts_to_decimal():
     assert ex.rolling["12mo"] == pytest.approx(0.0787)
 
 
+# ---------- fund_name_text 透传 (纠名用, 与数值四闸无关) ----------
+
+def test_fund_name_text_transplanted_on_success():
+    ex = parse_response(json.dumps({
+        "ym": "2026-05", "kind": "table_value",
+        "value_text": "0.65%",
+        "measure_label": "Net Return (%)",
+        "source_quote": "Net Return (%) 0.65",
+        "not_found": False,
+        "fund_name_text": "Stake Accumulate Fund",
+    }), "2026-05")
+    assert ex.fund_name_text == "Stake Accumulate Fund"
+
+
+def test_fund_name_text_transplanted_on_not_found():
+    """not_found=True 场景 (数值没抓到) 仍可能转写出抬头基金名, 供上游纠名用."""
+    ex = parse_response(json.dumps({
+        "ym": "2026-05", "kind": "not_found", "not_found": True,
+        "source_quote": "",
+        "fund_name_text": "Stake Accumulate Fund",
+    }), "2026-05")
+    assert ex.not_found
+    assert ex.fund_name_text == "Stake Accumulate Fund"
+
+
+def test_fund_name_text_transplanted_on_parse_error():
+    """月份闸/单位模糊等 parse_error 场景 fund_name_text 也不丢."""
+    ex = parse_response(json.dumps({
+        "ym": "2026-04", "kind": "table_value",
+        "value_text": "0.65%",
+        "not_found": False,
+        "fund_name_text": "Stake Accumulate Fund",
+    }), "2026-06")
+    assert ex.parse_error is not None
+    assert ex.fund_name_text == "Stake Accumulate Fund"
+
+
+def test_fund_name_text_missing_defaults_none():
+    ex = parse_response(json.dumps({
+        "ym": "2026-05", "kind": "table_value",
+        "value_text": "0.65%",
+        "measure_label": "Net Return (%)",
+        "source_quote": "Net Return (%) 0.65",
+        "not_found": False,
+    }), "2026-05")
+    assert ex.fund_name_text is None
+
+
+def test_fund_name_text_null_string_normalizes_to_none():
+    """LLM 按 prompt 约定填字符串 'null' (而非 JSON null) 时也归一化成 None."""
+    ex = parse_response(json.dumps({
+        "ym": "2026-05", "kind": "table_value",
+        "value_text": "0.65%",
+        "measure_label": "Net Return (%)",
+        "source_quote": "Net Return (%) 0.65",
+        "not_found": False,
+        "fund_name_text": "   ",
+    }), "2026-05")
+    assert ex.fund_name_text is None
+
+
+def test_fund_name_text_not_in_collect_text_tokens():
+    """回归锁: fund_name_text 不该混进 parsers.collect_text_tokens (那个列表
+    过 check_quote_tokens, 要求同时在 source_quote 里 -- 基金名在抬头, 数值行
+    的 source_quote 里通常没有, 混进去会让几乎所有提取的闸1误判 fail)."""
+    from llm_ingest.parsers import collect_text_tokens
+    obj = {
+        "value_text": "0.65%",
+        "fund_name_text": "Stake Accumulate Fund",
+    }
+    tokens = collect_text_tokens(obj)
+    assert "Stake Accumulate Fund" not in tokens
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

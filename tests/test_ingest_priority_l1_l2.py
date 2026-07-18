@@ -60,11 +60,12 @@ def test_l1_ok_skips_pdf_and_records_discovered_source_name(tmp_db):
 
     # PDF discovery 不该被调 (L1 已覆盖)
     assert mock_fetch.call_count == 0
-    # discovered_source_name 落库
+    # discovered_source_name 落库 (查 fund_id 不写死 test_fund -- page_fund_name
+    # 与输入名不同会触发自动纠名 rename, fund_id 换了; 见
+    # test_l1_rename_on_page_fund_name 专测 rename 本身, 这里只关心
+    # discovered_source_name 有没有记下来, 与 fund_id 是否变化无关)
     conn = sqlite3.connect(tmp_db)
-    row = conn.execute(
-        "SELECT discovered_source_name FROM funds WHERE fund_id='test_fund'"
-    ).fetchone()
+    row = conn.execute("SELECT discovered_source_name FROM funds").fetchone()
     conn.close()
     assert row[0] == "Test Fund From Page"
 
@@ -133,6 +134,72 @@ def test_no_l1_threshold_gate():
     src = inspect.getsource(ing._run_ingest_job)
     # 老 gate 已删
     assert "len(links) < 24" not in src
+
+
+def test_l1_rename_on_page_fund_name(tmp_db):
+    """L1 page_fund_name 与用户输入不同 -> 触发自动纠名: funds 表 fund_id/
+    fund_name 换成基于官方名的新值, job dict 的 fund_id 同步更新 (否则表格级
+    /jobs/active 轮询按 fund_id 关联不到这一行)."""
+    from webapp.backend.app.routers import ingest as ing
+    from llm_ingest import fundmonitors as fm
+
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "probe", return_value={
+        "status": "ok", "records": fake_records, "ytd_map": {},
+        "url": "https://fundmonitors.com/x",
+        "page_fund_name": "Test Fund Official",
+        "errors": [],
+    }), patch("llm_ingest.discover._fetch", return_value=None):
+        jid = ing._job_new("test_fund")
+        ing._run_ingest_job(jid, _make_req())
+
+    assert ing._JOBS[jid]["fund_id"] == "test_fund_official"
+
+    conn = sqlite3.connect(tmp_db)
+    old_row = conn.execute("SELECT 1 FROM funds WHERE fund_id='test_fund'").fetchone()
+    new_row = conn.execute(
+        "SELECT fund_name, discovered_source_name FROM funds WHERE fund_id='test_fund_official'"
+    ).fetchone()
+    mr = conn.execute("SELECT fund_id FROM monthly_returns").fetchall()
+    conn.close()
+    assert old_row is None
+    assert new_row is not None
+    assert new_row[0] == "Test Fund Official"
+    assert new_row[1] == "Test Fund Official"
+    assert [r[0] for r in mr] == ["test_fund_official"]
+
+
+def test_l1_rename_skipped_on_collision_continues(tmp_db):
+    """新 fund_id 已被别的基金占用 -> rename 放弃, 继续用旧 fund_id 跑完, 不崩."""
+    from webapp.backend.app.routers import ingest as ing
+    from llm_ingest import fundmonitors as fm
+    from llm_ingest import store as store_mod
+
+    conn = sqlite3.connect(tmp_db)
+    store_mod.upsert_fund(
+        conn, fund_id="test_fund_official", fund_name="Other Fund",
+        confirmed_url="https://other.com",
+    )
+    conn.close()
+
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "probe", return_value={
+        "status": "ok", "records": fake_records, "ytd_map": {},
+        "url": "https://fundmonitors.com/x",
+        "page_fund_name": "Test Fund Official",
+        "errors": [],
+    }), patch("llm_ingest.discover._fetch", return_value=None):
+        jid = ing._job_new("test_fund")
+        ing._run_ingest_job(jid, _make_req())
+
+    assert ing._JOBS[jid]["fund_id"] == "test_fund"
+    assert ing._JOBS[jid]["state"] == "succeeded"
+    log = "\n".join(ing._JOBS[jid]["log_tail"])
+    assert "rename_skipped" in log
+    conn = sqlite3.connect(tmp_db)
+    row = conn.execute("SELECT 1 FROM funds WHERE fund_id='test_fund'").fetchone()
+    conn.close()
+    assert row is not None
 
 
 def test_l1_ok_stats_monthly_count(tmp_db):

@@ -67,6 +67,7 @@
   "source_quote": "<原文逐字片段, 必须含上面所有 *_text token>",
   "measure_label": "<原文里该值旁的标签, 如 'NTA Net Return (%)' / 'Plotly hovertext NAV' / '1M'>",
   "rolling_text": {"1mo":"<原文>","3mo":"<原文>","6mo":"<原文>","12mo":"<原文>"},
-  "not_found": <bool>
+  "not_found": <bool>,
+  "fund_name_text": "<文档上出现的基金全称原文, 逐字转写, 查不到填 null. 与 source_quote 无关, 只需在文档任意处出现 (通常在抬头/封面), 不要求与上面数值同一段落>"
 }
 ```

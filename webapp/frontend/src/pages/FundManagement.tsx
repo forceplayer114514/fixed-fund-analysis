@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
-import type { IngestJob, PendingReview } from '../types'
+import type { Fund, IngestJob, PendingReview } from '../types'
 
 const POLL_MS = 1500
 
@@ -13,6 +13,7 @@ export default function FundManagement() {
   const deleteFund = useStore(s => s.deleteFund)
 
   const [recomputing, setRecomputing] = useState<string | null>(null)
+  const [updatingFundId, setUpdatingFundId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
@@ -33,6 +34,9 @@ export default function FundManagement() {
   const [job, setJob] = useState<IngestJob | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  // 表格级活跃 job 状态 (fund_id -> state), 独立于上面弹窗内单 job 轮询
+  const [activeJobs, setActiveJobs] = useState<Record<string, string>>({})
+
   // 审核抽屉
   const [reviewFund, setReviewFund] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingReview[]>([])
@@ -42,7 +46,7 @@ export default function FundManagement() {
     fetchFunds()
   }, [])
 
-  // job 轮询
+  // job 轮询 (弹窗内单 job 实时日志)
   useEffect(() => {
     if (!job) return
     if (job.state === 'succeeded' || job.state === 'failed') return
@@ -50,7 +54,7 @@ export default function FundManagement() {
       try {
         const j = await api.getIngestJob(job.job_id)
         setJob(j)
-        if (j.state === 'succeeded') {
+        if (j.state === 'succeeded' || j.state === 'failed') {
           await fetchFunds()
         }
       } catch {
@@ -60,6 +64,30 @@ export default function FundManagement() {
     return () => clearInterval(t)
   }, [job?.job_id, job?.state])
 
+  // 表格级活跃 job 轮询 (独立于上面那个, 不依赖弹窗是否打开/是否记得 job_id)
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const jobs = await api.listActiveJobs()
+        if (cancelled) return
+        const next: Record<string, string> = {}
+        jobs.forEach(j => { next[j.fund_id] = j.state })
+        setActiveJobs(prev => {
+          // 上一轮在, 这一轮消失 -> 该基金刚转终态, 刷新一次拿最新 gap/pending/cutoff
+          const disappeared = Object.keys(prev).filter(fid => !(fid in next))
+          if (disappeared.length > 0) fetchFunds()
+          return next
+        })
+      } catch {
+        // ignore
+      }
+    }
+    tick()
+    const t = setInterval(tick, POLL_MS)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [])
+
   const handleRecompute = async (fundId: string) => {
     setRecomputing(fundId)
     try {
@@ -68,6 +96,26 @@ export default function FundManagement() {
       // error handled by store
     }
     setRecomputing(null)
+  }
+
+  const handleUpdateData = async (f: Fund) => {
+    setUpdatingFundId(f.fund_id)
+    try {
+      // fund_id 已存在 -> upsert_fund 走更新分支, 等于对已有基金补新月份.
+      // issuer/issuer_domain/asx_code 未持久化, 传不了; confirmed_url 非空时
+      // 后端直接走归档解析, 不需要它们兜底联网搜索.
+      await api.startIngest({
+        fund_id: f.fund_id,
+        fund_name: f.fund_name,
+        confirmed_url: f.confirmed_url || null,
+        apir_code: f.apir_code,
+        max_pdf_pages: f.max_pdf_pages,
+      })
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-alert
+      alert((e as Error).message)
+    }
+    setUpdatingFundId(null)
   }
 
   const handleDelete = async (fundId: string) => {
@@ -136,6 +184,9 @@ export default function FundManagement() {
         asx_code: addForm.asx_code || null,
       })
       setJob(j)
+      // 后端 start_ingest 已同步 upsert 一次, 这里立刻刷新让新行马上出现在表格里
+      // (不必等下一轮表格轮询检测到 job 转终态才 fetchFunds)
+      await fetchFunds()
     } catch (e: unknown) {
       setAddError((e as Error).message)
     }
@@ -176,6 +227,7 @@ export default function FundManagement() {
               <th className="text-left py-3 px-4 text-gray-500 font-medium">APIR</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据截止</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">数据状态</th>
+              <th className="text-left py-3 px-4 text-gray-500 font-medium">实时状态</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">待审</th>
               <th className="text-left py-3 px-4 text-gray-500 font-medium">操作</th>
             </tr>
@@ -211,6 +263,18 @@ export default function FundManagement() {
                   )}
                 </td>
                 <td className="py-3 px-4">
+                  {(() => {
+                    const st = activeJobs[f.fund_id]
+                    if (!st) return <span className="text-gray-300 text-xs">—</span>
+                    const label = st === 'ingesting_l2_pdf' ? '提取中' : '搜索中'
+                    return (
+                      <span className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-0.5">
+                        {label}
+                      </span>
+                    )
+                  })()}
+                </td>
+                <td className="py-3 px-4">
                   {f.pending_count > 0 ? (
                     <button
                       className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 hover:bg-amber-100"
@@ -223,6 +287,13 @@ export default function FundManagement() {
                   )}
                 </td>
                 <td className="py-3 px-4">
+                  <button
+                    className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50 disabled:opacity-50"
+                    disabled={!!activeJobs[f.fund_id] || updatingFundId === f.fund_id}
+                    onClick={() => handleUpdateData(f)}
+                  >
+                    {updatingFundId === f.fund_id ? '起任务中…' : '更新数据'}
+                  </button>
                   <button
                     className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50 disabled:opacity-50"
                     disabled={recomputing === f.fund_id}
@@ -254,7 +325,7 @@ export default function FundManagement() {
             ))}
             {funds.length === 0 && !fundsLoading && (
               <tr>
-                <td colSpan={8} className="py-10 text-center text-gray-400">
+                <td colSpan={9} className="py-10 text-center text-gray-400">
                   暂无基金。点右上"+ 添加基金"起 LLM 摄取任务。
                 </td>
               </tr>
@@ -437,11 +508,11 @@ export default function FundManagement() {
 }
 
 function IngestProgress({ job, onClose }: { job: IngestJob; onClose: () => void }) {
-  const done = job.state === 'succeeded' || job.state === 'failed'
   const badge = {
     queued: 'bg-gray-100 text-gray-600',
-    discovering: 'bg-blue-100 text-blue-700',
-    ingesting: 'bg-blue-100 text-blue-700',
+    ingesting_l1_fundmonitors: 'bg-blue-100 text-blue-700',
+    discovering_l2_pdf: 'bg-blue-100 text-blue-700',
+    ingesting_l2_pdf: 'bg-blue-100 text-blue-700',
     succeeded: 'bg-green-100 text-green-700',
     failed: 'bg-red-100 text-red-700',
   }[job.state]
@@ -470,14 +541,12 @@ function IngestProgress({ job, onClose }: { job: IngestJob; onClose: () => void 
           ))}
         </div>
       </div>
-      {done && (
-        <button
-          className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e]"
-          onClick={onClose}
-        >
-          关闭
-        </button>
-      )}
+      <button
+        className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e]"
+        onClick={onClose}
+      >
+        关闭 (摄取在后台继续跑, 不受影响)
+      </button>
     </div>
   )
 }

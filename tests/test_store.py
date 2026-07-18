@@ -382,5 +382,74 @@ def test_list_pending_and_gaps(conn):
     assert gaps[0]["missing_month"] == "2025-11"
 
 
+# ---------- slugify_fund_id / rename_fund_id ----------
+
+def test_slugify_fund_id_basic():
+    assert store.slugify_fund_id("Stake Accumulate Fund") == "stake_accumulate_fund"
+    assert store.slugify_fund_id("  ***  ") == "fund"
+
+
+def test_rename_fund_id_noop_when_new_equals_old(conn):
+    assert store.rename_fund_id(conn, "fund_x", "fund_x", "Fund X") is False
+    row = conn.execute("SELECT * FROM funds WHERE fund_id='fund_x'").fetchone()
+    assert row is not None
+
+
+def test_rename_fund_id_moves_child_rows(conn):
+    """monthly_returns/confirmed_gaps/pending_review 都随 rename 转到新 fund_id,
+    行数不变; anomalies/fund_metrics 在这套 fixture schema 里不存在 (只由
+    webapp SQLAlchemy Base.metadata.create_all 建), rename 应静默跳过不报错。
+    """
+    conn.execute(
+        "INSERT INTO monthly_returns (fund_id, date, net_return, nav) "
+        "VALUES ('fund_x', '2026-01-31', 0.005, 1.005)"
+    )
+    conn.execute(
+        "INSERT INTO confirmed_gaps (fund_id, missing_month, exhausted_levels) "
+        "VALUES ('fund_x', '2026-02', 'L1,L2,L3')"
+    )
+    conn.execute(
+        "INSERT INTO pending_review (fund_id, date, net_return, extract_method) "
+        "VALUES ('fund_x', '2026-03-31', 0.006, 'llm')"
+    )
+    conn.commit()
+    assert not store._table_exists(conn, "anomalies")
+    assert not store._table_exists(conn, "fund_metrics")
+
+    ok = store.rename_fund_id(conn, "fund_x", "stake_accumulate_fund", "Stake Accumulate Fund")
+    assert ok is True
+
+    assert conn.execute("SELECT 1 FROM funds WHERE fund_id='fund_x'").fetchone() is None
+    new = conn.execute("SELECT * FROM funds WHERE fund_id='stake_accumulate_fund'").fetchone()
+    assert new is not None
+    assert new["fund_name"] == "Stake Accumulate Fund"
+    assert new["confirmed_url"] == "https://example.com/archive"  # 其余列原样复制
+
+    mr = conn.execute("SELECT fund_id FROM monthly_returns").fetchall()
+    assert [r["fund_id"] for r in mr] == ["stake_accumulate_fund"]
+    gaps = conn.execute("SELECT fund_id FROM confirmed_gaps").fetchall()
+    assert [r["fund_id"] for r in gaps] == ["stake_accumulate_fund"]
+    pend = conn.execute("SELECT fund_id FROM pending_review").fetchall()
+    assert [r["fund_id"] for r in pend] == ["stake_accumulate_fund"]
+
+
+def test_rename_fund_id_skips_on_id_collision(conn):
+    store.upsert_fund(conn, fund_id="fund_y", fund_name="Fund Y", confirmed_url="https://b.com")
+    ok = store.rename_fund_id(conn, "fund_x", "fund_y", "Whatever Name")
+    assert ok is False
+    assert conn.execute("SELECT 1 FROM funds WHERE fund_id='fund_x'").fetchone()
+    row_y = conn.execute("SELECT fund_name FROM funds WHERE fund_id='fund_y'").fetchone()
+    assert row_y["fund_name"] == "Fund Y"  # 未被覆盖
+
+
+def test_rename_fund_id_skips_on_name_collision(conn):
+    """funds.fund_name 有 UNIQUE 约束: 新名字被别的 fund_id 占用也要跳过."""
+    store.upsert_fund(conn, fund_id="fund_y", fund_name="Fund Y", confirmed_url="https://b.com")
+    ok = store.rename_fund_id(conn, "fund_x", "fund_x_renamed", "Fund Y")
+    assert ok is False
+    assert conn.execute("SELECT 1 FROM funds WHERE fund_id='fund_x'").fetchone()
+    assert conn.execute("SELECT 1 FROM funds WHERE fund_id='fund_x_renamed'").fetchone() is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

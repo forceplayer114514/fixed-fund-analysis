@@ -32,6 +32,7 @@ class Extraction:
     not_found: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)        # 原始 LLM JSON
     parse_error: Optional[str] = None                        # parse 失败原因
+    fund_name_text: Optional[str] = None                      # 文档抬头处基金全称原文, 逐字转写
 
 
 class ExtractError(RuntimeError):
@@ -72,6 +73,9 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
     not_found = bool(obj.get("not_found")) or kind == "not_found"
     source_quote = str(obj.get("source_quote") or "")
     measure_label = str(obj.get("measure_label") or obj.get("measure_label_in_pdf") or "")
+    fund_name_text = obj.get("fund_name_text") or None
+    if fund_name_text is not None:
+        fund_name_text = str(fund_name_text).strip() or None
 
     if not_found:
         return Extraction(
@@ -79,6 +83,7 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
             measure=kind or "not_found",
             measure_label_in_pdf=measure_label,
             rolling={}, not_found=True, raw=obj,
+            fund_name_text=fund_name_text,
         )
 
     pr = parsers_mod.parse_extraction(obj, expected_ym)
@@ -89,6 +94,7 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
             measure_label_in_pdf=measure_label,
             rolling={}, not_found=True, raw=obj,
             parse_error=pr.parse_error,
+            fund_name_text=fund_name_text,
         )
 
     return Extraction(
@@ -100,6 +106,7 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
         rolling=pr.rolling_decimal,  # 十进制单位
         not_found=False,
         raw=obj,
+        fund_name_text=fund_name_text,
     )
 
 
