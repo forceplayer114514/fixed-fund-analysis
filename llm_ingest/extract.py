@@ -1,4 +1,9 @@
-"""prompt 构造 + JSON 解析 -> Extraction 数据类."""
+"""prompt 构造 + JSON 解析 -> Extraction 数据类.
+
+Spec E 单一路径:
+  - LLM 只返字符串 token (无数值字段), parsers.parse_extraction 做数学+单位换算
+  - Extraction.rolling 全走十进制 (与 net_return 同单位, 与 parsers.ParseResult 一致)
+"""
 from __future__ import annotations
 
 import json
@@ -10,21 +15,22 @@ from urllib.parse import urlparse
 
 from . import pdf as pdf_mod
 from .client import Client, DEFAULT_MAX_TOKENS
+from . import parsers as parsers_mod
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_month.md"
+PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
 
 @dataclass(frozen=True)
 class Extraction:
     ym: str
-    net_return: Optional[float]  # 十进制, 如 0.0065
+    net_return: Optional[float]                              # 十进制, 如 0.0065 (= 0.65%)
     source_quote: str
-    measure: str  # 期望 "net_monthly"
-    measure_label_in_pdf: str
-    rolling: Dict[str, Optional[float]]  # 百分数 (0.65 = 0.65%)
-    not_found: bool
-    raw: Dict[str, Any] = field(default_factory=dict)  # 原始 JSON, 失败进 pending.candidates_json
-    parse_error: Optional[str] = None  # 解析失败原因
+    measure: str                                             # kind (table_value/nav_pair/...) 兼容旧 "net_monthly"
+    measure_label_in_pdf: str                                # 原文标签 (extract_unified 里叫 measure_label)
+    rolling: Dict[str, Optional[float]] = field(default_factory=dict)  # 十进制 (0.0185 = 1.85%)
+    not_found: bool = False
+    raw: Dict[str, Any] = field(default_factory=dict)        # 原始 LLM JSON
+    parse_error: Optional[str] = None                        # parse 失败原因
 
 
 class ExtractError(RuntimeError):
@@ -37,7 +43,6 @@ _JSON_RE = re.compile(r"\{[\s\S]*\}")
 def _extract_json_str(text: str) -> str:
     """text 里剥出 JSON. 优先剥去 ```json ... ``` 包裹, 兜底找第一个 {...}."""
     t = text.strip()
-    # 去 markdown fence
     if t.startswith("```"):
         t = re.sub(r"^```(?:json)?\s*", "", t)
         t = re.sub(r"\s*```\s*$", "", t)
@@ -48,47 +53,51 @@ def _extract_json_str(text: str) -> str:
 
 
 def parse_response(text: str, expected_ym: str) -> Extraction:
-    """把 sub2api 返回的文本解析成 Extraction. 严格, 失败即抛."""
+    """把 LLM 返回的文本解析成 Extraction (单一路径 → parsers.parse_extraction)."""
     try:
         js = _extract_json_str(text)
         obj = json.loads(js)
     except (ExtractError, json.JSONDecodeError) as e:
         return Extraction(
-            ym=expected_ym, net_return=None, source_quote="", measure="unknown",
-            measure_label_in_pdf="", rolling={}, not_found=True,
+            ym=expected_ym, net_return=None, source_quote="",
+            measure="unknown", measure_label_in_pdf="",
+            rolling={}, not_found=True,
             raw={"error": "parse_failed", "text": text[:2000]},
             parse_error=str(e),
         )
-    ym = obj.get("ym") or expected_ym
-    not_found = bool(obj.get("not_found"))
-    pct = obj.get("net_return_pct")
-    net_return: Optional[float] = None
-    if pct is not None and not not_found:
-        try:
-            net_return = float(pct) / 100.0
-        except (TypeError, ValueError):
-            net_return = None
 
-    rolling_raw = obj.get("rolling_pct") or {}
-    rolling: Dict[str, Optional[float]] = {}
-    for k in ("1mo", "3mo", "6mo", "12mo"):
-        v = rolling_raw.get(k)
-        if v is None:
-            rolling[k] = None
-        else:
-            try:
-                rolling[k] = float(v)
-            except (TypeError, ValueError):
-                rolling[k] = None
+    ym = obj.get("ym") or expected_ym
+    kind = obj.get("kind") or ""
+    not_found = bool(obj.get("not_found")) or kind == "not_found"
+    source_quote = str(obj.get("source_quote") or "")
+    measure_label = str(obj.get("measure_label") or obj.get("measure_label_in_pdf") or "")
+
+    if not_found:
+        return Extraction(
+            ym=ym, net_return=None, source_quote=source_quote,
+            measure=kind or "not_found",
+            measure_label_in_pdf=measure_label,
+            rolling={}, not_found=True, raw=obj,
+        )
+
+    pr = parsers_mod.parse_extraction(obj, expected_ym)
+    if pr.parse_error:
+        return Extraction(
+            ym=ym, net_return=None, source_quote=source_quote,
+            measure=kind or "unknown",
+            measure_label_in_pdf=measure_label,
+            rolling={}, not_found=True, raw=obj,
+            parse_error=pr.parse_error,
+        )
 
     return Extraction(
         ym=ym,
-        net_return=net_return,
-        source_quote=str(obj.get("source_quote") or ""),
-        measure=str(obj.get("measure") or "unknown"),
-        measure_label_in_pdf=str(obj.get("measure_label_in_pdf") or ""),
-        rolling=rolling,
-        not_found=not_found,
+        net_return=pr.net_return,
+        source_quote=source_quote,
+        measure=kind or "unknown",
+        measure_label_in_pdf=measure_label,
+        rolling=pr.rolling_decimal,  # 十进制单位
+        not_found=False,
         raw=obj,
     )
 
@@ -112,11 +121,10 @@ def extract_from_pdf(
     """
     if client is None:
         client = Client()
-    prompt = load_prompt()
+    prompt = load_prompt() + f"\n\n目标月份: {expected_ym}"
     pdf_bytes = pdf_mod.clip_pages(pdf_path, max_pages=max_pages)
     resp = client.messages_with_pdf(prompt, pdf_bytes, max_tokens=max_tokens)
     ex = parse_response(resp.text, expected_ym)
-    # 安全网: not_found + 裁剪过 -> 全文重试
     if (
         retry_on_not_found_with_full
         and ex.not_found
@@ -131,16 +139,14 @@ def extract_from_pdf(
     return ex
 
 
-# ---------- Spec D: 通道 dispatch ----------
+# ---------- Spec D: 通道 dispatch (unchanged) ----------
 
 def _url_suffix(url_or_path: str) -> str:
-    """URL/路径 → 小写后缀 (含点), 无后缀 = ''."""
     p = urlparse(url_or_path)
     return Path(p.path).suffix.lower()
 
 
 def _read_local_or_none(url_or_path: str) -> Optional[bytes]:
-    """file:// url 或本地路径 → bytes; http(s) → None (由通道内部去下)."""
     if url_or_path.startswith("file://"):
         return Path(url_or_path[7:]).read_bytes()
     p = urlparse(url_or_path)
@@ -159,18 +165,7 @@ def extract_from_source(
     csv_text: Optional[str] = None,
     max_pages: int = 2,
 ) -> Extraction:
-    """按 URL 后缀分派 PDF/HTML/CSV.
-
-    PDF: 用 local_pdf_path (已由上游 _run_ingest_job 处理下载/缓存)
-    HTML/CSV: 用 html_text/csv_text (已由上游 fetch), 或 file:// url 直读
-
-    上游用法:
-      # PDF 走本地路径 (已下载或本地缓存)
-      extract_from_source(url, ym, local_pdf_path=Path("..."))
-      # HTML/CSV: 直接传入 text 内容
-      extract_from_source(url, ym, html_text=html)
-      extract_from_source(url, ym, csv_text=csv)
-    """
+    """按 URL 后缀分派 PDF/HTML/CSV. 三通道走同一 extract_unified.md."""
     ext = _url_suffix(url_or_path)
     if ext == ".pdf":
         if local_pdf_path is None:

@@ -5,6 +5,8 @@
 - 忽略 factsheet/PDS/gross,只要月报。
 - 分页/"Load More"/只显示近期 -> has_more_pages=true 并说下页怎么取。
 - 单份最新(未列多月)不算归档。
+- ym 必须格式化为 "YYYY-MM"。
+- url 必须是页面里 `<a href="...">` 里真实存在的链接; 代码会用白名单交叉校验, 造出来的 URL 会被丢弃。
 
 只输出 JSON:
 {

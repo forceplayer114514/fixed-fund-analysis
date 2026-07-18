@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import discover as disc_mod
 from . import extract as ex_mod
+from . import parsers as parsers_mod
 from . import pdf as pdf_mod
 from . import store as store_mod
 from . import verify
@@ -169,7 +170,8 @@ def run_compare(fund_id: str, limit: Optional[int] = None, max_pages: int = 2, c
             gate_stats["not_found"] += 1
 
         pdf_text = pdf_mod.full_text(pdf)
-        q = verify.check_quote(ex.source_quote, pdf_text, ex.net_return)
+        tokens = parsers_mod.collect_text_tokens(ex.raw)
+        q = verify.check_quote_tokens(tokens, ex.source_quote, pdf_text)
         if not q.passed:
             gate_stats["quote_blocked"] += 1
         r = verify.check_rolling(ex.net_return, ym, history, ex.rolling)
@@ -379,7 +381,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             continue
         # 两闸
         pdf_text = pdf_mod.full_text(pdf_path)
-        q = verify.check_quote(ex.source_quote, pdf_text, ex.net_return)
+        tokens = parsers_mod.collect_text_tokens(ex.raw)
+        q = verify.check_quote_tokens(tokens, ex.source_quote, pdf_text)
         history = store_mod.load_monthly_history(conn, fund_id)
         r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
         # 写库

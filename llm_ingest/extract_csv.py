@@ -12,7 +12,7 @@ from typing import Optional
 from .client import Client
 from .extract import Extraction, parse_response
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_csv.md"
+PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
 CSV_MAX_TOKENS = 3000
 CSV_INPUT_CAP = 80_000  # CSV 通常小, 但巨型历史序列也可能超, 与 HTML 通道一致

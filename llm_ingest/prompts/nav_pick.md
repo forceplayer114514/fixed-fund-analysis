@@ -11,10 +11,6 @@
 - 排 /login /contact /subscribe /about /careers /careers 等真正无关的
 - 只有全部候选都明显和 "{fund_name} 的月度业绩数据"无关时, picked_url 才可为 null
 
-严格约束:
-- picked_url 必须**字面拷贝**候选列表里某一条 url (照原样, 含 scheme + 大小写)
-- 不许生成新 URL, 不许改字符, 不许删/加尾斜杠 -- 一律判幻觉丢弃
-
 只输出 JSON 对象, 无其他文字/前导 markdown:
 {{"picked_url": "<某条 url 或 null>", "reason": "<一句话为什么>"}}
 

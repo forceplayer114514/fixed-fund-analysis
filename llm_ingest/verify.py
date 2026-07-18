@@ -1,11 +1,15 @@
 """两道闸.
 
-闸 1 引用硬校验 (挡编数字):
-  归一化压平空白后, quote 是 pdf_text 的子串, 且 value 能从 quote 里字面解析.
+闸 1 引用硬校验 (`check_quote_tokens`, 挡编数字):
+  归一化压平空白后, LLM 返的每个 `*_text` token 必须**同时**是:
+    - source_quote 的子串 (防 LLM 编 quote)
+    - doc_text (PDF 全文 / HTML 原文 / CSV 文本) 的子串 (防 LLM 编数据)
 
-闸 2 数学交叉 (挡字段类型错):
+闸 2 数学交叉 (`check_rolling`, 挡字段类型错):
   月度值复利对 3/6/12mo 滚动窗口, 绝对误差 < VERIFY_TOL.
-  逻辑抄自 skills/lib/extract.py:1091 verify_monthly_vs_rolling.
+  单位: net_return / rolling_decimal 全走十进制 (与 parsers.ParseResult 一致).
+
+不含旧 pct 匹配 / NAV pair 数学复算 — Spec E 单位模糊源, 已下沉到 parsers.py.
 """
 from __future__ import annotations
 
@@ -13,35 +17,44 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-VERIFY_TOL = 0.005  # 0.5%,与 skills/lib/extract.py 一致
+VERIFY_TOL = 0.005  # 十进制 0.5% 容差 (rolling 复利与 monthly 复算比对)
+
+
+# ---------- 归一化 (PyMuPDF 空格怪癖兜底) ----------
+
 _WS_RE = re.compile(r"\s+")
-_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+# 归一化数字/符号周边空白:
+#   "0.65 %"     -> "0.65%"
+#   "$ 1,023"    -> "$1,023"
+#   "0. 65"      -> "0.65"   (小数点两侧空白)
+#   "( 0.45 )"   -> "(0.45)"
+#   "-0.65 %"    -> "-0.65%"
+_TIGHT_PERCENT_RE = re.compile(r"(\d)\s+(%|‰)")
+_TIGHT_DOLLAR_RE = re.compile(r"(\$)\s+(\d)")
+_TIGHT_PAREN_OPEN_RE = re.compile(r"\(\s+(-?\d)")
+_TIGHT_PAREN_CLOSE_RE = re.compile(r"(\d)\s+\)")
+_TIGHT_DOT_RE = re.compile(r"(\d)\s*\.\s*(\d)")
+_TIGHT_COMMA_RE = re.compile(r"(\d)\s*,\s*(\d)")
+_TIGHT_MINUS_RE = re.compile(r"-\s+(\d)")
 
 
 def _flatten(s: str) -> str:
-    """压平所有空白到单空格, 去首尾, 用于子串匹配."""
-    return _WS_RE.sub(" ", s).strip()
+    """压平空白 + 数字/符号周边紧贴, 兜住 PyMuPDF 抽取的空格怪癖."""
+    if not s:
+        return ""
+    t = _WS_RE.sub(" ", s)
+    t = _TIGHT_DOT_RE.sub(r"\1.\2", t)
+    t = _TIGHT_COMMA_RE.sub(r"\1,\2", t)
+    t = _TIGHT_PERCENT_RE.sub(r"\1\2", t)
+    t = _TIGHT_DOLLAR_RE.sub(r"\1\2", t)
+    t = _TIGHT_PAREN_OPEN_RE.sub(r"(\1", t)
+    t = _TIGHT_PAREN_CLOSE_RE.sub(r"\1)", t)
+    t = _TIGHT_MINUS_RE.sub(r"-\1", t)
+    return t.strip()
 
 
-def _parse_pct_from_quote(quote: str, target_pct: float, tol: float = 0.001) -> bool:
-    """target_pct 是否能从 quote 里字面解析出来 (百分比十进制).
-
-    quote 里的数字都是"百分数" (0.65 = 0.65%). 逐个数字 abs(n - target_pct) < tol 即匹配.
-    括号负数兜底: PDF 里 (0.45) 表示 -0.45%, quote 常照抄 (0.45), 数字层看到的是 +0.45.
-      故允许 abs(n - abs(target_pct)) 命中—负号靠字段类型 gate 与 rolling gate 兜住.
-
-    tol=0.001 = 0.001 百分点 (即 0.00001 十进制); PDF 精度是两位小数, 该 tol 允许最后一位偏差.
-    """
-    at = abs(target_pct)
-    for m in _NUM_RE.finditer(quote):
-        try:
-            n = float(m.group())
-        except ValueError:
-            continue
-        if abs(n - target_pct) < tol or abs(abs(n) - at) < tol:
-            return True
-    return False
-
+# ---------- 闸 1: check_quote_tokens ----------
 
 @dataclass(frozen=True)
 class QuoteCheck:
@@ -49,107 +62,98 @@ class QuoteCheck:
     reason: str
 
 
-def check_quote(quote: str, pdf_text: str, net_return: Optional[float]) -> QuoteCheck:
-    """闸 1.
+def check_quote_tokens(
+    text_tokens: List[str],
+    source_quote: str,
+    doc_text: str,
+) -> QuoteCheck:
+    """闸 1: 每个 token 必须同时是 source_quote 和 doc_text 的子串 (归一化后).
 
-    - quote 空 -> 挡.
-    - net_return 数字必须能从 quote 里解析出来 (硬性).
-    - quote 里出现的所有百分数, 每一个都必须在 pdf_text 中出现 (归一化后).
-      放开"quote 整串是子串"—模型会加标点/分隔符/单位, 只要数字真实即可.
-    - 括号负数支持: PDF 写 (0.45), prompt 解析后 quote 里可能是 -0.45,
-      放宽为"数字或其去符号对应" 匹配.
+    text_tokens: parsers.collect_text_tokens(obj) 输出, LLM 返的 value_text / prev_text /
+                 curr_text / dist_text 中非空者.
+    source_quote: LLM 返的 source_quote 字段.
+    doc_text: 原文 (PDF 全文 / HTML / CSV).
 
-    net_return 单位: 十进制 (0.0065). quote 里数字单位: 百分数 (0.65).
+    空 token 列表 → 视 not_found, 无需校验, pass (调用方应先判 net_return is None).
     """
-    if not quote:
-        return QuoteCheck(False, "empty_quote")
-    q_flat = _flatten(quote)
-    p_flat = _flatten(pdf_text)
-
-    # 1) net_return 值必须在 quote 里
-    if net_return is not None:
-        target_pct = net_return * 100.0
-        if not _parse_pct_from_quote(q_flat, target_pct):
-            return QuoteCheck(False, f"value_{target_pct:.4f}_not_in_quote")
-
-    # 2) quote 里每个百分数必须在 PDF 里出现 (数字, 或去符号后的绝对值 -- 兜住括号负数)
-    pdf_numbers = set()
-    for m in _NUM_RE.finditer(p_flat):
-        try:
-            pdf_numbers.add(round(float(m.group()), 4))
-        except ValueError:
-            pass
-    orphans = []
-    for m in _NUM_RE.finditer(q_flat):
-        try:
-            v = round(float(m.group()), 4)
-        except ValueError:
+    if not text_tokens:
+        return QuoteCheck(True, "no_tokens_to_check")
+    if not source_quote:
+        return QuoteCheck(False, "empty_source_quote")
+    if not doc_text:
+        return QuoteCheck(False, "empty_doc_text")
+    q = _flatten(source_quote)
+    d = _flatten(doc_text)
+    for tok in text_tokens:
+        t = _flatten(tok)
+        if not t:
             continue
-        if v in pdf_numbers or -v in pdf_numbers or abs(v) in pdf_numbers:
-            continue
-        orphans.append(v)
-    if orphans:
-        return QuoteCheck(False, f"orphan_numbers_{orphans[:3]}")
-    return QuoteCheck(True, "ok")
+        if t not in q:
+            return QuoteCheck(False, f"token_not_in_quote:{tok[:40]!r}")
+        if t not in d:
+            return QuoteCheck(False, f"token_not_in_doc:{tok[:40]!r}")
+    return QuoteCheck(True, "ok_tokens")
 
+
+# ---------- 闸 2: check_rolling (十进制单位) ----------
 
 @dataclass(frozen=True)
 class RollingCheck:
     passed: bool
     reason: str
-    windows_verified: int  # 0/1/2/3, 有几个窗口交叉过
+    windows_verified: int
 
 
 def check_rolling(
     net_return: Optional[float],
     ym: str,
     monthly_history: Dict[str, float],
-    rolling: Dict[str, Optional[float]],
+    rolling_decimal: Dict[str, Optional[float]],
     tol: float = VERIFY_TOL,
 ) -> RollingCheck:
-    """闸 2.
+    """闸 2: monthly 复利对 3/6/12mo 滚动值 (十进制).
 
     net_return: 当月十进制值.
     ym: "YYYY-MM".
-    monthly_history: 该基金已入库的 ym -> net_return dict (前 11 个月的十进制值).
-    rolling: 模型返回的 1mo/3mo/6mo/12mo, 单位百分数.
+    monthly_history: 已入库 {ym: net_return_decimal}.
+    rolling_decimal: 十进制 {"1mo":0.0065,"3mo":0.0185,"6mo":0.0365,"12mo":0.0787}.
 
-    对每个窗口 W in {3,6,12}: 若 rolling[Wmo] 存在且 monthly_history 覆盖前 W-1 个月,
-    则 (1 + m_ym) * prod(1 + m_prev) - 1  vs  rolling[Wmo]/100, abs diff < tol.
+    对每个窗口 W in {3,6,12}: rolling_decimal[Wmo] 存在且 monthly_history 覆盖前 W-1 月,
+    则 (1+net_return) * prod(1+m_prev) - 1 vs rolling_decimal[Wmo], abs diff < tol.
 
-    reason:
-      no_rolling_reported - 模型没给任何 3/6/12mo
-      insufficient_history - 有 rolling 但历史不够
-      mismatch_XXmo - 某窗口对不上
-      ok - 至少一个窗口 pass
+    rolling 缺失 (全 None / 空 dict) → pass, windows_verified=0 (rolling 是可选校验).
     """
     if net_return is None:
-        return RollingCheck(True, "no_net_return", 0)  # not_found=true 时不校验
+        return RollingCheck(True, "no_net_return", 0)  # not_found 时不校验
 
-    reported = {
-        w: rolling.get(f"{w}mo")
-        for w in (3, 6, 12)
-        if rolling.get(f"{w}mo") is not None
-    }
+    reported = {}
+    if isinstance(rolling_decimal, dict):
+        for w in (3, 6, 12):
+            v = rolling_decimal.get(f"{w}mo")
+            if v is not None:
+                reported[w] = v
     if not reported:
-        return RollingCheck(True, "no_rolling_reported", 0)  # 无 rolling 可交叉 -> pass, verify_windows=0
+        return RollingCheck(True, "no_rolling_reported", 0)
 
     verified = 0
-    for w, roll_pct in reported.items():
+    for w, roll_dec in reported.items():
         prevs = _prev_yms(ym, w - 1)
         if not all(pm in monthly_history for pm in prevs):
             continue
         product = 1.0 + net_return
         for pm in prevs:
             product *= 1.0 + monthly_history[pm]
-        implied_pct = (product - 1.0) * 100.0
-        if abs(implied_pct - roll_pct) < tol * 100.0:  # tol 十进制 -> 百分数
+        implied = product - 1.0
+        if abs(implied - roll_dec) < tol:
             verified += 1
         else:
-            # 首个失配即挡 (避免"某窗口对得上另一个对不上"混过)
-            return RollingCheck(False, f"mismatch_{w}mo(implied={implied_pct:.4f} vs {roll_pct:.4f})", verified)
+            return RollingCheck(
+                False,
+                f"mismatch_{w}mo(implied={implied:.6f}_vs_reported={roll_dec:.6f})",
+                verified,
+            )
     if verified == 0:
-        return RollingCheck(True, "insufficient_history", 0)  # 有 rolling 但历史不够 -> pass, 记 0
+        return RollingCheck(True, "insufficient_history", 0)
     return RollingCheck(True, "ok", verified)
 
 
@@ -167,7 +171,19 @@ def _prev_yms(ym: str, n: int) -> List[str]:
     return out
 
 
-# ANTI-FABRICATION 硬 gate, 抄自 skills/lib/extract.py:1135.
+# ---------- 闸 3: check_field_type ----------
+
+def check_field_type(net_return: Optional[float]) -> Tuple[bool, str]:
+    """字段类型: |net_return| < 0.5 (十进制). 超过说明多半是年化/季度滚动误当月度."""
+    if net_return is None:
+        return True, "ok"
+    if abs(net_return) >= 0.5:
+        return False, f"out_of_range_{net_return}"
+    return True, "ok"
+
+
+# ---------- 闸 4: check_anti_fabrication ----------
+
 def check_anti_fabrication(
     net_return: Optional[float],
     ym: str,
@@ -188,13 +204,4 @@ def check_anti_fabrication(
                 return False, f"identical_run_{run}_value_{net_return}"
         else:
             break
-    return True, "ok"
-
-
-def check_field_type(net_return: Optional[float]) -> Tuple[bool, str]:
-    """字段类型: |net_return| < 0.5 (十进制). 超过说明多半是年化/季度滚动误当月度."""
-    if net_return is None:
-        return True, "ok"
-    if abs(net_return) >= 0.5:
-        return False, f"out_of_range_{net_return}"
     return True, "ok"

@@ -345,7 +345,7 @@ def find_archive_via_search(
                 .replace("{issuer_domain}", domain or issuer_domain or "")
                 .replace("{asx_code}", asx_code or "")
         )
-        prompt += "\n\n---搜索结果 (真实展开后 URL, 只从中挑, 不许生成新域名) ---\n"
+        prompt += "\n\n---搜索结果 (真实展开后 URL) ---\n"
         prompt += "\n".join(f"- {u}" for u in real_sources)
         # max_tokens 1024 曾致 Gemini "思考+JSON" 混排被截半 (Yarra 阶段 B 观察);
         # 提到 2048 给足余量。若模型输长中文推理再吐 JSON, 短 budget 直接把 JSON 截掉。
@@ -401,12 +401,35 @@ def find_archive_via_search(
     )
 
 
+_YM_RE = re.compile(r"^\d{4}-\d{2}$")
+_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
+
+
+def _extract_href_whitelist(html: str, base_url: str) -> set:
+    """从 HTML 抽所有 `<a href="...">` 归一化后的绝对 URL 白名单."""
+    from urllib.parse import urljoin
+    out = set()
+    for href in _HREF_RE.findall(html):
+        try:
+            full = urljoin(base_url, href).strip()
+        except Exception:  # noqa: BLE001
+            continue
+        out.add(full)
+        out.add(full.lower())
+    return out
+
+
 def parse_archive_page(
     html: str,
     *,
     client: Optional[Client] = None,
+    base_url: str = "",
 ) -> Tuple[List[Tuple[str, str]], bool, str, int]:
     """L1 第二步: 把已抓好的归档页交 Gemini 解析.
+
+    白名单校 (Spec E.2.C):
+      - ym 格式 YYYY-MM 强校
+      - url 必须在 html 的 <a href="..."> 白名单里 (代码校, LLM 造 URL 被丢)
 
     返回 (links, has_more_pages, next_page_hint, unparseable_count).
     """
@@ -416,19 +439,32 @@ def parse_archive_page(
     resp = client.messages(prompt, max_tokens=4096)
     obj = _parse_json_response(resp.text) or {}
     raw_links = obj.get("links") or []
+    whitelist = _extract_href_whitelist(html, base_url) if base_url else None
     pairs: List[Tuple[str, str]] = []
+    dropped = 0
     for item in raw_links:
         if not isinstance(item, dict):
             continue
         ym = item.get("ym")
         url = item.get("url")
-        if ym and url:
-            pairs.append((str(ym), str(url)))
+        if not ym or not url:
+            continue
+        ym_s = str(ym).strip()
+        url_s = str(url).strip()
+        if not _YM_RE.match(ym_s):
+            dropped += 1
+            continue
+        if whitelist is not None:
+            if url_s not in whitelist and url_s.lower() not in whitelist:
+                dropped += 1
+                continue
+        pairs.append((ym_s, url_s))
+    unparseable = int(obj.get("unparseable_count") or 0) + dropped
     return (
         _dedup_links(pairs),
         bool(obj.get("has_more_pages")),
         str(obj.get("next_page_hint") or ""),
-        int(obj.get("unparseable_count") or 0),
+        unparseable,
     )
 
 
@@ -503,7 +539,7 @@ def probe_l1_official(
         html = _fetch(url) or _curl(url) or ""
         if not html:
             return ([], False, "", 0)
-        return parse_archive_page(html, client=client)
+        return parse_archive_page(html, client=client, base_url=url)
 
     links, has_more, _hint, uc = _one_page(pointer.archive_url)
     aggregate.extend(links)

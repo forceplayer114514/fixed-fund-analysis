@@ -162,6 +162,8 @@ _RANK_PROMPT = """从下面 URL 列表中, 按"最可能是 {fund_name} 月度�
 3. **.pdf 直链** 最高 (直接是文件, 无中转)
 4. 聚合站 (fundmonitors/morningstar 等) 若同域内包含 fact sheet 可保留但降级
 
+score 仅用于排序对比 (相对值, 数值高的优先), 不表示"够阈值就采纳"; 代码只按 score 降序取 top-N.
+
 只输出 JSON 数组, 无其他文字。格式:
 [
   {{"url": "https://...", "score": 0-100, "reason": "一句话"}},

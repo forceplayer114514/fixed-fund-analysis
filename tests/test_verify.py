@@ -1,4 +1,13 @@
-"""Phase 1c: 两道闸单元测试. 真 PDF 文本片段作 fixture, 不 mock."""
+"""Spec E verify.py 单测.
+
+覆盖:
+  - check_quote_tokens: 空 quote / 空 doc / token 不在 quote / 不在 doc / 全过
+  - _flatten: PyMuPDF 空格怪癖归一化
+  - check_rolling: 十进制单位, 缺失即放行, 有值+历史充足 → 对上/对不上
+  - check_field_type: |v| < 0.5 十进制
+  - check_anti_fabrication: 连续 3 个非零同值判 fail
+  - _prev_yms: 跨年
+"""
 import sys
 from pathlib import Path
 
@@ -7,162 +16,156 @@ sys.path.insert(0, "/Users/chong/Desktop/fixed_fund_analysis")
 import pytest
 
 from llm_ingest.verify import (
+    _flatten,
+    _prev_yms,
     check_anti_fabrication,
     check_field_type,
-    check_quote,
+    check_quote_tokens,
     check_rolling,
-    _prev_yms,
 )
 
-# GCI 2026-05 首页 PyMuPDF 抽取的真实文本片段
-GCI_2026_05_TEXT = """FUND PERFORMANCE
-1 Mth  3 Mth  6 Mth  1 Yr  3 Yr Ann  5 Yr Ann  Incep Ann
-NTA Net Return (%)
-0.65
-1.85
-3.65
-7.87
-5.14
-4.09
-3.98
-"""
 
-# GCI 2019-02 首页 (旧格式, 12mo dash)
-GCI_2019_02_TEXT = """FUND PERFORMANCE
-1 Mth  3 Mth  6 Mth  1 Yr  Incep Ann
-Net Return (%)
-0.42
-1.37
-2.68
-–
-4.57
-"""
+# ---------- _flatten (PyMuPDF 空格归一化) ----------
+
+def test_flatten_percent_space():
+    assert _flatten("0.65 %") == "0.65%"
 
 
-# ---------- check_quote ----------
+def test_flatten_dollar_space():
+    assert _flatten("$ 1023") == "$1023"
 
-def test_quote_ok_new_format():
-    q = "NTA Net Return (%) 0.65 1.85 3.65 7.87"
-    r = check_quote(q, GCI_2026_05_TEXT, 0.0065)
+
+def test_flatten_paren_space():
+    assert _flatten("( 0.45 )") == "(0.45)"
+
+
+def test_flatten_dot_space():
+    assert _flatten("0. 65") == "0.65"
+
+
+def test_flatten_comma_space():
+    assert _flatten("1, 023") == "1,023"
+
+
+def test_flatten_minus_space():
+    assert _flatten("- 0.45") == "-0.45"
+
+
+def test_flatten_multi_whitespace():
+    assert _flatten("A   B\n\tC") == "A B C"
+
+
+def test_flatten_empty():
+    assert _flatten("") == ""
+
+
+# ---------- check_quote_tokens: 空 case ----------
+
+def test_no_tokens_passes_not_found():
+    """not_found 场景 tokens 为空, 视 pass."""
+    r = check_quote_tokens([], "", "")
+    assert r.passed
+    assert r.reason == "no_tokens_to_check"
+
+
+def test_empty_source_quote_fails():
+    r = check_quote_tokens(["0.65%"], "", "doc has 0.65%")
+    assert not r.passed
+    assert "empty_source_quote" in r.reason
+
+
+def test_empty_doc_text_fails():
+    r = check_quote_tokens(["0.65%"], "quote 0.65%", "")
+    assert not r.passed
+    assert "empty_doc_text" in r.reason
+
+
+# ---------- check_quote_tokens: 正常 ----------
+
+def test_all_tokens_match_passes():
+    tokens = ["0.65%", "1.85%"]
+    quote = "Net Return (%) 0.65 1.85"  # 归一化后含 0.65% 1.85% 吗? 否 — 数字与 % 之间要相邻
+    # 更好: 用真实 quote 格式
+    quote = "Net Return (%): 0.65%, 3M: 1.85%"
+    doc = "Fund Report ... Net Return (%): 0.65%, 3M: 1.85% ..."
+    r = check_quote_tokens(tokens, quote, doc)
     assert r.passed, r.reason
 
 
-def test_quote_ok_old_format_with_dash():
-    q = "Net Return (%) 0.42 1.37 2.68 – 4.57"
-    r = check_quote(q, GCI_2019_02_TEXT, 0.0042)
+def test_token_missing_from_quote_fails():
+    """LLM 编 quote (缺 token)."""
+    tokens = ["0.65%"]
+    r = check_quote_tokens(tokens, "quote without value", "doc has 0.65%")
+    assert not r.passed
+    assert "token_not_in_quote" in r.reason
+
+
+def test_token_missing_from_doc_fails():
+    """LLM 编数据 (quote 里有 token 但 doc 没有 — 幻觉)."""
+    tokens = ["0.65%"]
+    r = check_quote_tokens(tokens, "quote 0.65%", "doc has 9.99%")
+    assert not r.passed
+    assert "token_not_in_doc" in r.reason
+
+
+def test_pymupdf_space_tolerated():
+    """PDF 抽的 doc_text 常带空格, 归一化后应匹配."""
+    tokens = ["0.65%"]
+    quote = "Net Return: 0.65%"
+    doc = "Net Return :\n0. 65 %"  # PyMuPDF 常见空格
+    r = check_quote_tokens(tokens, quote, doc)
     assert r.passed, r.reason
 
 
-def test_quote_empty_fails():
-    r = check_quote("", GCI_2026_05_TEXT, 0.0065)
-    assert not r.passed
-    assert r.reason == "empty_quote"
-
-
-def test_quote_not_in_pdf_fails():
-    """模型编了 PDF 里不存在的数字."""
-    q = "NTA Net Return (%) 99.99 88.88"
-    r = check_quote(q, GCI_2026_05_TEXT, 0.9999)
-    assert not r.passed
-    assert "orphan" in r.reason
-
-
-def test_quote_present_but_value_not_in_quote_fails():
-    """quote 是 PDF 真实子串, 但 net_return 说 5.14 (那是 3yr ann 那行)."""
-    q = "NTA Net Return (%) 0.65 1.85 3.65 7.87"
-    r = check_quote(q, GCI_2026_05_TEXT, 0.0514)
-    assert not r.passed
-    assert "value_" in r.reason
-
-
-def test_quote_flattens_whitespace():
-    """PyMuPDF 每行独立, quote 是横向拼接. 归一化后应能匹配."""
-    pdf_text = "NTA Net Return (%)\n0.65\n1.85\n3.65"
-    quote = "NTA Net Return (%) 0.65 1.85 3.65"
-    r = check_quote(quote, pdf_text, 0.0065)
+def test_nav_pair_tokens_both_in_quote():
+    """nav_pair 场景 2 NAV 都在 quote 里."""
+    tokens = ["$134.24", "$135.16"]
+    quote = "FRHY<br />2026-05-31: $134.24, FRHY<br />2026-06-30: $135.16"
+    doc = quote  # HTML 直接就是 doc
+    r = check_quote_tokens(tokens, quote, doc)
     assert r.passed
 
 
-def test_quote_negative_value():
-    """括号负数或直接 -0.5 都要能通过 (前提是 quote 里字面有)."""
-    pdf_text = "Net Return (%) -0.50 -1.20 -2.10"
-    quote = "Net Return (%) -0.50 -1.20 -2.10"
-    r = check_quote(quote, pdf_text, -0.005)
-    assert r.passed
+# ---------- check_rolling: 十进制 ----------
 
-
-def test_quote_paren_negative_pdf_vs_dash_negative_quote():
-    """PDF 写 (0.45), 模型 quote 写 -0.45. 数字层面应视为同一数."""
-    pdf_text = "Net Return (%) (0.45) 0.27 1.46 4.35"
-    quote = "Net Return (%) -0.45 0.27 1.46 4.35"
-    r = check_quote(quote, pdf_text, -0.0045)
-    assert r.passed
-
-
-def test_quote_paren_negative_quote_kept_as_paren():
-    """PDF 写 (0.45), 模型 quote 忠实照抄 (0.45), net_return=-0.0045.
-    quote 里字面只有 +0.45; 靠 abs 兜底放过, rolling gate 兜正负号."""
-    pdf_text = "Net Return (%) (0.45) 0.27 1.46 4.35"
-    quote = "Net Return (%) (0.45) 0.27 1.46 4.35"
-    r = check_quote(quote, pdf_text, -0.0045)
-    assert r.passed, r.reason
-
-
-def test_quote_with_decoration_still_passes():
-    """模型加了 | : 等装饰, PDF 里没有—但数字都真实, 应过."""
-    pdf_text = "Fund Performance\n1 Mth 3 Mth 6 Mth 1 Yr\nNet Return (%)\n0.42\n1.37\n2.68\n"
-    quote = "Net Return (%) | 1 Mth: 0.42 | 3 Mth: 1.37 | 6 Mth: 2.68"
-    r = check_quote(quote, pdf_text, 0.0042)
-    assert r.passed, r.reason
-
-
-def test_quote_orphan_number_fails():
-    """quote 混入 PDF 里没有的数字 -> 挡 (幻觉信号)."""
-    pdf_text = "Net Return (%) 0.42 1.37 2.68"
-    quote = "Net Return (%) 0.42 9.99"  # 9.99 是编的
-    r = check_quote(quote, pdf_text, 0.0042)
-    assert not r.passed
-    assert "orphan" in r.reason
-
-
-# ---------- check_rolling ----------
-
-def test_rolling_no_rolling_reported_passes_with_zero_windows():
-    """无 rolling -> pass, verify_windows=0."""
-    r = check_rolling(0.0065, "2026-05", {}, {"1mo": None, "3mo": None, "6mo": None, "12mo": None})
+def test_rolling_no_report_passes_zero_windows():
+    r = check_rolling(0.0065, "2026-05", {}, {})
     assert r.passed
     assert r.windows_verified == 0
     assert r.reason == "no_rolling_reported"
 
 
-def test_rolling_insufficient_history_passes_with_zero():
-    """有 rolling 但无前月历史 -> pass, windows=0."""
-    r = check_rolling(0.0065, "2026-05", {}, {"3mo": 1.85, "6mo": 3.65, "12mo": 7.87})
+def test_rolling_all_none_passes():
+    r = check_rolling(0.0065, "2026-05", {}, {"1mo": None, "3mo": None})
+    assert r.passed
+    assert r.windows_verified == 0
+
+
+def test_rolling_insufficient_history_passes():
+    r = check_rolling(0.0065, "2026-05", {}, {"3mo": 0.0185})
     assert r.passed
     assert r.windows_verified == 0
     assert r.reason == "insufficient_history"
 
 
-def test_rolling_3mo_matches():
-    """3mo 复利对上 -> pass. GCI 2026-05: 0.65 + 前2月 -> 3mo=1.85."""
+def test_rolling_3mo_matches_decimal():
+    """(1.0065) * (1.006) * (1.0059) - 1 ≈ 0.018463; report 0.0185 内 tol."""
     history = {"2026-04": 0.0060, "2026-03": 0.0059}
-    # (1.0065)*(1.006)*(1.0059) - 1 = 0.018461 -> 1.8461%. 3mo pdf=1.85. tol 0.5% 内.
-    r = check_rolling(0.0065, "2026-05", history, {"3mo": 1.85})
+    r = check_rolling(0.0065, "2026-05", history, {"3mo": 0.0185})
     assert r.passed
     assert r.windows_verified == 1
 
 
 def test_rolling_mismatch_fails():
-    """3mo 明显对不上 (模型摘的是季度滚动误当月度) -> 挡."""
     history = {"2026-04": 0.0060, "2026-03": 0.0059}
-    # 若 net_return=0.018 (季度值误当月度), 3mo 复利变成 3%+, 与 pdf 1.85 差 >0.5%.
-    r = check_rolling(0.018, "2026-05", history, {"3mo": 1.85})
+    # net=0.018 (季度当月度), 3mo 复利 ≈ 3%, 与报 0.0185 差 >0.5%
+    r = check_rolling(0.018, "2026-05", history, {"3mo": 0.0185})
     assert not r.passed
     assert "mismatch_3mo" in r.reason
 
 
 def test_rolling_not_found_passes():
-    r = check_rolling(None, "2026-05", {}, {"3mo": 1.85})
+    r = check_rolling(None, "2026-05", {}, {"3mo": 0.0185})
     assert r.passed
 
 
@@ -182,8 +185,7 @@ def test_field_type_ok():
     assert check_field_type(0.0065)[0]
 
 
-def test_field_type_rejects_annualized_error():
-    """|net_return| >= 0.5 十进制 = 50% -> 多半年化误当月度."""
+def test_field_type_rejects_annualized():
     ok, reason = check_field_type(0.65)  # 65% 月度 = 不可能
     assert not ok
     assert "out_of_range" in reason
@@ -193,15 +195,19 @@ def test_field_type_negative_ok():
     assert check_field_type(-0.05)[0]
 
 
+def test_field_type_none_ok():
+    assert check_field_type(None)[0]
+
+
 # ---------- check_anti_fabrication ----------
 
 def test_antifab_normal_passes():
-    ok, _ = check_anti_fabrication(0.005, "2026-05", [("2026-04", 0.004), ("2026-03", 0.006)])
+    ok, _ = check_anti_fabrication(0.005, "2026-05",
+                                   [("2026-04", 0.004), ("2026-03", 0.006)])
     assert ok
 
 
 def test_antifab_rejects_run_of_3():
-    """连续 3 个相同非零值 = 幻觉 backfill 特征."""
     hist = [("2026-04", 0.005), ("2026-03", 0.005)]
     ok, reason = check_anti_fabrication(0.005, "2026-05", hist)
     assert not ok
@@ -209,7 +215,6 @@ def test_antifab_rejects_run_of_3():
 
 
 def test_antifab_zero_run_allowed():
-    """零值可以连续 (基金停跌成立), 不挡."""
     hist = [("2026-04", 0.0), ("2026-03", 0.0)]
     ok, _ = check_anti_fabrication(0.0, "2026-05", hist)
     assert ok

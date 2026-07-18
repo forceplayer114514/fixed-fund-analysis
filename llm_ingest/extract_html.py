@@ -17,7 +17,7 @@ from typing import Optional
 from .client import Client
 from .extract import Extraction, parse_response
 
-PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_html.md"
+PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
 HTML_MAX_TOKENS = 3000
 HTML_INPUT_CAP = 80_000  # 与 discover.parse_archive_page 同截断
@@ -27,32 +27,64 @@ def load_prompt() -> str:
     return PROMPT_PATH.read_text()
 
 
-_PLOTLY_HINT = re.compile(r"var\s+data\s*=\s*\[|Plotly\.newPlot", re.I)
+_PLOTLY_HINT = re.compile(
+    r"var\s+data\s*=\s*\[|Plotly\.newPlot|"
+    r'<script[^>]*type=\"application/json\"[^>]*data-for=',
+    re.I,
+)
 
 
 def _shrink_plotly_html(html: str, expected_ym: str) -> str:
-    """Plotly HTML 优化: 定位 `var data = [` 段, 抠含 expected_ym 的 trace.
+    """Plotly HTML 优化: 定位 data 段, 抠含 expected_ym 的 trace.
 
-    3.9MB Coolabah HTML 大部分是 layout config / CSS, 真 NAV 数据在
-    `var data = [{"name":"...","text":[...]}, ...]` 数组里. 只保留 data
-    数组前 100KB 上下文足够 LLM 定位当月.
+    Plotly 静态导出常见 3 种数据段承载方式, 按优先级探测:
+      (a) htmlwidgets: `<script type="application/json" data-for="...">
+          {"x":{"data":[...]}, ...}</script>` (Coolabah 21MB 报告用这种)
+      (b) 静态 `var data = [{"name":"...","text":[...]}, ...]` (旧版)
+      (c) `Plotly.newPlot('divid', [{...}, {...}], layout)` inline 传参
 
-    找不到 Plotly 标记 → 返原 HTML (让上层截 HTML_INPUT_CAP).
+    切窗口策略 (优先级从高到低):
+      1. hovertext NAV 序列命中 `<br />{ym}` (最强锚, Coolabah 用) — 前 15KB 后 5KB
+      2. data 段起点 + expected_ym 命中 — 前后各 60KB (旧兼容)
+      3. data 段起点 + 无 ym — 头 120KB
+
+    找不到 Plotly 标记 → 返原 HTML.
     """
     if not _PLOTLY_HINT.search(html):
         return html
-    m = re.search(r"var\s+data\s*=\s*\[", html, re.I)
-    if not m:
+    # (1) 最强锚: hovertext NAV 序列 `<br />{ym}` — trace 内每月一条, 密集
+    hover_hit = html.find(f"<br />{expected_ym}")
+    if hover_hit > 0:
+        lo = max(0, hover_hit - 15_000)
+        hi = min(len(html), hover_hit + 5_000)
+        header = "<!-- shrunk Plotly HTML (hovertext anchor) -->\n"
+        return header + html[lo:hi]
+    # (2) 定位 data 段起点
+    start = None
+    m_json = re.search(
+        r'<script[^>]*type="application/json"[^>]*>',
+        html, re.I,
+    )
+    if m_json:
+        start = m_json.end()
+    if start is None:
+        m_var = re.search(r"var\s+data\s*=\s*\[", html, re.I)
+        if m_var:
+            start = m_var.start()
+    if start is None:
+        m_new = re.search(
+            r"Plotly\.newPlot\s*\(\s*(?:'[^']*'|\"[^\"]*\")\s*,\s*\[",
+            html, re.I,
+        )
+        if m_new:
+            start = m_new.start()
+    if start is None:
         return html
-    start = m.start()
-    # 优先切以 expected_ym 为中心的窗口 (若 ym 在 data 数组内)
     ym_hit = html.find(expected_ym, start)
     if ym_hit > 0:
-        # ym 前后各 60KB 窗口, 保 trace name 与 target month
         lo = max(start, ym_hit - 60_000)
         hi = min(len(html), ym_hit + 60_000)
     else:
-        # 无 ym 命中: 取 data 数组头 120KB
         lo = start
         hi = min(len(html), start + 120_000)
     header = "<!-- shrunk Plotly HTML -->\n"

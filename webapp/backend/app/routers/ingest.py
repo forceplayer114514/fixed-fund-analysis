@@ -138,6 +138,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         from llm_ingest import discover as disc_mod
         from llm_ingest import extract as ex_mod
         from llm_ingest import fundmonitors as fm_mod
+        from llm_ingest import parsers as parsers_mod
         from llm_ingest import pdf as pdf_mod
         from llm_ingest import store as store_mod
         from llm_ingest import verify
@@ -362,7 +363,11 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 source_text = pdf_mod.full_text(pdf_path)
             else:
                 source_text = payload_text or ""
-            q = verify.check_quote(ex.source_quote, source_text, ex.net_return)
+            q = verify.check_quote_tokens(
+                parsers_mod.collect_text_tokens(ex.raw),
+                ex.source_quote,
+                source_text,
+            )
             history = store_mod.load_monthly_history(conn, req.fund_id)
             r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
             dec = store_mod.write_extraction(
