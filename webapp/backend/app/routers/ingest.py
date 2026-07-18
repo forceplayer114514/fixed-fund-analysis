@@ -302,6 +302,22 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             links = rep.links
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
 
+            # rep.gaps 是 discovery 阶段就确定"预期月份里压根没找到任何 PDF 链接"
+            # 的月份 (expected - obtained 集合差) -- 与下面 per-link 循环里的
+            # record_confirmed_gap (下载失败/抓取失败等, 只覆盖已有链接的月份)
+            # 是互斥的两类缺口, 谁都不会覆盖这些月份, 之前从未被记进
+            # confirmed_gaps, 违反 CLAUDE.md 零容忍规则 (2026-07 Stake 2025-09
+            # 缺口静默漏记事故)。若之后 L2 触发自动纠名, rename_fund_id 会把
+            # confirmed_gaps 整表迁到新 fund_id, 这里不用等纠名完成再记。
+            if links:
+                for _gap_ym in rep.gaps:
+                    store_mod.record_confirmed_gap(
+                        conn, fund_id=req.fund_id, missing_month=_gap_ym,
+                        exhausted_levels="no_link_found",
+                    )
+                if rep.gaps:
+                    _job_log(jid, f"discovery gaps 记入 confirmed_gaps: {len(rep.gaps)} 月")
+
         if not links:
             conn.close()
             raise ValueError("discovery 未产出任何 PDF 链接, 摄取无法进行")

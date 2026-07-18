@@ -139,3 +139,27 @@ def test_list_funds_returns_discovered_source_name(client, db_session):
     db_session.commit()
     funds = {f["fund_id"]: f for f in client.get("/api/funds").json()}
     assert funds["f1"]["discovered_source_name"] == "Smarter Money Fund"
+
+
+@pytest.mark.unit
+def test_get_returns_lists_monthly_history_ascending(client, db_session):
+    """GET /api/funds/{fund_id}/returns 原样透出逐月序列 (date, net_return),
+    不做任何计算, 供前端"查看数据"面板用。"""
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    for m, r in [(3, 0.03), (1, 0.01), (2, 0.02)]:  # 乱序插入, 接口应按日期升序返回
+        db_session.add(MonthlyReturn(fund_id="f1", date=f"2026-{m:02d}-28",
+                                     net_return=r, nav=1.0))
+    db_session.commit()
+
+    resp = client.get("/api/funds/f1/returns")
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert [r["date"] for r in rows] == ["2026-01-28", "2026-02-28", "2026-03-28"]
+    assert rows[0]["net_return"] == pytest.approx(0.01)
+
+
+@pytest.mark.unit
+def test_get_returns_unknown_fund_404(client):
+    resp = client.get("/api/funds/nonexistent/returns")
+    assert resp.status_code == 404

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
-import type { Fund, IngestJob, PendingReview } from '../types'
+import type { Fund, IngestJob, MonthlyReturnRow, PendingReview } from '../types'
 
 const POLL_MS = 1500
 
@@ -41,6 +41,11 @@ export default function FundManagement() {
   const [reviewFund, setReviewFund] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingReview[]>([])
   const [pendingLoading, setPendingLoading] = useState(false)
+
+  // 查看数据面板 (月利率原始序列)
+  const [dataFund, setDataFund] = useState<Fund | null>(null)
+  const [returns, setReturns] = useState<MonthlyReturnRow[]>([])
+  const [returnsLoading, setReturnsLoading] = useState(false)
 
   useEffect(() => {
     fetchFunds()
@@ -138,6 +143,19 @@ export default function FundManagement() {
       alert((e as Error).message)
     }
     setPendingLoading(false)
+  }
+
+  const openReturns = async (f: Fund) => {
+    setDataFund(f)
+    setReturnsLoading(true)
+    try {
+      const rows = await api.getReturns(f.fund_id)
+      setReturns(rows)
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-alert
+      alert((e as Error).message)
+    }
+    setReturnsLoading(false)
   }
 
   const handleApprove = async (id: number) => {
@@ -301,6 +319,12 @@ export default function FundManagement() {
                     onClick={() => handleRecompute(f.fund_id)}
                   >
                     {recomputing === f.fund_id ? '计算中...' : '重算'}
+                  </button>
+                  <button
+                    className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50"
+                    onClick={() => openReturns(f)}
+                  >
+                    查看数据
                   </button>
                   {deleteConfirm === f.fund_id ? (
                     <span className="text-xs">
@@ -500,6 +524,46 @@ export default function FundManagement() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 查看数据面板 (月利率原始序列, 不做任何计算) */}
+      {dataFund && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-base font-medium">
+                {dataFund.fund_name} 月度净收益 ({returns.length} 条)
+              </h2>
+              <button className="text-gray-400 text-xl" onClick={() => setDataFund(null)}>
+                &times;
+              </button>
+            </div>
+            {returnsLoading && <div className="text-gray-400 text-sm">加载中…</div>}
+            {!returnsLoading && returns.length === 0 && (
+              <div className="text-gray-400 text-sm py-6 text-center">暂无数据</div>
+            )}
+            {!returnsLoading && returns.length > 0 && (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    <th className="text-left py-2 text-gray-500 font-medium">年月</th>
+                    <th className="text-right py-2 text-gray-500 font-medium">月度净收益</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {returns.map(r => (
+                    <tr key={r.date} className="border-b border-gray-50">
+                      <td className="py-1.5 text-gray-700">{r.date.slice(0, 7)}</td>
+                      <td className={`py-1.5 text-right ${r.net_return < 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                        {(r.net_return * 100).toFixed(4)}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
       )}

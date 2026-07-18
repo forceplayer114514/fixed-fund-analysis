@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.crud import create_fund, get_all_funds, get_fund, delete_fund
+from app.crud import create_fund, get_all_funds, get_fund, delete_fund, get_returns
 from app.database import get_db
 from app.models import Fund, FundMetric, MonthlyReturn, ConfirmedGap, PendingReview
 from app.metrics_pipeline import compute_and_store_metrics
@@ -80,6 +80,17 @@ def add_fund(payload: FundCreate, session: Session = Depends(get_db)):
 def remove_fund(fund_id: str, session: Session = Depends(get_db)):
     if not delete_fund(session, fund_id):
         raise HTTPException(status_code=404, detail=f"基金 {fund_id} 不存在")
+
+
+@router.get("/{fund_id}/returns")
+def list_returns(fund_id: str, session: Session = Depends(get_db)):
+    """该基金逐月净收益原始序列 (date, net_return), 按日期升序. 供"查看数据"面板用.
+
+    直接读 monthly_returns, 不做任何计算/推导 -- 展示的就是入库的原始值。
+    """
+    if get_fund(session, fund_id) is None:
+        raise HTTPException(status_code=404, detail=f"基金 {fund_id} 不存在")
+    return get_returns(session, fund_id)
 
 
 @router.post("/{fund_id}/recompute")

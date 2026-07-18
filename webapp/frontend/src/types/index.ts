@@ -117,6 +117,13 @@ export interface MonthlyReturnPatch {
   commentary_truth?: number | null
 }
 
+/** GET /api/funds/{id}/returns 单行 (原始逐月序列, "查看数据"面板用) */
+export interface MonthlyReturnRow {
+  date: string
+  net_return: number
+  commentary_truth: number | null
+}
+
 /** 添加基金请求体 */
 export interface FundCreatePayload {
   fund_id: string

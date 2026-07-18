@@ -219,3 +219,72 @@ def test_l1_ok_stats_monthly_count(tmp_db):
         jid = ing._job_new("test_fund")
         ing._run_ingest_job(jid, _make_req())
     assert ing._JOBS[jid]["stats"]["monthly"] == 3
+
+
+def test_l2_discovery_gaps_recorded_as_confirmed_gaps(tmp_db):
+    """回归 (2026-07 Stake 2025-09 静默漏记事故): run_discovery 算出的 rep.gaps
+    (预期月份里压根没找到 PDF 链接的月份, 如官方本月未发月报) 此前从未被写进
+    confirmed_gaps -- per-link 循环里的 record_confirmed_gap 只覆盖"有链接但
+    下载/提取失败"的月份, 两类缺口互斥, rep.gaps 那批一直静默丢失。"""
+    from webapp.backend.app.routers import ingest as ing
+    from llm_ingest import discover as disc_mod
+    from llm_ingest import extract as ex_mod
+    from llm_ingest import fundmonitors as fm
+    from llm_ingest import cli as llm_cli
+    from llm_ingest import pdf as pdf_mod
+
+    fake_report = disc_mod.DiscoveryReport(
+        fund_id="test_fund",
+        links=[("2025-10", "https://issuer.example.com/2025-10.pdf")],
+        gaps=["2025-09"],  # 官方本月未发月报, discovery 阶段就确定无链接
+    )
+    fake_ex = ex_mod.Extraction(
+        ym="2025-10", net_return=0.005, source_quote="Net Return 0.5%",
+        measure="table_value", measure_label_in_pdf="Net Return (%)",
+        rolling={}, not_found=False, raw={},
+    )
+    with patch.object(fm, "probe", return_value={
+        "status": "no_fundid", "records": [], "ytd_map": {},
+        "url": None, "page_fund_name": None, "errors": [],
+    }), patch.object(disc_mod, "run_discovery", return_value=fake_report), \
+         patch.object(llm_cli, "_download_pdf", return_value=True), \
+         patch.object(ex_mod, "extract_from_pdf", return_value=fake_ex), \
+         patch.object(pdf_mod, "full_text", return_value="Net Return 0.5%"):
+        jid = ing._job_new("test_fund")
+        ing._run_ingest_job(jid, _make_req())
+
+    assert ing._JOBS[jid]["state"] == "succeeded"
+    conn = sqlite3.connect(tmp_db)
+    row = conn.execute(
+        "SELECT exhausted_levels FROM confirmed_gaps "
+        "WHERE fund_id='test_fund' AND missing_month='2025-09'"
+    ).fetchone()
+    conn.close()
+    assert row is not None, "rep.gaps 里的 2025-09 应被记入 confirmed_gaps"
+    assert row[0] == "no_link_found"
+
+
+def test_l2_discovery_no_links_at_all_does_not_record_gaps(tmp_db):
+    """discovery 完全空手 (links 也是空) -> 整个 job 该失败, 不该顺带乱记 gaps
+    (job 都没跑起来, 没资格断言"这几个月确实没有链接")."""
+    from webapp.backend.app.routers import ingest as ing
+    from llm_ingest import discover as disc_mod
+    from llm_ingest import fundmonitors as fm
+
+    fake_report = disc_mod.DiscoveryReport(
+        fund_id="test_fund", links=[], gaps=["2025-09", "2025-10"],
+    )
+    with patch.object(fm, "probe", return_value={
+        "status": "no_fundid", "records": [], "ytd_map": {},
+        "url": None, "page_fund_name": None, "errors": [],
+    }), patch.object(disc_mod, "run_discovery", return_value=fake_report):
+        jid = ing._job_new("test_fund")
+        ing._run_ingest_job(jid, _make_req())
+
+    assert ing._JOBS[jid]["state"] == "failed"
+    conn = sqlite3.connect(tmp_db)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM confirmed_gaps WHERE fund_id='test_fund'"
+    ).fetchone()[0]
+    conn.close()
+    assert count == 0

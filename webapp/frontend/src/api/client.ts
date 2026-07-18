@@ -25,6 +25,9 @@ export const api = {
   recomputeFund: (fundId: string) =>
     request<Record<string, unknown>>(`/api/funds/${fundId}/recompute`, { method: 'POST' }),
 
+  getReturns: (fundId: string) =>
+    request<import('../types').MonthlyReturnRow[]>(`/api/funds/${fundId}/returns`),
+
   compare: (fundIds: string[], period: string) =>
     request<import('../types').CompareResponse>(
       `/api/metrics/compare?fund_ids=${fundIds.join(',')}&period=${period}`
