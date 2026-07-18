@@ -416,23 +416,31 @@ def find_archive_v2(
         else:
             single_pdfs.append(p)
 
-    # ---- 步 5: 逐个 strong_candidate 首份 PDF 打样, 通过即敲定归档 ----
+    # ---- 步 5: 逐个 strong_candidate 打样, 通过即敲定归档 ----
+    # 只试排第一的 PDF 曾致 Stake 事故 (2026-07): fund_name 有拼写误差
+    # ("stake accumlate" 缺一个 u) 时, _rank_pdfs_by_name_match 对 PDS/TMD/月报
+    # 打分全部打平 (都只命中 "stake" 一个 token), 稳定排序把 PDS 排在最前, 首份
+    # 打样判"不是月报"就整页跳过 -- 冤枉丢弃了同页 14~19 份真月报。改为同一
+    # candidate 内按序多试几份 (PDS/TMD 通常挤在前几个), 一份通过即敲定归档。
+    _MAX_PROBE_PER_CANDIDATE = 5
     for cand in strong_candidates:
-        first_pdf = cand["pdf_urls"][0]
-        # 优化: 首 PDF slug 与 fund_name 零匹配 -> 该页所有 PDF 都跟目标基金无关,
-        # 跳过整页免除一次 Gemini API 调用 (Yarra /performance 全是 Australian Income
+        matched_pdfs = [u for u in cand["pdf_urls"] if _pdf_slug_match_count(u, fund_name) > 0]
+        # 优化: 全页 PDF 与 fund_name 零匹配 -> 该页所有 PDF 都跟目标基金无关,
+        # 跳过整页免除 Gemini API 调用 (Yarra /performance 全是 Australian Income
         # 基金 PDF, 与 Enhanced Income 无关, 打样必失败, 直接跳)
-        if _pdf_slug_match_count(first_pdf, fund_name) == 0:
+        if not matched_pdfs:
             continue
-        ok, ex = confirm_pdf_is_monthly_report(first_pdf, fund_name, client=client)
-        if ok:
+        for pdf_url in matched_pdfs[:_MAX_PROBE_PER_CANDIDATE]:
+            ok, ex = confirm_pdf_is_monthly_report(pdf_url, fund_name, client=client)
+            if not ok:
+                continue
             return ArchivePointer(
                 archive_url=cand["url"],
                 pagination_param=None,   # 由后续 parse_archive 探测
                 no_archive=False,
-                latest_pdf_url=first_pdf,
+                latest_pdf_url=pdf_url,
                 issuer_domain_confirmed=domain,
-                evidence=f"归档页确认: {cand['url']} 含 {len(cand['pdf_urls'])} 份 PDF, 首份验证为月报",
+                evidence=f"归档页确认: {cand['url']} 含 {len(cand['pdf_urls'])} 份 PDF, {pdf_url} 验证为月报",
                 raw={"ranked": ranked, "probes": [
                     {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                 ]},

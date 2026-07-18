@@ -431,6 +431,23 @@ class TestFetchPriority:
         html = _fetch("https://x/archive")
         assert "2025-01.pdf" in html
 
+    def test_requests_has_nav_hrefs_but_no_pdf_escalates_to_playwright(self, monkeypatch):
+        """回归 (2026-07): Stake Zendesk 支持页 requests 抓下来有一堆导航 href,
+        但 0 个 PDF href (附件走 JS 异步注入) -- 不能因为"有 href 就算完整"而
+        跳过 playwright, 得看有没有 .pdf href。"""
+        from llm_ingest import discover as disc
+
+        monkeypatch.setattr(
+            disc, "_fetch_requests",
+            lambda url, timeout: '<a href="/support">Support</a><a href="/legal">Legal</a>',
+        )
+        monkeypatch.setattr(
+            disc, "_fetch_playwright",
+            lambda url, timeout: '<a href="https://x/2025-01.pdf">Jan</a>',
+        )
+        html = _fetch("https://x/support-article")
+        assert "2025-01.pdf" in html
+
     def test_both_fail_returns_none(self, monkeypatch):
         from llm_ingest import discover as disc
 

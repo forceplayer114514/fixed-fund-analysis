@@ -1,5 +1,5 @@
 """SQLAlchemy 引擎、会话工厂与建表。"""
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 
 from app.config import settings
@@ -15,6 +15,15 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
     echo=False,
 )
+
+if settings.DATABASE_URL.startswith("sqlite"):
+    # SQLite 默认不启用外键约束 -- models.py 里 confirmed_gaps/pending_review
+    # 的 ForeignKey(..., ondelete="CASCADE") 声明了但从未生效, 删 fund 时这两张
+    # 表的行会变孤儿 (monthly_returns/anomalies/metrics 有 ORM 级 cascade 不受影响,
+    # 但这两张只在 DB 层声明, 没有对应 ORM relationship)。每条连接开启后补 PRAGMA。
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_fk(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 

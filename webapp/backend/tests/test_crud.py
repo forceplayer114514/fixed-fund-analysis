@@ -2,9 +2,11 @@
 import time
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, event, inspect
+from sqlalchemy.orm import sessionmaker
 
-from app.models import Fund, MonthlyReturn, RbaCashRate, FundMetric
+from app.database import Base
+from app.models import Fund, MonthlyReturn, RbaCashRate, FundMetric, PendingReview, ConfirmedGap
 from app.crud import (
     create_fund, get_fund, get_all_funds, delete_fund,
     upsert_monthly_return, get_returns, recompute_nav, resolve_rf_rates,
@@ -39,6 +41,39 @@ def test_delete_fund_cascades(db_session):
     assert get_fund(db_session, "f1") is None
     assert len(get_returns(db_session, "f1")) == 0
     assert delete_fund(db_session, "nonexistent") is False
+
+
+@pytest.mark.unit
+def test_delete_fund_cascades_pending_review_and_confirmed_gaps_with_fk_pragma():
+    """confirmed_gaps/pending_review 只在 DB 层声明 ondelete=CASCADE, 没有 ORM
+    relationship -- SQLite 默认不开 PRAGMA foreign_keys, 这条 FK 级联从未生效,
+    删 fund 后两张表的行会变孤儿 (2026-07 发现)。app.database 已给 engine 加了
+    connect 事件开 PRAGMA, 这里用同样方式建一个独立测试引擎验证级联确实生效。
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def _enable_fk(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(bind=engine)
+    Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    session = Session()
+    try:
+        create_fund(session, fund_id="f1", fund_name="Fund One",
+                    confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+        session.add(PendingReview(fund_id="f1", date="2026-05-31", net_return=0.01,
+                                  extract_method="llm"))
+        session.add(ConfirmedGap(fund_id="f1", missing_month="2026-04"))
+        session.commit()
+
+        assert delete_fund(session, "f1") is True
+
+        assert session.query(PendingReview).filter_by(fund_id="f1").count() == 0
+        assert session.query(ConfirmedGap).filter_by(fund_id="f1").count() == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
 
 
 @pytest.mark.unit
