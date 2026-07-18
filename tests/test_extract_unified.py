@@ -167,6 +167,30 @@ def test_wrong_ym_rejected():
     assert "wrong_month" in ex.parse_error
 
 
+def test_wrong_ym_extraction_ym_is_expected_not_llm_reported():
+    """回归 (2026-07 Stake 2024-02 幻影缺口事故): wrong_month 时 Extraction.ym
+    必须是 expected_ym (调用方目标月), 不能是 LLM 自报的错误月份 -- 下游
+    write_extraction 拿 ex.ym 记 confirmed_gaps, 用错的月份会把不在预期范围内
+    的月份也记成缺口。"""
+    ex = parse_response(json.dumps({
+        "ym": "2024-02", "kind": "table_value",
+        "value_text": "0.65%",
+        "not_found": False,
+    }), "2026-06")
+    assert ex.ym == "2026-06"
+
+
+def test_not_found_extraction_ym_is_expected_not_llm_reported():
+    """not_found=True 时同理: ex.ym 用 expected_ym, 即使 LLM 在 JSON 里塞了
+    别的 ym 值。"""
+    ex = parse_response(json.dumps({
+        "ym": "2024-02", "kind": "not_found", "not_found": True,
+        "source_quote": "",
+    }), "2026-06")
+    assert ex.not_found
+    assert ex.ym == "2026-06"
+
+
 # ---------- parse_error 兜底 ----------
 
 def test_llm_returns_garbage_marks_parse_error():

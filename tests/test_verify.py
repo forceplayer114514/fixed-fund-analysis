@@ -233,6 +233,45 @@ def test_rolling_1mo_matches_net_return_proceeds_to_real_check():
     assert r.windows_verified == 1
 
 
+def test_rolling_3mo_6mo_duplicate_values_discarded_not_rejected():
+    """Stake 2026-07 二次复现: 这次 1mo 读对了 (等于 net_return, 自洽预检不拦),
+    但 3mo/6mo 报出完全相同的 2.98% (implied_3mo 复算 0.83%, 跟这两个数都对不上)。
+    不同复利窗口位位相同是损坏/缺失单元格数据被分摊到多个标签的信号, 不是
+    "数值编不出来"的真错误 -- 该整批弃用这两个窗口, 不阻塞入库。
+
+    真实案例 (2025-05): net_return=0.66%, history 2025-04=0.68%/2025-03=-0.51%,
+    rolling_text {"1mo":"0.66%","3mo":"2.98%","6mo":"2.98%"}。
+    """
+    history = {"2025-04": 0.0068, "2025-03": -0.0051}
+    r = check_rolling(0.0066, "2025-05", history,
+                      {"1mo": 0.0066, "3mo": 0.0298, "6mo": 0.0298})
+    assert r.passed
+    assert r.windows_verified == 0
+    assert "rolling_windows_duplicated_discarded" in r.reason
+
+
+def test_rolling_duplicate_check_only_discards_duplicated_window_others_still_checked():
+    """3mo/6mo 重复被弃用, 但 12mo 数值独立且真实校验对得上时, 该窗口照常验证
+    并计入 windows_verified (不是整批 rolling 一刀切弃用)。"""
+    history = {
+        "2025-04": 0.0068, "2025-03": -0.0051, "2025-02": 0.0040,
+        "2025-01": 0.0035, "2024-12": 0.0030, "2024-11": 0.0025,
+        "2024-10": 0.0020, "2024-09": 0.0015, "2024-08": 0.0010,
+        "2024-07": 0.0005, "2024-06": 0.0060,
+    }
+    prevs_12 = ["2025-04", "2025-03", "2025-02", "2025-01", "2024-12", "2024-11",
+                "2024-10", "2024-09", "2024-08", "2024-07", "2024-06"]
+    product = 1.0066
+    for pm in prevs_12:
+        product *= 1.0 + history[pm]
+    true_12mo = round(product - 1.0, 6)
+    r = check_rolling(0.0066, "2025-05", history,
+                      {"1mo": 0.0066, "3mo": 0.0298, "6mo": 0.0298, "12mo": true_12mo})
+    assert r.passed
+    assert r.windows_verified == 1
+    assert "rolling_windows_duplicated_discarded" not in r.reason
+
+
 def test_rolling_1mo_matches_but_3mo_genuinely_wrong_still_caught():
     """1mo 没错位, 但 3mo 数值本身真的对不上 (如字段类型错) -- 自洽预检不该
     误伤真实的字段错误检测, 该拦的还得拦。"""

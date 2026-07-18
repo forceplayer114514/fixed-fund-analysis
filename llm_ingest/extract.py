@@ -77,9 +77,15 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
     if fund_name_text is not None:
         fund_name_text = str(fund_name_text).strip() or None
 
+    # not_found / parse_error (含月份闸 wrong_month) 分支下, Extraction.ym 必须
+    # 用 expected_ym (调用方明确要抓的目标月), 不能用 LLM 自报的 ym -- 这两个
+    # 分支恰恰是"LLM 没抓对/抓错月"的场景, 此时 ym 字段本身就是不可信的 (2026-07
+    # Stake 2024-02 幻影缺口事故: LLM 某次抓错月报出 ym=2024-02, wrong_month
+    # 判 parse_error 后 Extraction.ym 仍留着这个错值, 下游 write_extraction 拿
+    # ex.ym 记 confirmed_gaps, 把根本不存在预期范围内的月份记成了"缺口")。
     if not_found:
         return Extraction(
-            ym=ym, net_return=None, source_quote=source_quote,
+            ym=expected_ym, net_return=None, source_quote=source_quote,
             measure=kind or "not_found",
             measure_label_in_pdf=measure_label,
             rolling={}, not_found=True, raw=obj,
@@ -89,7 +95,7 @@ def parse_response(text: str, expected_ym: str) -> Extraction:
     pr = parsers_mod.parse_extraction(obj, expected_ym)
     if pr.parse_error:
         return Extraction(
-            ym=ym, net_return=None, source_quote=source_quote,
+            ym=expected_ym, net_return=None, source_quote=source_quote,
             measure=kind or "unknown",
             measure_label_in_pdf=measure_label,
             rolling={}, not_found=True, raw=obj,

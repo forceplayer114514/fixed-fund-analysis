@@ -173,8 +173,28 @@ def check_rolling(
             0,
         )
 
+    # 窗口间重复值预检 (Stake 2026-07 二次复现: 1mo 这次读对了, 但 3mo/6mo
+    # 报出完全相同的十进制值, 而 code 复算的 implied_3mo 跟这两个数都对不上 --
+    # 不同时长复利结果理论上不可能位位相同, 这是同一份损坏/缺失单元格数据被
+    # 分摊到多个窗口标签下的特征信号, 而非"数值本身编不出来"的真错误。跟 1mo
+    # 自洽预检同源但机制不同 (那个查 1mo vs net_return 这一个已知锚点; 这个查
+    # 3/6/12mo 互相之间), 两者互补, 缺一都会漏判。重复值出现的窗口整批弃用,
+    # 不参与下面复利比对; 真正各不相同的窗口正常校验, 不放松整体闸门。
+    dup_groups: List[List[int]] = []
+    for w, v in reported.items():
+        placed = False
+        for grp in dup_groups:
+            if abs(v - reported[grp[0]]) < ROLLING_1MO_SELFCHECK_TOL:
+                grp.append(w)
+                placed = True
+                break
+        if not placed:
+            dup_groups.append([w])
+    duplicated_windows = {w for grp in dup_groups if len(grp) >= 2 for w in grp}
+    reliable = {w: v for w, v in reported.items() if w not in duplicated_windows}
+
     verified = 0
-    for w, roll_dec in reported.items():
+    for w, roll_dec in reliable.items():
         prevs = _prev_yms(ym, w - 1)
         if not all(pm in monthly_history for pm in prevs):
             continue
@@ -190,6 +210,12 @@ def check_rolling(
                 f"mismatch_{w}mo(implied={implied:.6f}_vs_reported={roll_dec:.6f})",
                 verified,
             )
+    if duplicated_windows and not reliable:
+        return RollingCheck(
+            True,
+            f"rolling_windows_duplicated_discarded({sorted(duplicated_windows)})",
+            0,
+        )
     if verified == 0:
         return RollingCheck(True, "insufficient_history", 0)
     return RollingCheck(True, "ok", verified)
