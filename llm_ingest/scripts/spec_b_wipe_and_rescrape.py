@@ -43,7 +43,7 @@ HEALTH_URL = f"{WEBAPP_HOST}/health"
 INGEST_URL = f"{WEBAPP_HOST}/api/ingest/funds"
 JOB_URL_TPL = f"{WEBAPP_HOST}/api/ingest/jobs/{{}}"
 
-EXCLUDED_FUNDS = {"coolabah_frhy_assisted", "coolabah_frhy_institutional"}
+EXCLUDED_FUNDS = set()
 WIPE_TABLES = [
     "monthly_returns", "confirmed_gaps", "pending_review",
     "fund_metrics", "anomalies", "ai_reports",
