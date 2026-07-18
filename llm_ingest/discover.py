@@ -132,18 +132,31 @@ def _dedup_links(pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
 
 def _fetch(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:
-    """浏览器渲染抓页 (playwright chromium headless).
+    """抓页: 先轻量 requests, 内容看起来完整才用; 否则升级到浏览器渲染.
 
-    默认走 playwright — 覆盖 AJAX/SPA 归档 (GCI 的 wp-load-posts, JCB 表格等).
-    静态站也能过, 就是慢一些 (~2s launch + ~1s render). Phase 2 不做二级兜底,
-    强的功能优先 (用户指令).
+    多数官网归档页是服务端直出的静态/SSR 页 (Stake 实测 hellostake.com 服务端
+    渲染, requests 就能拿到全部 34 个 PDF 链接, 完全不需要跑浏览器)。真正需要
+    JS 渲染的是 AJAX/SPA 归档 (GCI 的 wp-load-posts, JCB 表格等) -- 这类页面
+    首屏 HTML 里通常没有真实 `<a href>` (内容靠 JS 之后异步注入), 用"页面里有
+    没有至少一个链接"这个廉价信号区分, requests 命中就跳过昂贵的浏览器渲染
+    (省掉整个 Chromium 启动+软件渲染开销, 是之前抓页耗 CPU/发烫的主因之一)。
+    """
+    html = _fetch_requests(url, timeout)
+    if html and _HREF_RE.search(html):
+        return html
+    rendered = _fetch_playwright(url, timeout)
+    return rendered or html
+
+
+def _fetch_playwright(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:
+    """浏览器渲染抓页 (playwright chromium headless), 仅 requests 判断内容不完整时才走.
+
     network_idle=True 等到 500ms 无网络请求, 保证 AJAX 加载完成.
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        # 未装 playwright, 退回 requests (静态站仍可用)
-        return _fetch_requests(url, timeout)
+        return None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -161,8 +174,7 @@ def _fetch(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:
             finally:
                 browser.close()
     except Exception:
-        # 页 load 超时/浏览器崩溃 -> 退 requests
-        return _fetch_requests(url, timeout)
+        return None
 
 
 def _fetch_requests(url: str, timeout: int = DEFAULT_HTTP_TIMEOUT) -> Optional[str]:

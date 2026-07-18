@@ -9,6 +9,7 @@ import pytest
 from llm_ingest.discover import (
     ArchivePointer,
     _dedup_links,
+    _fetch,
     _month_range,
     _parse_ym_from_text,
     _recent_published_month,
@@ -390,6 +391,52 @@ class TestL2LocalCacheFallback:
         )
         assert rep.links == []
         assert "L_local" not in rep.per_level_contribution
+
+
+# ---------- _fetch: requests 优先, Playwright 仅内容不完整时才升级 ----------
+
+class TestFetchPriority:
+    def test_requests_with_links_skips_playwright(self, monkeypatch):
+        """requests 抓到的 HTML 含 <a href> (SSR/静态页) -> 直接用, 不起浏览器."""
+        from llm_ingest import discover as disc
+
+        def fake_requests(url, timeout):
+            return '<a href="https://x/2025-01.pdf">Jan</a>'
+
+        def fail_playwright(url, timeout):
+            raise AssertionError("不该升级到 Playwright -- requests 内容已完整")
+
+        monkeypatch.setattr(disc, "_fetch_requests", fake_requests)
+        monkeypatch.setattr(disc, "_fetch_playwright", fail_playwright)
+        html = _fetch("https://x/archive")
+        assert "2025-01.pdf" in html
+
+    def test_requests_empty_escalates_to_playwright(self, monkeypatch):
+        """requests 抓不到内容 (无 <a href>, 典型 SPA 空壳) -> 升级到浏览器渲染."""
+        from llm_ingest import discover as disc
+
+        monkeypatch.setattr(disc, "_fetch_requests", lambda url, timeout: "<div id='root'></div>")
+        monkeypatch.setattr(disc, "_fetch_playwright",
+                            lambda url, timeout: '<a href="https://x/2025-01.pdf">Jan</a>')
+        html = _fetch("https://x/spa-archive")
+        assert "2025-01.pdf" in html
+
+    def test_requests_none_escalates_to_playwright(self, monkeypatch):
+        """requests 直接失败 (None) -> 升级到浏览器渲染."""
+        from llm_ingest import discover as disc
+
+        monkeypatch.setattr(disc, "_fetch_requests", lambda url, timeout: None)
+        monkeypatch.setattr(disc, "_fetch_playwright",
+                            lambda url, timeout: '<a href="https://x/2025-01.pdf">Jan</a>')
+        html = _fetch("https://x/archive")
+        assert "2025-01.pdf" in html
+
+    def test_both_fail_returns_none(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        monkeypatch.setattr(disc, "_fetch_requests", lambda url, timeout: None)
+        monkeypatch.setattr(disc, "_fetch_playwright", lambda url, timeout: None)
+        assert _fetch("https://x/archive") is None
 
 
 if __name__ == "__main__":
