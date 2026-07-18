@@ -192,16 +192,27 @@ def check_anti_fabrication(
 ) -> Tuple[bool, str]:
     """连续 >=3 个相同非零浮点值 -> 拒 (幻觉 backfill 特征).
 
-    recent_history: [(ym, net_return), ...], 时间倒序 (最新在前), 不含当期.
+    只看紧邻 ym 往前的连续月份 (用 _prev_yms 定位, 而非 recent_history 的入参顺序) ——
+    回填场景下 recent_history 常是全库最新在前, 与 ym 不相邻, 若直接按入参顺序遍历,
+    对不相邻的月份第一次比对就会 mismatch/break, 闸门形同虚设 (2026-07 事故教训,
+    CLAUDE.md 第六条)。
+
+    recent_history: [(ym, net_return), ...], 不要求有序, 不含当期。
     """
     if net_return is None or net_return == 0.0:
         return True, "ok"
+    hist_map = dict(recent_history)
     run = 1
-    for _, v in recent_history:
-        if abs(v - net_return) < 1e-9:
-            run += 1
-            if run >= max_run:
-                return False, f"identical_run_{run}_value_{net_return}"
-        else:
+    y, m = ym.split("-")
+    y, m = int(y), int(m)
+    while run < max_run:
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+        v = hist_map.get(f"{y:04d}-{m:02d}")
+        if v is None or abs(v - net_return) >= 1e-9:
             break
+        run += 1
+    if run >= max_run:
+        return False, f"identical_run_{run}_value_{net_return}"
     return True, "ok"

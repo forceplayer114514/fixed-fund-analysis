@@ -20,6 +20,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin
 
 import requests
 
@@ -404,10 +405,20 @@ def find_archive_via_search(
 _YM_RE = re.compile(r"^\d{4}-\d{2}$")
 _HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
 
+# 噪声过滤: 归档页里除月报外还常挂 PDS/TMD/FSG/研究报告等静态 PDF, 靠日期匹配后仍
+# 会混入 (如 "TMD-...-11-October-2023.pdf" 匹到 2023-10)。这些不是月度业绩报告,
+# 摄取阶段跑 extract 必然 not_found 或 measure 错。用文件名黑名单字面预筛。
+_NON_MONTHLY_HINTS = re.compile(
+    r"(pds|tmd|target[-_]market|fsg|financial[-_]services|whistle|"
+    r"research|lonsec|morningstar|zenith|genium|platform|"
+    r"fact[-_]sheet|application|additional[-_]information|"
+    r"policy|guide|dictionary|handbook)",
+    re.I,
+)
+
 
 def _extract_href_whitelist(html: str, base_url: str) -> set:
     """从 HTML 抽所有 `<a href="...">` 归一化后的绝对 URL 白名单."""
-    from urllib.parse import urljoin
     out = set()
     for href in _HREF_RE.findall(html):
         try:
@@ -419,20 +430,63 @@ def _extract_href_whitelist(html: str, base_url: str) -> set:
     return out
 
 
+def _extract_pdf_links_by_regex(html: str, base_url: str) -> List[Tuple[str, str]]:
+    """代码正则直抠归档页 `<a href>` 里的 PDF 链接 -> (ym, url), 无长度截断.
+
+    parse_archive_page 原来无条件把 html 截到 80KB 才让 LLM 解析 -- 归档页头部
+    (导航/脚本/样式) 一旦超过这个长度 (Stake 归档页实测 149KB, 全部 34 个 PDF 链接
+    落在 8.3~14 万字节区间), LLM 一个链接都看不到, 返回 0 links。且固定截断长度
+    基金历史越长越注定失效 (10年~120份月报, 20年~240份, 提大截断上限只是治标)。
+    正则扫全文 (无长度上限, 开销可忽略), 命中直接用, parse_archive_page 只在正则
+    一无所获时才退回 LLM (兜底 JS 渲染后才注入的隐藏链接等场景)。
+    """
+    pairs: List[Tuple[str, str]] = []
+    for href in _HREF_RE.findall(html):
+        full = urljoin(base_url, href)
+        if not full.lower().split("?", 1)[0].endswith(".pdf"):
+            continue
+        fname = full.rsplit("/", 1)[-1]
+        if _NON_MONTHLY_HINTS.search(fname):
+            continue
+        # 只信文件名反解 ym, 不 fallback 到整段 URL -- 托管路径常带上传日期/年份目录
+        # (如 "/wp-content/uploads/2024/02/xxx.pdf" 是 2024-02 上传, 不是月报期数),
+        # 对全 URL 兜底会把无关域名的静态文件误判成月报 (实测: Stake 页混入
+        # finclear.com.au 的条款 PDF, 因路径含 "/2024/02/" 被误判为 2024-02)。
+        ym = _parse_ym_from_text(fname)
+        if ym and _valid_ym(ym):
+            pairs.append((ym, full))
+    return _dedup_links(pairs)
+
+
+_PAGINATION_HINT_RE = re.compile(r"(load\s*more|next\s*page|archiveyear|[?&]page=)", re.I)
+
+
 def parse_archive_page(
     html: str,
     *,
     client: Optional[Client] = None,
     base_url: str = "",
 ) -> Tuple[List[Tuple[str, str]], bool, str, int]:
-    """L1 第二步: 把已抓好的归档页交 Gemini 解析.
+    """L1 第二步: 把已抓好的归档页解析出 PDF 链接.
 
-    白名单校 (Spec E.2.C):
+    优先代码正则直抠全文 (`_extract_pdf_links_by_regex`, 无长度截断限制) -- 命中
+    则直接返回, 跳过 LLM (省 token, 且不受下面 80KB 截断影响, 对长历史基金友好)。
+    正则一无所获才退回 LLM (兜底 JS 渲染后才注入链接 / 无 <a href> 结构等场景)。
+
+    白名单校 (Spec E.2.C, 仅 LLM 路径需要):
       - ym 格式 YYYY-MM 强校
       - url 必须在 html 的 <a href="..."> 白名单里 (代码校, LLM 造 URL 被丢)
 
-    返回 (links, has_more_pages, next_page_hint, unparseable_count).
+    返回 (links, has_more_pages, next_page_hint, unparseable_count)。
+    代码正则路径的 has_more_pages 是启发式猜测 (页内是否有分页/load-more 字样),
+    不像 LLM 路径那样能读懂具体怎么翻页, next_page_hint 恒为空串。
     """
+    if base_url:
+        code_pairs = _extract_pdf_links_by_regex(html, base_url)
+        if code_pairs:
+            has_more = bool(_PAGINATION_HINT_RE.search(html))
+            return (code_pairs, has_more, "", 0)
+
     if client is None:
         client = Client()
     prompt = _load_prompt("parse_archive.md") + "\n\n---PAGE---\n" + html[:80_000]
@@ -498,16 +552,10 @@ def probe_l1_official(
     # (Yarra 教训: 归档页 HTML 前 80k 字符 Gemini 判月份返 0 links)。反解失败的丢, 但保留
     # 至少 latest_pdf_url 作为兜底 -- 只要有 1 份能反解出 ym 都强于让 Gemini 二解。
     if pointer.discovered_pdfs:
-        # 噪声过滤: 归档页里除月报外还常挂 PDS/TMD/FSG/研究报告等静态 PDF, 靠日期匹配后仍
-        # 会混入 (如 "TMD-...-11-October-2023.pdf" 匹到 2023-10)。这些不是月度业绩报告,
-        # 摄取阶段跑 extract 必然 not_found 或 measure 错。用文件名黑名单字面预筛。
-        _NON_MONTHLY_HINTS = re.compile(
-            r"(pds|tmd|target[-_]market|fsg|financial[-_]services|whistle|"
-            r"research|lonsec|morningstar|zenith|genium|platform|"
-            r"fact[-_]sheet|application|additional[-_]information|"
-            r"policy|guide|dictionary|handbook)",
-            re.I,
-        )
+        # 噪声过滤 (模块级 _NON_MONTHLY_HINTS): 归档页里除月报外还常挂 PDS/TMD/FSG/
+        # 研究报告等静态 PDF, 靠日期匹配后仍会混入 (如 "TMD-...-11-October-2023.pdf"
+        # 匹到 2023-10)。这些不是月度业绩报告, 摄取阶段跑 extract 必然 not_found 或
+        # measure 错。用文件名黑名单字面预筛。
         pairs: List[Tuple[str, str]] = []
         for u in pointer.discovered_pdfs:
             fname = u.rsplit("/", 1)[-1]
@@ -730,13 +778,8 @@ def run_discovery(
                 if next_pdfs:
                     next_pdfs = _rank_pdfs_by_name_match(next_pdfs, fund_name)
                     # 尝试直接从文件名反解 ym (跳过 Gemini PDF 打样, 大批量场景省 tokens)
+                    # 噪声过滤复用模块级 _NON_MONTHLY_HINTS
                     nav_pairs: List[Tuple[str, str]] = []
-                    _NON_MONTHLY_HINTS = re.compile(
-                        r"(pds|tmd|target[-_]market|fsg|financial[-_]services|"
-                        r"whistle|research|lonsec|morningstar|zenith|policy|"
-                        r"guide|application|handbook|dictionary)",
-                        re.I,
-                    )
                     for u in next_pdfs:
                         fname = u.rsplit("/", 1)[-1]
                         if _NON_MONTHLY_HINTS.search(fname):

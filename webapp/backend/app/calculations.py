@@ -205,6 +205,27 @@ def _excess_aligned(returns: list[float], rf_rates: list[float | None]) -> list[
             for r, rf in zip(returns, rf_rates)]
 
 
+def _compound(returns: list[float]) -> float:
+    """逐月复利因子 ∏(1+r)。"""
+    comp = 1.0
+    for r in returns:
+        comp *= (1.0 + r)
+    return comp
+
+
+def _guard_positive_compound(comp: float, fund_name: str, label: str) -> None:
+    """comp <= 0 意味着存在单月收益 <= -100% 的极端月（开分数次幂会得复数而非报错）。
+
+    保留原值参与复利，但拒绝年化并报错交人工复核，而非静默产出复数写入 Float 列。
+    """
+    if comp <= 0:
+        raise ValueError(
+            f"[{fund_name}] 累计{label}因子 comp={comp:.4f} <= 0，"
+            f"存在单月收益 <= -100% 的极端月度数据，数据异常，"
+            f"拒绝年化（请人工复核该基金月度数据）"
+        )
+
+
 def _annualized_excess_return_compounded(excess: list[float], n_months: int,
                                          fund_name: str) -> float:
     """spec 4.1 权威算法：逐月扣减后复利年化 (∏(1+r_e))^(12/n) - 1。
@@ -213,17 +234,8 @@ def _annualized_excess_return_compounded(excess: list[float], n_months: int,
     """
     if n_months <= 0:
         return 0.0
-    comp = 1.0
-    for r in excess:
-        comp *= (1.0 + r)
-    if comp <= 0:
-        # 累计超额因子 <= 0 意味着存在 r_e <= -1 的极端月（单月亏损超 100%），
-        # 开分数次幂会得复数。保留原值参与复利，但拒绝年化并报错交人工复核。
-        raise ValueError(
-            f"[{fund_name}] 累计超额收益因子 comp={comp:.4f} <= 0，"
-            f"存在 r_e <= -1 的极端月度收益（单月亏损超 100%），数据异常，"
-            f"拒绝年化（请人工复核该基金月度数据）"
-        )
+    comp = _compound(excess)
+    _guard_positive_compound(comp, fund_name, "超额收益")
     return calculate_annualized_return(comp, n_months, fund_name=fund_name)
 
 
@@ -268,12 +280,10 @@ def compute_all_metrics(returns: list[float], rf_rates: list[float | None],
 
     # 维度1：进攻
     # 年化收益率（基金口径，几何年化，PDD 1.3）：用全序列
-    comp_raw_orig = 1.0
-    for r in returns:
-        comp_raw_orig *= (1.0 + r)
-    comp_raw_un = 1.0
-    for r in unsmoothed:
-        comp_raw_un *= (1.0 + r)
+    comp_raw_orig = _compound(returns)
+    comp_raw_un = _compound(unsmoothed)
+    _guard_positive_compound(comp_raw_orig, fund_name, "收益率")
+    _guard_positive_compound(comp_raw_un, fund_name, "收益率")
     orig_annualized_return = calculate_annualized_return(comp_raw_orig, n_fund, fund_name=fund_name)
     un_annualized_return = calculate_annualized_return(comp_raw_un, n_fund, fund_name=fund_name)
     # 年化超额收益（超额口径，复利年化）：用压缩序列 + n_excess

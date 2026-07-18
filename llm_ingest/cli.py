@@ -97,6 +97,14 @@ def run_compare(fund_id: str, limit: Optional[int] = None, max_pages: int = 2, c
     if limit:
         pdfs = pdfs[:limit]
 
+    # 查 fund_name, 供按发行商注入专项抽取规则 (issuer_rules)
+    _conn = sqlite3.connect(str(DB_PATH))
+    try:
+        _row = _conn.execute("SELECT fund_name FROM funds WHERE fund_id=?", (fund_id,)).fetchone()
+    finally:
+        _conn.close()
+    fund_name = _row[0] if _row else ""
+
     # 前 11 月历史 (十进制) 累积传入 rolling 校验
     history: Dict[str, float] = {}
 
@@ -120,7 +128,7 @@ def run_compare(fund_id: str, limit: Optional[int] = None, max_pages: int = 2, c
     def _do_extract(pdf: Path) -> Tuple[str, Any]:
         ym = pdf.stem
         try:
-            return ym, ex_mod.extract_from_pdf(pdf, ym, max_pages=max_pages)
+            return ym, ex_mod.extract_from_pdf(pdf, ym, max_pages=max_pages, fund_name=fund_name)
         except Exception as e:  # noqa: BLE001
             return ym, e
 
@@ -313,6 +321,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     conn = store_mod.open_conn()
     store_mod.ensure_tables_if_missing(conn)
 
+    # fund_name 供按发行商注入专项抽取规则 (issuer_rules); 命令行未给时查库兜底
+    fund_name = args.fund_name or ""
+    if not fund_name:
+        _row = conn.execute("SELECT fund_name FROM funds WHERE fund_id=?", (fund_id,)).fetchone()
+        fund_name = _row[0] if _row else ""
+
     # 若给了 fund-name/issuer, 顺带 upsert 元信息
     if args.fund_name and args.confirmed_url:
         store_mod.upsert_fund(
@@ -371,7 +385,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                 continue
         # 提取
         try:
-            ex = ex_mod.extract_from_pdf(pdf_path, ym, max_pages=args.max_pages)
+            ex = ex_mod.extract_from_pdf(pdf_path, ym, max_pages=args.max_pages,
+                                         fund_name=fund_name, issuer=args.issuer or "")
         except Exception as e:  # noqa: BLE001
             print(f"[{i}/{len(links)}] {ym} extract error: {e}", file=sys.stderr)
             store_mod.record_confirmed_gap(

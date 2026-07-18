@@ -16,6 +16,7 @@ from typing import Optional
 
 from .client import Client
 from .extract import Extraction, parse_response
+from . import issuer_rules
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
@@ -98,6 +99,8 @@ def extract_from_html(
     client: Optional[Client] = None,
     max_tokens: int = HTML_MAX_TOKENS,
     input_cap: int = HTML_INPUT_CAP,
+    fund_name: str = "",
+    issuer: str = "",
 ) -> Extraction:
     """喂 HTML (截 input_cap) + prompt, 返 Extraction.
 
@@ -105,6 +108,7 @@ def extract_from_html(
       - HTML 空 → not_found
       - Plotly HTML → 先抠 data 段
       - LLM 返 JSON 走 parse_response (与 PDF 同 schema)
+    fund_name/issuer: 按关键词匹配注入发行商专项规则 (issuer_rules.get_issuer_rule)。
     """
     if not html:
         return Extraction(
@@ -117,6 +121,7 @@ def extract_from_html(
     shrunk = _shrink_plotly_html(html, expected_ym)
     prompt = (
         load_prompt()
+        + issuer_rules.get_issuer_rule(fund_name, issuer)
         + f"\n\n目标月份: {expected_ym}\n\n---HTML---\n{shrunk[:input_cap]}"
     )
     resp = client.messages(prompt, max_tokens=max_tokens)

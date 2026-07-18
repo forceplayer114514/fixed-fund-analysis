@@ -220,5 +220,24 @@ def test_antifab_zero_run_allowed():
     assert ok
 
 
+def test_antifab_ignores_history_not_adjacent_to_ym():
+    """回填场景: DB 已有全库最新月, 但当前 ym 是很久以前的历史月.
+
+    hist 里 2026-05/2026-04 是同值 run, 但离 ym=2020-05 十万八千里,
+    不应污染 2020-05 的连续性判定 -- 应看 2020-04/2020-03 是否同值。
+    """
+    hist = [("2026-05", 0.0042), ("2026-04", 0.0042), ("2026-03", 0.0042)]
+    ok, _ = check_anti_fabrication(0.0042, "2020-05", hist)
+    assert ok
+
+
+def test_antifab_rejects_run_of_3_adjacent_to_ym_regardless_of_input_order():
+    """recent_history 乱序传入 (非 sorted reverse) 也要能挡住紧邻 ym 的同值 run。"""
+    hist = [("2019-11", 0.006), ("2020-04", 0.005), ("2020-03", 0.005)]
+    ok, reason = check_anti_fabrication(0.005, "2020-05", hist)
+    assert not ok
+    assert "identical_run_3" in reason
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

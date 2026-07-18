@@ -41,11 +41,29 @@ _AUTHORITATIVE_TAGS = frozenset({"fundmonitors_table", "llm"})
 
 # ---------- 连接 ----------
 
+def resolve_db_path() -> Path:
+    """解析 DB 路径, 与 webapp/backend/app/config.py 的 DATABASE_URL 共用同一来源.
+
+    优先级: FUND_DB_PATH (llm_ingest 专用, 明确覆盖) > DATABASE_URL (webapp 用,
+    sqlite:/// 前缀) > 仓库根默认路径。
+
+    两个 env 变量各自独立时 (只设 DATABASE_URL 不设 FUND_DB_PATH), ingest 写库与
+    webapp 读库曾各自解析到不同文件 -- 摄取 job 报 succeeded 但数据进了另一个库,
+    API 一行也查不到 (2026-07 教训)。此处统一收口, 只设其一即可两边一致。
+    """
+    env = os.environ.get("FUND_DB_PATH")
+    if env:
+        return Path(env)
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("sqlite:///"):
+        return Path(db_url[len("sqlite:///"):])
+    return DEFAULT_DB_PATH
+
+
 def open_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """打开 sqlite3 连接, foreign keys 打开, row_factory 设为 dict-like."""
     if db_path is None:
-        env = os.environ.get("FUND_DB_PATH")
-        db_path = Path(env) if env else DEFAULT_DB_PATH
+        db_path = resolve_db_path()
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -175,7 +193,12 @@ def _upsert_monthly_return(
     source_quote: Optional[str] = None,
     pattern_tag: Optional[str] = "llm",
 ) -> None:
-    """写一行月度. 走完立即 recompute_nav (与 skills 侧一致的语义)."""
+    """写一行月度. 走完立即 recompute_nav (与 skills 侧一致的语义).
+
+    同时清除该月的 confirmed_gaps 残留 (若之前该月因下载失败/校验未过记过缺口,
+    现在既然写入了 monthly_returns, 就不再是缺口 -- 否则 gap_count 会永久误报,
+    与 write_table_records 对同一问题的处理保持一致)。
+    """
     conn.execute(
         """
         INSERT INTO monthly_returns
@@ -188,6 +211,10 @@ def _upsert_monthly_return(
             pattern_tag = COALESCE(excluded.pattern_tag, monthly_returns.pattern_tag)
         """,
         (fund_id, date, net_return, verify_windows, source_quote, pattern_tag),
+    )
+    conn.execute(
+        "DELETE FROM confirmed_gaps WHERE fund_id=? AND missing_month=?",
+        (fund_id, date[:7]),
     )
     conn.commit()
     _recompute_nav(conn, fund_id)

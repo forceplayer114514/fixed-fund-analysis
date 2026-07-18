@@ -29,7 +29,10 @@ def create_app(enable_scheduler: bool = True) -> FastAPI:
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
         from llm_ingest.migrations import spec_b_20260717 as _mig_b
-        _db_path = Path(__file__).resolve().parents[3] / "data" / "fund_analysis.db"
+        from llm_ingest.store import resolve_db_path
+        # 与 store.resolve_db_path 同源 (FUND_DB_PATH > DATABASE_URL > 仓库默认路径),
+        # 避免 DATABASE_URL 被覆盖时迁移错文件、真正在用的库反而缺列 (2026-07 教训)。
+        _db_path = resolve_db_path()
         if _db_path.exists():
             _mc = sqlite3.connect(str(_db_path))
             try:

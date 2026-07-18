@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from . import pdf as pdf_mod
 from .client import Client, DEFAULT_MAX_TOKENS
 from . import parsers as parsers_mod
+from . import issuer_rules
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
@@ -114,14 +115,22 @@ def extract_from_pdf(
     max_pages: int = 2,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     retry_on_not_found_with_full: bool = True,
+    fund_name: str = "",
+    issuer: str = "",
 ) -> Extraction:
     """跑一次提取. not_found 时安全网: 加载全文重试一次.
 
     max_pages<=0 表示直接喂全文.
+    fund_name/issuer: 按关键词匹配注入发行商专项规则 (issuer_rules.get_issuer_rule),
+    不匹配则不附加任何专项规则 -- 不再让通用 prompt 对所有基金都携带全部发行商特例。
     """
     if client is None:
         client = Client()
-    prompt = load_prompt() + f"\n\n目标月份: {expected_ym}"
+    prompt = (
+        load_prompt()
+        + issuer_rules.get_issuer_rule(fund_name, issuer)
+        + f"\n\n目标月份: {expected_ym}"
+    )
     pdf_bytes = pdf_mod.clip_pages(pdf_path, max_pages=max_pages)
     resp = client.messages_with_pdf(prompt, pdf_bytes, max_tokens=max_tokens)
     ex = parse_response(resp.text, expected_ym)
@@ -164,19 +173,24 @@ def extract_from_source(
     html_text: Optional[str] = None,
     csv_text: Optional[str] = None,
     max_pages: int = 2,
+    fund_name: str = "",
+    issuer: str = "",
 ) -> Extraction:
     """按 URL 后缀分派 PDF/HTML/CSV. 三通道走同一 extract_unified.md.
 
     Coolabah 类无扩展的 HTML performance page: 上游若已传 html_text/csv_text,
     优先按内容通道走, 忽略无扩展 URL.
+    fund_name/issuer 透传给三通道, 按需注入发行商专项规则 (issuer_rules).
     """
     # 上游已明示通道 (html_text/csv_text 非空) 走内容通道, 绕过后缀检测
     if html_text is not None:
         from .extract_html import extract_from_html
-        return extract_from_html(html_text, expected_ym, client=client)
+        return extract_from_html(html_text, expected_ym, client=client,
+                                 fund_name=fund_name, issuer=issuer)
     if csv_text is not None:
         from .extract_csv import extract_from_csv
-        return extract_from_csv(csv_text, expected_ym, client=client)
+        return extract_from_csv(csv_text, expected_ym, client=client,
+                                fund_name=fund_name, issuer=issuer)
     ext = _url_suffix(url_or_path)
     if ext == ".pdf":
         if local_pdf_path is None:
@@ -185,6 +199,7 @@ def extract_from_source(
             )
         return extract_from_pdf(
             local_pdf_path, expected_ym, client=client, max_pages=max_pages,
+            fund_name=fund_name, issuer=issuer,
         )
     if ext in (".html", ".htm"):
         from .extract_html import extract_from_html
@@ -195,7 +210,8 @@ def extract_from_source(
                     "extract_from_source: HTML 通道需要 html_text 或 file:// URL"
                 )
             html_text = data.decode("utf-8", errors="replace")
-        return extract_from_html(html_text, expected_ym, client=client)
+        return extract_from_html(html_text, expected_ym, client=client,
+                                 fund_name=fund_name, issuer=issuer)
     if ext == ".csv":
         from .extract_csv import extract_from_csv
         if csv_text is None:
@@ -205,5 +221,6 @@ def extract_from_source(
                     "extract_from_source: CSV 通道需要 csv_text 或 file:// URL"
                 )
             csv_text = data.decode("utf-8", errors="replace")
-        return extract_from_csv(csv_text, expected_ym, client=client)
+        return extract_from_csv(csv_text, expected_ym, client=client,
+                                fund_name=fund_name, issuer=issuer)
     raise ValueError(f"extract_from_source: 未支持后缀 {ext!r} (url={url_or_path!r})")

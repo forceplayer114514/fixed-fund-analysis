@@ -40,6 +40,7 @@ def _to_response(fund: Fund, session: Session, gap_count: int | None = None,
         url_type=fund.url_type, max_pdf_pages=fund.max_pdf_pages,
         data_cutoff_month=cutoff, has_metrics=metric is not None,
         gap_count=gap_count, pending_count=pending_count,
+        discovered_source_name=fund.discovered_source_name,
     )
 
 

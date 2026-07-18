@@ -11,6 +11,7 @@ from typing import Optional
 
 from .client import Client
 from .extract import Extraction, parse_response
+from . import issuer_rules
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
@@ -29,10 +30,13 @@ def extract_from_csv(
     client: Optional[Client] = None,
     max_tokens: int = CSV_MAX_TOKENS,
     input_cap: int = CSV_INPUT_CAP,
+    fund_name: str = "",
+    issuer: str = "",
 ) -> Extraction:
     """喂 CSV 文本 + prompt, 返 Extraction.
 
     与 extract_html.extract_from_html 结构对称.
+    fund_name/issuer: 按关键词匹配注入发行商专项规则 (issuer_rules.get_issuer_rule)。
     """
     if not csv_text:
         return Extraction(
@@ -44,6 +48,7 @@ def extract_from_csv(
         client = Client()
     prompt = (
         load_prompt()
+        + issuer_rules.get_issuer_rule(fund_name, issuer)
         + f"\n\n目标月份: {expected_ym}\n\n---CSV---\n{csv_text[:input_cap]}"
     )
     resp = client.messages(prompt, max_tokens=max_tokens)

@@ -217,6 +217,37 @@ def test_not_found_goes_to_confirmed_gap(conn):
     assert row["exhausted_levels"] == "L1,L2,L3"
 
 
+def test_retry_success_after_gap_clears_confirmed_gap(conn):
+    """先记一次缺口 (下载失败/穷尽), 重跑成功写入 monthly_returns 后,
+    该月的 confirmed_gaps 残留必须被清除 -- 否则 gap_count 永久误报该基金缺数据。
+    """
+    store.record_confirmed_gap(
+        conn, fund_id="fund_x", missing_month="2025-06",
+        exhausted_levels="download_fail",
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM confirmed_gaps WHERE fund_id='fund_x' AND missing_month='2025-06'"
+    ).fetchone()[0] == 1
+
+    ex = Extraction(
+        ym="2025-06", net_return=0.0065,
+        source_quote="Fund returned 0.65% (net of fees).",
+        measure="net_monthly", measure_label_in_pdf="Net Return",
+        rolling={"1mo": 0.65, "3mo": None, "6mo": None, "12mo": None},
+        not_found=False, raw={"net_return_pct": 0.65},
+    )
+    dec = store.write_extraction(
+        conn, fund_id="fund_x", ex=ex,
+        quote_check=QuoteCheck(True, "ok"),
+        rolling_check=RollingCheck(True, "ok", 1),
+        monthly_history={},
+    )
+    assert dec.action == "monthly"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM confirmed_gaps WHERE fund_id='fund_x' AND missing_month='2025-06'"
+    ).fetchone()[0] == 0
+
+
 def test_parse_error_goes_to_gap(conn):
     ex = Extraction(
         ym="2025-07", net_return=None, source_quote="",

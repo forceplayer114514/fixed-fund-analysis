@@ -364,12 +364,14 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 if channel == "pdf":
                     ex = ex_mod.extract_from_pdf(
                         pdf_path, ym, max_pages=req.max_pdf_pages or 2,
+                        fund_name=req.fund_name, issuer=req.issuer or "",
                     )
                 else:
                     ex = ex_mod.extract_from_source(
                         url, ym,
                         html_text=payload_text if channel == "html" else None,
                         csv_text=payload_text if channel == "csv" else None,
+                        fund_name=req.fund_name, issuer=req.issuer or "",
                     )
             except Exception as e:  # noqa: BLE001
                 store_mod.record_confirmed_gap(

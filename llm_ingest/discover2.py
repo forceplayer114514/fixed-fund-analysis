@@ -327,7 +327,7 @@ def confirm_pdf_is_monthly_report(
     try:
         # ym 未知先给占位 (打样只要判是不是月报, 具体 ym 由 parse_archive 阶段做)
         ex = ex_mod.extract_from_pdf(tmp_path, expected_ym="0000-00", client=client,
-                                     max_pages=2)
+                                     max_pages=2, fund_name=fund_name)
     finally:
         try:
             tmp_path.unlink()

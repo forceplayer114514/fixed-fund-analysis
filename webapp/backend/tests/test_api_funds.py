@@ -124,3 +124,18 @@ def test_list_funds_returns_gap_count(client, db_session):
     funds = {f["fund_id"]: f for f in client.get("/api/funds").json()}
     assert funds["f1"]["gap_count"] == 0
     assert funds["f2"]["gap_count"] == 2
+
+
+@pytest.mark.unit
+def test_list_funds_returns_discovered_source_name(client, db_session):
+    """GET /api/funds 透出 discovered_source_name（Spec B 透明展示，与 fund_name
+    不一致时前端标红核对）；_to_response 若漏传该字段会永远回 null。
+    """
+    from app.models import Fund
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Coolabah Assisted",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    fund = db_session.get(Fund, "f1")
+    fund.discovered_source_name = "Smarter Money Fund"
+    db_session.commit()
+    funds = {f["fund_id"]: f for f in client.get("/api/funds").json()}
+    assert funds["f1"]["discovered_source_name"] == "Smarter Money Fund"

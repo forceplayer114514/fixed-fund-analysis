@@ -164,6 +164,20 @@ def test_compute_all_metrics_short_history():
 
 
 @pytest.mark.unit
+def test_compute_all_metrics_raw_return_extreme_loss_raises_not_complex():
+    """单月收益率 <= -100% 时基金口径年化收益率必须报错，不能静默产出复数写库。
+
+    (Python `(-x) ** frac` 返回 complex 而非抛异常，若无 comp<=0 守卫会静默污染 DB。)
+    """
+    returns = [-1.5, 0.01, 0.02, 0.01, 0.02, 0.01]
+    rf_rates = [0.0435] * 6
+    with pytest.raises(ValueError) as excinfo:
+        compute_all_metrics(returns, rf_rates, "CrashFund")
+    assert "CrashFund" in str(excinfo.value)
+    assert "<= 0" in str(excinfo.value)
+
+
+@pytest.mark.unit
 def test_compute_all_metrics_excess_return_formula():
     """验证超额收益采用逐月扣减复利法（spec 4.1）。"""
     # 单月：r=0.01, RBA=0.0435 -> r_e = 0.01 - 0.0435/12 = 0.01 - 0.003625 = 0.006375

@@ -183,6 +183,78 @@ class TestParseArchivePage:
         assert links == []
         assert more is False
 
+    def test_code_regex_path_skips_llm_when_pdf_links_past_80kb_cutoff(self):
+        """Stake 实况回归: 归档页 >80KB 且全部 PDF 链接落在截断线之后,
+        代码正则应直接从全文抓到, 完全不调 LLM (client.messages 被调即 fail)."""
+        class FailingClient:
+            def messages(self, prompt, max_tokens=None):
+                raise AssertionError("不该调 LLM -- 代码正则应已命中")
+
+        padding = "<!-- filler -->" * 6000  # far more than 80_000 chars
+        html = (
+            "<html><body>" + padding
+            + '<a href="https://cdn.example.com/AccumulateReport_March2025.pdf">March 2025</a>'
+            + '<a href="https://cdn.example.com/Accumulate_April_2025.pdf">April 2025</a>'
+            + "</body></html>"
+        )
+        assert len(html) > 80_000
+        links, more, hint, unp = parse_archive_page(
+            html, client=FailingClient(), base_url="https://issuer.com/archive",
+        )
+        assert links == [
+            ("2025-03", "https://cdn.example.com/AccumulateReport_March2025.pdf"),
+            ("2025-04", "https://cdn.example.com/Accumulate_April_2025.pdf"),
+        ]
+        assert unp == 0
+
+    def test_code_regex_path_filters_unrelated_domain_date_path_noise(self):
+        """Stake 实况: 混入无关域名的条款 PDF, 路径含 "/2024/02/" (上传日期非月报期),
+        不应被文件名反解逻辑之外的整段 URL 兜底误判为 2024-02。"""
+        class FailingClient:
+            def messages(self, prompt, max_tokens=None):
+                raise AssertionError("不该调 LLM")
+
+        html = (
+            '<a href="https://finclear.com.au/wp-content/uploads/2024/02/Terms-of-Trade.pdf">Terms</a>'
+            '<a href="https://cdn.example.com/Accumulate_March_2025.pdf">March 2025</a>'
+        )
+        links, _more, _hint, _unp = parse_archive_page(
+            html, client=FailingClient(), base_url="https://issuer.com/archive",
+        )
+        assert links == [("2025-03", "https://cdn.example.com/Accumulate_March_2025.pdf")]
+
+    def test_code_regex_path_falls_back_to_llm_when_no_pdf_hrefs(self):
+        """正则一无所获 (无 .pdf 后缀 href, 如中转页无扩展名) 时仍退回 LLM 路径, 行为不变."""
+        class FakeResp:
+            text = '{"links":[{"ym":"2025-01","url":"https://x/2025-01"}],"has_more_pages":false,"next_page_hint":null,"unparseable_count":0}'
+
+        class FakeClient:
+            def messages(self, prompt, max_tokens=None):
+                return FakeResp()
+
+        html = '<a href="https://x/2025-01">Report Jan 2025</a>'
+        links, more, hint, unp = parse_archive_page(
+            html, client=FakeClient(), base_url="https://x/",
+        )
+        assert links == [("2025-01", "https://x/2025-01")]
+
+    def test_code_regex_path_pagination_heuristic(self):
+        """代码路径命中时, 页面含分页字样应把 has_more_pages 猜为 True (启发式)."""
+        class FailingClient:
+            def messages(self, prompt, max_tokens=None):
+                raise AssertionError("不该调 LLM")
+
+        html = (
+            '<a href="https://cdn.example.com/Accumulate_March_2025.pdf">March 2025</a>'
+            '<button>Load More</button>'
+        )
+        links, more, hint, unp = parse_archive_page(
+            html, client=FailingClient(), base_url="https://issuer.com/archive",
+        )
+        assert links == [("2025-03", "https://cdn.example.com/Accumulate_March_2025.pdf")]
+        assert more is True
+        assert hint == ""
+
 
 # ---------- run_discovery: 全打桩集成 ----------
 
