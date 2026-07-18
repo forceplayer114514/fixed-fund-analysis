@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 
 import requests
+from dateutil import parser as _date_parser
+from dateutil.parser import ParserError as _DateParserError
 
 from . import extract as ex_mod
 from .client import Client, resolve_sources
@@ -67,11 +69,39 @@ class DiscoveryReport:
 
 # ---------- 工具 ----------
 
-_MONTHS = {m: i for i, m in enumerate(
-    ["january","february","march","april","may","june","july","august",
-     "september","october","november","december"], start=1)}
-_MONTHS_ABBR = {m: i for i, m in enumerate(
-    ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"], start=1)}
+# 月份名解析交给 dateutil (2026-07 教训: 手写正则堆月份缩写字典打地鼠打不完 --
+# Stake 用 "Sept" 4 字母缩写, 旧版字典只有 3 字母 "sep", 正则被多出的 "t" 卡住
+# 整体失配, 该月 PDF 静默消失、不进 confirmed_gaps、看起来像"文档没有这个月"。
+# dateutil 自带经过多年打磨的月份名表 (各种缩写/全称/语言变体全认), 不用我们
+# 自己维护字典。code 只保留两类它管不好/不该它管的事:
+#   (a) 纯数字格式 (YYYYMMDD/YYYY-MM 等) -- 无自然语言歧义, dateutil 对无
+#       分隔紧凑数字反而会解析失败或猜错 (实测), 这类"重复格式化"归 code。
+#   (b) "月份名 + 裸 2 位数字, 无 4 位年" 时 2 位数字到底是"年"还是"日" 的
+#       消歧 -- 本项目文件名惯例这个位置永远是年份 (从不编码"日"), 这是本
+#       项目的业务解读, dateutil 通用逻辑猜不到 (它会当"日"处理), 由 code
+#       兜底把 2 位数展开成 4 位年再喂给 dateutil 认月份名。
+# 双哨兵交叉验证 (_D1/_D2 相隔近 200 年): 同一段文本用两个天差地别的 default
+# 各解析一次, 年/月字段若两次结果一致, 说明是文本里真解出来的; 不一致则是
+# dateutil fuzzy 模式把无关词当噪声跳过后从 default 继承的, 不可信 (防止
+# "report26.pdf" 这种非月份词被误判成"1月", 月份被瞎猜)。
+_D1 = datetime.datetime(2094, 3, 3)
+_D2 = datetime.datetime(1904, 9, 9)
+_ALPHA_WORD_RE = re.compile(r"[A-Za-z]{3,9}")
+_YEAR4_RE = re.compile(r"20\d{2}")
+_BARE_WORD_YEAR2_RE = re.compile(r"([A-Za-z]{3,9})[\-_\s\.]*(\d{2})(?!\d)")
+_BARE_YEAR2_WORD_RE = re.compile(r"(?<!\d)(\d{2})[\-_\s\.]*([A-Za-z]{3,9})")
+
+
+def _month_from_word(word: str) -> Optional[int]:
+    """word 单独喂给 dateutil, 双哨兵交叉验证是否被认成月份名 (不含 day/year 语境)."""
+    try:
+        dt1 = _date_parser.parse(word, fuzzy=True, default=_D1)
+        dt2 = _date_parser.parse(word, fuzzy=True, default=_D2)
+    except (_DateParserError, ValueError, OverflowError, TypeError):
+        return None
+    if dt1.month != dt2.month:
+        return None
+    return dt1.month
 
 
 def _parse_ym_from_text(text: str) -> Optional[str]:
@@ -87,29 +117,36 @@ def _parse_ym_from_text(text: str) -> Optional[str]:
     m = re.search(r"(?<!\d)(20\d{2})[-_/]?(0[1-9]|1[0-2])(?!\d)", t)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
-    # 2) 月份名 + 年 (\b 边界不识别 _underscore, 用 (?:\b|_) 兼容 Stake 命名)
-    names = "|".join(list(_MONTHS.keys()) + list(_MONTHS_ABBR.keys()))
-    m = re.search(rf"(?:\b|_)({names})[\-_\s\.]*(20\d{{2}})", t)
-    if m:
-        mon = _MONTHS.get(m.group(1)) or _MONTHS_ABBR.get(m.group(1))
-        if mon:
-            return f"{m.group(2)}-{mon:02d}"
-    # 2b) 月份名 + 2 位年 (Stake: AccumulateReport_January26.pdf)
-    m = re.search(rf"(?:\b|_)({names})[\-_\s\.]*(\d{{2}})(?!\d)", t)
-    if m:
-        mon = _MONTHS.get(m.group(1)) or _MONTHS_ABBR.get(m.group(1))
-        if mon:
-            yr2 = int(m.group(2))
-            # 只接受 19..30 范围内的 2 位年 (2019-2030 有效)
-            if 19 <= yr2 <= 30:
-                return f"20{yr2:02d}-{mon:02d}"
-    # 3) 年 + 月份名 (同样兼容 _)
-    m = re.search(rf"(20\d{{2}})[\-_\s\.]*({names})(?:\b|_)", t)
-    if m:
-        mon = _MONTHS.get(m.group(2)) or _MONTHS_ABBR.get(m.group(2))
-        if mon:
-            return f"{m.group(1)}-{mon:02d}"
-    return None
+
+    candidate = re.sub(r"[_.]+", " ", text)
+    if not _ALPHA_WORD_RE.search(candidate):
+        return None
+
+    # 2) 含 4 位年: 整段交给 dateutil, 双哨兵确认年/月都是文本里真解出来的
+    if _YEAR4_RE.search(candidate):
+        try:
+            dt1 = _date_parser.parse(candidate, fuzzy=True, default=_D1)
+            dt2 = _date_parser.parse(candidate, fuzzy=True, default=_D2)
+        except (_DateParserError, ValueError, OverflowError, TypeError):
+            return None
+        if dt1.year == dt2.year and dt1.month == dt2.month:
+            return f"{dt1.year:04d}-{dt1.month:02d}"
+        return None
+
+    # 2b) 只有裸 2 位数字, 无 4 位年 -- 先确认相邻的字母段真是月份名, 再把 2 位
+    # 数字当年份展开 (不是"日")。语序不定, 两种顺序都试。
+    m2 = _BARE_WORD_YEAR2_RE.search(candidate) or _BARE_YEAR2_WORD_RE.search(candidate)
+    if not m2:
+        return None
+    g1, g2 = m2.group(1), m2.group(2)
+    word, yr2s = (g1, g2) if g1.isalpha() else (g2, g1)
+    mon = _month_from_word(word)
+    if mon is None:
+        return None
+    yr2 = int(yr2s)
+    if not (19 <= yr2 <= 30):  # 只接受 19..30 范围内的 2 位年 (2019-2030 有效, 与原规则一致)
+        return None
+    return f"20{yr2:02d}-{mon:02d}"
 
 
 def _valid_ym(ym: Optional[str]) -> bool:

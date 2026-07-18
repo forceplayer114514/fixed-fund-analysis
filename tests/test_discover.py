@@ -54,6 +54,36 @@ class TestParseYmFromText:
         assert _parse_ym_from_text("AccumulateReport_January26.pdf") == "2026-01"
         assert _parse_ym_from_text("Accumulate_report_March26.pdf") == "2026-03"
 
+    def test_sept_4letter_abbreviation(self):
+        """回归 (2026-07 Stake 9月幻影缺口事故): 文件名 AccumulateReport_Sept_2025.pdf
+        用 4 字母 "Sept" (September 唯一常见的非 3 字母缩写), 旧版 _MONTHS_ABBR 只有
+        3 字母 "sep", 正则被多出的 "t" 卡住整体失配, ym 解析静默返回 None, 该月 PDF
+        被 _extract_pdf_links_by_regex 悄悄丢弃 (不进 confirmed_gaps, 看起来像
+        "文档没有这个月")。"""
+        assert _parse_ym_from_text("AccumulateReport_Sept_2025.pdf") == "2025-09"
+        assert _parse_ym_from_text("Sept 2025") == "2025-09"
+        assert _parse_ym_from_text("Accumulate_Sept25.pdf") == "2025-09"
+
+    def test_glued_month_abbr_4digit_year_no_separator(self):
+        """月份缩写与 4 位年之间无分隔符也能认 (dateutil fuzzy 容忍)."""
+        assert _parse_ym_from_text("Jan2025.pdf") == "2025-01"
+
+    def test_full_month_name_underscore_separated(self):
+        assert _parse_ym_from_text("AccumulateReport_November_2025.pdf") == "2025-11"
+
+    def test_noise_word_with_bare_2digit_number_not_misread_as_month(self):
+        """回归: dateutil fuzzy 模式碰到非月份词 + 裸2位数字, 不能瞎猜成"1月"
+        (report26.pdf 这类 -- "report" 不是月份名, 26 不该被当年份用)。"""
+        assert _parse_ym_from_text("weekly_report26.pdf") is None
+
+    def test_hash_like_filename_segment_no_false_positive(self):
+        assert _parse_ym_from_text("blte98f61d722cde430.pdf") is None
+
+    def test_bare_ambiguous_digits_no_month_word_rejected(self):
+        """纯数字无字母语境 (无法判断哪个是月哪个是年) -- 拒, 不瞎猜。"""
+        assert _parse_ym_from_text("1 2025") is None
+        assert _parse_ym_from_text("2025 1") is None
+
     def test_two_digit_year_out_of_range_rejected(self):
         # 只接受 19..30 (2019-2030); 老年份不该被 2-digit 匹配
         assert _parse_ym_from_text("something_January99.pdf") is None
