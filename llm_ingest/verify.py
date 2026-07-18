@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 VERIFY_TOL = 0.005  # 十进制 0.5% 容差 (rolling 复利与 monthly 复算比对)
+ROLLING_1MO_SELFCHECK_TOL = 0.001  # 十进制 0.1 个百分点 (rolling["1mo"] 应等于 net_return)
 
 
 # ---------- 归一化 (PyMuPDF 空格怪癖兜底) ----------
@@ -122,6 +123,14 @@ def check_rolling(
     则 (1+net_return) * prod(1+m_prev) - 1 vs rolling_decimal[Wmo], abs diff < tol.
 
     rolling 缺失 (全 None / 空 dict) → pass, windows_verified=0 (rolling 是可选校验).
+
+    自洽性预检 (Stake 2026-07 教训): rolling_decimal["1mo"] 与 net_return 理应是
+    同一个数 (同一份月报里"当月收益"重复报了两遍)。若报了 1mo 且与 net_return
+    差距明显超出四舍五入误差, 说明 LLM 把整批 rolling 标签错位了一格 (常见成因:
+    月报表格首列 "1 month" 单元格提取缺失, LLM 把 3mo/6mo/12mo 的真实值错标成
+    1mo/3mo/6mo)。数值本身没错(都是文档里真实存在的数), 只是标签错位, 但拿
+    错位数据去跟 net_return 复利比对必然报假 mismatch。此时整批 rolling 弃用,
+    不参与闸2 (net_return 已由 quote/field_type/antifab 三闸独立把关, 不受影响)。
     """
     if net_return is None:
         return RollingCheck(True, "no_net_return", 0)  # not_found 时不校验
@@ -134,6 +143,14 @@ def check_rolling(
                 reported[w] = v
     if not reported:
         return RollingCheck(True, "no_rolling_reported", 0)
+
+    one_mo = rolling_decimal.get("1mo") if isinstance(rolling_decimal, dict) else None
+    if one_mo is not None and abs(one_mo - net_return) > ROLLING_1MO_SELFCHECK_TOL:
+        return RollingCheck(
+            True,
+            f"rolling_labels_shifted_discarded(1mo={one_mo:.4f}_vs_net_return={net_return:.4f})",
+            0,
+        )
 
     verified = 0
     for w, roll_dec in reported.items():

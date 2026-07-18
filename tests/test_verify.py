@@ -169,6 +169,43 @@ def test_rolling_not_found_passes():
     assert r.passed
 
 
+def test_rolling_1mo_shifted_labels_discarded_not_rejected():
+    """Stake 2026-07 教训回归: rolling 标签整体错位一格 (表格首列缺失导致
+    LLM 把 3mo/6mo 的真实值错标成 1mo/3mo), 数值本身没错但跟 net_return 对不上
+    -- 应整批弃用 rolling, 不拿错位数据去比对本来对的 net_return, 也不阻塞入库。
+
+    真实案例: 2025-05 net_return=0.66%, rolling_text 报 {"1mo":"0.82%","3mo":"2.98%",
+    "6mo":"2.98%"} (实为表格 3mo/6mo/inception 列错标)。0.82% 是真实的 3mo 值,
+    跟复利算出的 implied 3mo(0.83%) 其实对得上, 但因为标签错位读的是 rolling["3mo"]
+    (装的是 6mo 的 2.98%), 会被判 mismatch -- 自洽预检应先拦下, 不让它走到这步。
+    """
+    history = {"2025-04": 0.0068, "2025-03": -0.0051}
+    r = check_rolling(0.0066, "2025-05", history,
+                      {"1mo": 0.0082, "3mo": 0.0298, "6mo": 0.0298})
+    assert r.passed
+    assert r.windows_verified == 0
+    assert "rolling_labels_shifted_discarded" in r.reason
+
+
+def test_rolling_1mo_matches_net_return_proceeds_to_real_check():
+    """1mo 与 net_return 对得上 (标签没错位) 时, 3mo/6mo 真实校验照常跑, 行为不变。"""
+    history = {"2026-04": 0.0060, "2026-03": 0.0059}
+    r = check_rolling(0.0065, "2026-05", history,
+                      {"1mo": 0.0065, "3mo": 0.0185})
+    assert r.passed
+    assert r.windows_verified == 1
+
+
+def test_rolling_1mo_matches_but_3mo_genuinely_wrong_still_caught():
+    """1mo 没错位, 但 3mo 数值本身真的对不上 (如字段类型错) -- 自洽预检不该
+    误伤真实的字段错误检测, 该拦的还得拦。"""
+    history = {"2026-04": 0.0060, "2026-03": 0.0059}
+    r = check_rolling(0.018, "2026-05", history,
+                      {"1mo": 0.018, "3mo": 0.0185})
+    assert not r.passed
+    assert "mismatch_3mo" in r.reason
+
+
 # ---------- _prev_yms ----------
 
 def test_prev_yms_wraps_year():
