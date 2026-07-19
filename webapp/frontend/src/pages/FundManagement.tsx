@@ -47,6 +47,10 @@ export default function FundManagement() {
   const [returns, setReturns] = useState<MonthlyReturnRow[]>([])
   const [returnsLoading, setReturnsLoading] = useState(false)
 
+  const [showRbaHistory, setShowRbaHistory] = useState(false)
+  const [rbaHistory, setRbaHistory] = useState<{ start_month: string; end_month: string; rate: number }[]>([])
+  const [rbaHistoryLoading, setRbaHistoryLoading] = useState(false)
+
   useEffect(() => {
     fetchFunds()
   }, [])
@@ -158,6 +162,28 @@ export default function FundManagement() {
     setReturnsLoading(false)
   }
 
+  const openRbaHistory = async () => {
+    setShowRbaHistory(true)
+    setRbaHistoryLoading(true)
+    try {
+      const periods = await api.getRbaHistory()
+      setRbaHistory(periods)
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-alert
+      alert((e as Error).message)
+    }
+    setRbaHistoryLoading(false)
+  }
+
+  const formatMonthRange = (start: string, end: string): string => {
+    const [sy, sm] = start.split('-')
+    if (start === end) return `${sy}年${Number(sm)}月`
+    const [ey, em] = end.split('-')
+    return sy === ey
+      ? `${sy}年${Number(sm)}-${Number(em)}月`
+      : `${sy}年${Number(sm)}月 ~ ${ey}年${Number(em)}月`
+  }
+
   const handleApprove = async (id: number) => {
     const resp = await api.approvePending(id)
     // 权威源已覆盖 (新 action=skipped_authoritative_covered; 兼容旧 action=skipped_l3_covered)
@@ -225,12 +251,20 @@ export default function FundManagement() {
     <div>
       <div className="flex justify-between items-center mb-5">
         <h1 className="text-xl font-semibold">基金管理</h1>
-        <button
-          className="text-sm bg-[#1a1a2e] text-white px-4 py-2 rounded-lg hover:bg-[#2a2a4e]"
-          onClick={() => setShowAdd(true)}
-        >
-          + 添加基金
-        </button>
+        <div className="flex gap-2">
+          <button
+            className="text-sm border border-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50"
+            onClick={openRbaHistory}
+          >
+            查看 RBA 利率历史
+          </button>
+          <button
+            className="text-sm bg-[#1a1a2e] text-white px-4 py-2 rounded-lg hover:bg-[#2a2a4e]"
+            onClick={() => setShowAdd(true)}
+          >
+            + 添加基金
+          </button>
+        </div>
       </div>
 
       {fundsLoading && <div className="text-gray-400">加载中...</div>}
@@ -558,6 +592,46 @@ export default function FundManagement() {
                       <td className="py-1.5 text-gray-700">{r.date.slice(0, 7)}</td>
                       <td className={`py-1.5 text-right ${r.net_return < 0 ? 'text-red-600' : 'text-gray-700'}`}>
                         {(r.net_return * 100).toFixed(4)}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* RBA 历史利率面板 (按连续相同利率合并区间展示, 不逐月列) */}
+      {showRbaHistory && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-base font-medium">RBA 现金利率历史</h2>
+              <button className="text-gray-400 text-xl" onClick={() => setShowRbaHistory(false)}>
+                &times;
+              </button>
+            </div>
+            {rbaHistoryLoading && <div className="text-gray-400 text-sm">加载中…</div>}
+            {!rbaHistoryLoading && rbaHistory.length === 0 && (
+              <div className="text-gray-400 text-sm py-6 text-center">暂无数据</div>
+            )}
+            {!rbaHistoryLoading && rbaHistory.length > 0 && (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    <th className="text-left py-2 text-gray-500 font-medium">期间</th>
+                    <th className="text-right py-2 text-gray-500 font-medium">目标利率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...rbaHistory].reverse().map(p => (
+                    <tr key={p.start_month} className="border-b border-gray-50">
+                      <td className="py-1.5 text-gray-700">
+                        {formatMonthRange(p.start_month, p.end_month)}
+                      </td>
+                      <td className="py-1.5 text-right text-gray-700">
+                        {(p.rate * 100).toFixed(2)}%
                       </td>
                     </tr>
                   ))}

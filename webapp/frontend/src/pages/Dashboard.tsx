@@ -117,7 +117,7 @@ export default function Dashboard() {
           <span className="text-gray-400 ml-2">（{m.history_months} 个月历史）</span>
         </div>
       ) : (
-        <div className="text-sm text-gray-400 mb-3">点击曲线锚定基金查看详情</div>
+        <div className="text-sm text-gray-400 mb-3">点击曲线或下方列表行锚定基金查看详情</div>
       )}
 
       {m ? (
@@ -153,7 +153,7 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="bg-gray-50 border border-dashed border-gray-200 rounded-lg p-6 mb-6 text-center text-sm text-gray-400">
-          点击下方曲线锚定基金，查看其完整历史指标卡片与月度超额热力图
+          点击下方曲线或指标对比列表中的一行锚定基金，查看其完整历史指标卡片与月度超额热力图
         </div>
       )}
 

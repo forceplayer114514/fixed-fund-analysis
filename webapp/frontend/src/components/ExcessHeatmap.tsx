@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { monthlyExcess, monthlyBench, type FundReturns } from '../lib/rebase'
+import { monthlyExcess, monthlyBench, computeAxisMonths, percentile, type FundReturns } from '../lib/rebase'
 import { buildShortCodeMap } from '../lib/fundCodes'
 
 /** 月度超额热力图（PDD 2.6）：仅锚定时渲染于 CompareTable 下方。
@@ -9,6 +9,7 @@ export default function ExcessHeatmap() {
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const anchorFundId = useStore(s => s.anchorFundId)
   const smoothingMode = useStore(s => s.smoothingMode)
+  const selectedFundIds = useStore(s => s.selectedFundIds)
   const funds = useStore(s => s.funds)
   const codeMap = useMemo(() => buildShortCodeMap(funds), [funds])
 
@@ -17,25 +18,41 @@ export default function ExcessHeatmap() {
     const anchorSeries = timeSeriesData.series.find(s => s.fund_id === anchorFundId)
     if (!anchorSeries) return null
     const isOrig = smoothingMode === 'original'
-    const fund: FundReturns = {
-      fund_id: anchorSeries.fund_id, fund_name: anchorSeries.fund_name,
-      dates: anchorSeries.dates,
-      returns: isOrig ? anchorSeries.returns : (anchorSeries.unsm_returns ?? anchorSeries.returns),
-    }
+    const toFundReturns = (s: typeof anchorSeries): FundReturns => ({
+      fund_id: s.fund_id, fund_name: s.fund_name, dates: s.dates,
+      returns: isOrig ? s.returns : (s.unsm_returns ?? s.returns),
+    })
+    const fund = toFundReturns(anchorSeries)
+
+    // 锚定基金自己的起讫月份（而非所有已选基金月份并集）——避免其他更早/更长
+    // 历史的基金把热力图拖出一堆跟锚定基金毫无关系的空白灰色年份行。
+    const allSelected = timeSeriesData.series
+      .filter(s => selectedFundIds.includes(s.fund_id))
+      .map(toFundReturns)
+    const axisMonths = new Set(
+      computeAxisMonths(timeSeriesData.months, allSelected, 'full', anchorFundId),
+    )
+
     const me = monthlyExcess(fund, timeSeriesData.months, timeSeriesData.rba)
+      .filter(p => axisMonths.has(p.month))
     const years = [...new Set(me.map(p => p.year))].sort((a, b) => b - a) // 倒序，最新在上
     const byKey = new Map<string, typeof me[number]>()
     me.forEach(p => byKey.set(`${p.year}-${p.monthNum}`, p))
-    const m = Math.max(
-      ...me.filter(p => p.excess != null).map(p => Math.abs(p.excess as number)), 0.0001,
-    )
+
+    const absVals = me
+      .filter(p => p.excess != null)
+      .map(p => Math.abs(p.excess as number))
+      .sort((a, b) => a - b)
+    const m = Math.max(percentile(absVals, 0.9), 0.0001)
+    // 蓝(正超额)/红(负超额)——红绿色盲验证过的发散色对(blue #2a78d6 / red #e34948,
+    // CVD ΔE 21.6 protan，远超≥8门槛)，替换掉原来红绿色对(色盲下几乎无法区分)。
     const cellColor = (e: number | null): string => {
       if (e == null) return '#f0f0f0' // 缺月灰格（禁插值填色）
-      const a = Math.min(Math.abs(e) / m, 1)
-      return e >= 0 ? `rgba(39,174,96,${a})` : `rgba(192,57,43,${a})`
+      const a = Math.min(Math.abs(e) / m, 1) // 超过 90 分位裁剪到满色，不再无限稀释
+      return e >= 0 ? `rgba(42,120,214,${a})` : `rgba(227,73,72,${a})`
     }
     return { years, byKey, cellColor }
-  }, [timeSeriesData, anchorFundId, smoothingMode])
+  }, [timeSeriesData, anchorFundId, smoothingMode, selectedFundIds])
 
   if (!rows || !anchorFundId) return null
   const months = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -83,7 +100,7 @@ export default function ExcessHeatmap() {
         </table>
       </div>
       <div className="text-xs text-gray-400 mt-2">
-        色标：绿=正超额、红=负超额、灰=无数据；单元格 hover 见原始月收益/基准/超额。兼数据质检视图。
+        色标：蓝=正超额、红=负超额、灰=无数据（红绿色盲友好配色）；深浅按该基金 90 分位裁剪（危机月不独占满色）；单元格 hover 见原始月收益/基准/超额。兼数据质检视图。
       </div>
     </div>
   )

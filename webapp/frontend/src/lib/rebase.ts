@@ -63,6 +63,18 @@ export function monthlyBench(rbaAnnual: number): number {
   return rbaAnnual / 12.0
 }
 
+/** 分位数（线性插值，输入须升序）。热力图用来裁剪色标：避免个别危机月
+ *  （如 2008/2020 单月超额 ±10%+）把色标拉到自己独占满色，其余正常月份
+ *  全被稀释成看不出深浅的淡色。 */
+export function percentile(sortedAsc: number[], p: number): number {
+  if (sortedAsc.length === 0) return 0
+  const idx = p * (sortedAsc.length - 1)
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) return sortedAsc[lo]
+  return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (idx - lo)
+}
+
 /** 由月收益序列自建 NAV：nav[i] = base × ∏_{0..i}(1+r_s)。概念基点 base 位于 dates[0] 之前。 */
 export function buildNav(returns: number[], base = 1.0): number[] {
   const nav: number[] = []
@@ -81,6 +93,32 @@ export function monthBefore(ym: string): string {
   return `${y}-${String(m - 1).padStart(2, '0')}`
 }
 
+/**
+ * 给 axisMonths 补上每条线自己需要、轴上还没有的"起点前一月"基点位置（配合
+ * alignedNav 的 baseMonth 恒等点用）。锚定态：tFund<=tA 的基金被裁剪对齐到 tA
+ * （见 rebaseAnchored"早于或等于 A"分支），基点位置统一用 monthBefore(max(tA,tFund))；
+ * tFund>tA 的后发基金（拼接或降级）用自己的 monthBefore(tFund)——两种情况下
+ * drawdownSeries 用的 rebasePlain 与 NAV 用的 rebaseAnchored 需要的都是同一个位置，
+ * 一次补齐两边共用（NavChart 用同一份 axisMonths 喂两者）。
+ * 非锚定态（A/B）：每支基金各自 monthBefore(own dates[0])。
+ */
+export function withLeadingBaseMonths(
+  axisMonths: string[], funds: FundReturns[], anchorFundId: string | null,
+): string[] {
+  const tA = anchorFundId
+    ? funds.find(f => f.fund_id === anchorFundId)?.dates[0].slice(0, 7) ?? null
+    : null
+  const needed = funds.map(f => {
+    const tFund = f.dates[0].slice(0, 7)
+    const ref = tA && tFund <= tA ? tA : tFund
+    return monthBefore(ref)
+  })
+  const have = new Set(axisMonths)
+  const missing = [...new Set(needed)].filter(m => !have.has(m))
+  if (missing.length === 0) return axisMonths
+  return [...axisMonths, ...missing].sort()
+}
+
 function returnsByMonth(fund: FundReturns): Map<string, number> {
   const m = new Map<string, number>()
   fund.dates.forEach((d, i) => m.set(d.slice(0, 7), fund.returns[i]))
@@ -88,7 +126,12 @@ function returnsByMonth(fund: FundReturns): Map<string, number> {
 }
 
 /**
- * 在 axisMonths 上从 startMonth 起以 base 复利构建 nav；startMonth 之前与基金无数据月为 null。
+ * 在 axisMonths 上从 startMonth 起以 base 复利构建 nav；startMonth 之前与基金无数据月为 null，
+ * 除了 startMonth 的前一月（monthBefore(startMonth)）——若轴上有这一格，画出 base 本身。
+ *
+ * 这不是编造 NAV：回报的定义就是"上月底到本月底"的变化量，上月底=base 是数学上必然
+ * 成立的恒等参照点，与基金那天是否有可验证的真实 NAV 观测无关（权威机构 Growth of
+ * $X / MSCI-Bloomberg 总回报指数重建同样惯例：N 个月度回报对应 N+1 个指数点）。
  * 基金序列已由摄取层保证无内部缺口（Phase 1 零容忍），故 null 仅出现在首月前/末月后。
  */
 function alignedNav(fund: FundReturns, axisMonths: string[], base: number,
@@ -97,7 +140,14 @@ function alignedNav(fund: FundReturns, axisMonths: string[], base: number,
   const nav: (number | null)[] = []
   let v: number | null = null
   let started = false
+  const baseMonth = monthBefore(startMonth)
   for (const m of axisMonths) {
+    if (m === baseMonth) {
+      v = base
+      started = true
+      nav.push(v)
+      continue
+    }
     if (m < startMonth) {
       nav.push(null)
       continue

@@ -1,6 +1,8 @@
 """metrics 对比与时序路由。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -22,10 +24,13 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 
 def _recompute_for_slice(session: Session, fund_id: str, period: str,
-                         common_months=None) -> dict:
+                         common_months=None, min_month: Optional[str] = None) -> dict:
     """从 monthly_returns 切片后即时重算 5 维指标。
 
     含月份缺口零容忍检查（CLAUDE.md 第一条）：切片后序列若有缺口则拒绝计算。
+    min_month：锚定态窗口起点（YYYY-MM，锚定基金自身首月），在 period 切片之上
+    再按起点裁掉更早的月份，让指标窗口与图表 rebase 对齐（早于锚定基金起点的
+    历史在图上本就被裁剪显示，指标不应仍按该基金自己更早的历史计算）。
     """
     ts = get_returns(session, fund_id)
     if not ts:
@@ -33,6 +38,10 @@ def _recompute_for_slice(session: Session, fund_id: str, period: str,
     dates = [d["date"] for d in ts]
     returns = [d["net_return"] for d in ts]
     d_slice, r_slice = slice_by_period(dates, returns, period, common_months)
+    if min_month is not None:
+        kept = [(d, r) for d, r in zip(d_slice, r_slice) if d[:7] >= min_month]
+        d_slice = [d for d, _ in kept]
+        r_slice = [r for _, r in kept]
     if not d_slice:
         raise ValueError(f"基金 {fund_id} 在 period={period} 下无数据")
     # 数据缺口零容忍
@@ -52,8 +61,11 @@ def _recompute_for_slice(session: Session, fund_id: str, period: str,
 @router.get("/compare")
 def compare(fund_ids: str = Query(...),
             period: str = Query("full"),
+            start_month: Optional[str] = Query(
+                None, description="锚定态窗口起点 YYYY-MM（锚定基金自身首月），"
+                                   "指标随图表 rebase 对齐；传入时绕过 full 缓存快路径"),
             session: Session = Depends(get_db)):
-    """5 维指标对比。full 读 fund_metrics 缓存；3y/1y/common 切片即时重算。"""
+    """5 维指标对比。full 读 fund_metrics 缓存；3y/1y/common/start_month 切片即时重算。"""
     if period not in VALID_PERIODS:
         raise HTTPException(status_code=422, detail=f"period 须为 {VALID_PERIODS}")
     ids = [s.strip() for s in fund_ids.split(",") if s.strip()]
@@ -73,7 +85,12 @@ def compare(fund_ids: str = Query(...),
     excluded = []
     for fid in ids:
         try:
-            if period == "full":
+            if start_month is not None:
+                # 锚定态：指标窗口起点=锚定基金自身首月，与图表 rebase 同口径，
+                # 绕过 full 缓存快路径（缓存是该基金自己的全历史，不是锚定窗口）。
+                m_dict = _recompute_for_slice(session, fid, period, common_months,
+                                              min_month=start_month)
+            elif period == "full":
                 m = session.get(FundMetric, fid)
                 # 缓存新鲜度校验：date_period 必须等于最新 monthly_return 月份，
                 # 否则 skills 摄取新月份后缓存过期，回退即时重算并写回（自愈）。

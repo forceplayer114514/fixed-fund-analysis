@@ -28,9 +28,10 @@ export const api = {
   getReturns: (fundId: string) =>
     request<import('../types').MonthlyReturnRow[]>(`/api/funds/${fundId}/returns`),
 
-  compare: (fundIds: string[], period: string) =>
+  compare: (fundIds: string[], period: string, startMonth?: string | null) =>
     request<import('../types').CompareResponse>(
       `/api/metrics/compare?fund_ids=${fundIds.join(',')}&period=${period}`
+      + (startMonth ? `&start_month=${startMonth}` : '')
     ),
 
   timeSeries: (fundIds: string[], period: string) =>
@@ -39,6 +40,9 @@ export const api = {
     ),
 
   listAnomalies: () => request<import('../types').Anomaly[]>('/api/anomalies'),
+
+  getRbaHistory: () =>
+    request<{ start_month: string; end_month: string; rate: number }[]>('/api/rba/history'),
 
   patchMonthlyReturn: (id: number, data: import('../types').MonthlyReturnPatch) =>
     request<Record<string, unknown>>(`/api/monthly-returns/${id}`, {

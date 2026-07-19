@@ -36,6 +36,8 @@ export default function CompareTable() {
   const funds = useStore(s => s.funds)
   const period = useStore(s => s.period)
   const anchorFundId = useStore(s => s.anchorFundId)
+  const timeSeriesData = useStore(s => s.timeSeriesData)
+  const setAnchor = useStore(s => s.setAnchor)
   const fundNameMap = useMemo(() => {
     const m = new Map<string, string>()
     funds.forEach(f => m.set(f.fund_id, f.fund_name))
@@ -92,7 +94,12 @@ export default function CompareTable() {
 
   // F5：窗口说明（共同区间/1y/3y 显示起止+n；full 或锚定显示对应口径），消除满屏⚠困惑
   const windowNote = useMemo(() => {
-    if (anchorFundId) return '锚定模式 · 锚定基金完整历史'
+    if (anchorFundId) {
+      // 指标窗口起点=锚定基金自身首月（与图表 rebase 同口径），各基金终点各自最新月份
+      const startMonth = timeSeriesData?.series
+        .find(s => s.fund_id === anchorFundId)?.dates[0].slice(0, 7)
+      return startMonth ? `锚定窗口: ${startMonth} 起 · 各基金至自身最新月份` : '锚定模式'
+    }
     const items = compareData?.funds ?? []
     if (period === 'full' || items.length === 0) return '全部区间'
     const endYM = items[0].date_period
@@ -104,7 +111,7 @@ export default function CompareTable() {
     const sm = (startIdx % 12) + 1
     const startYM = `${sy}-${String(sm).padStart(2, '0')}`
     return `当前窗口: ${startYM} 至 ${endYM} (n=${n})`
-  }, [period, anchorFundId, compareData])
+  }, [period, anchorFundId, compareData, timeSeriesData])
 
   if (rows.length === 0) return null
 
@@ -129,9 +136,19 @@ export default function CompareTable() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(r => (
-              <tr key={r.fund_id} className="border-b border-gray-50 hover:bg-gray-50">
+            {rows.map(r => {
+              const isAnchor = anchorFundId === r.fund_id
+              return (
+              <tr
+                key={r.fund_id}
+                onClick={() => setAnchor(r.fund_id)}
+                title={isAnchor ? '再次点击取消锚定' : '点击锚定该基金（同点击曲线）'}
+                className={`border-b border-gray-50 cursor-pointer ${
+                  isAnchor ? 'bg-blue-50 hover:bg-blue-100' : 'hover:bg-gray-50'
+                }`}
+              >
                 <td className="py-2.5 px-3 font-medium max-w-xs truncate" title={fundNameMap.get(r.fund_id) ?? r.fund_id}>
+                  {isAnchor && <span className="text-blue-500 mr-1">●</span>}
                   {fundNameMap.get(r.fund_id) ?? r.fund_id}
                   <span className="ml-1.5 text-xs text-gray-400 font-normal">{codeMap.get(r.fund_id)}</span>
                 </td>
@@ -154,10 +171,12 @@ export default function CompareTable() {
                 <td className="py-2.5 px-3">{r.run}</td>
                 <td className="py-2.5 px-3">{r.vol}</td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>
+      <div className="text-xs text-gray-400 mt-2">点击行锚定该基金（与点击曲线等效）· 再次点击同一行取消锚定</div>
     </div>
   )
 }

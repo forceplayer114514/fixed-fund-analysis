@@ -13,7 +13,8 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { useStore } from '../store/useStore'
 import type { FundReturns } from '../lib/rebase'
 import {
-  rebasePlain, rebaseAnchored, drawdownSeries, computeAxisMonths, type RebasedSeries,
+  rebasePlain, rebaseAnchored, drawdownSeries, computeAxisMonths, withLeadingBaseMonths,
+  type RebasedSeries,
 } from '../lib/rebase'
 import { buildShortCodeMap } from '../lib/fundCodes'
 import RollingExcessChart from './RollingExcessChart'
@@ -55,7 +56,11 @@ export default function NavChart() {
   const option = useMemo(() => {
     if (!timeSeriesData || funds.length === 0) return null
 
-    const axisMonths = computeAxisMonths(timeSeriesData.months, funds, period, anchorFundId)
+    // 每支线各自补一个"起点前一月"恒等基点(=1.0)，权威机构 Growth of $X / 总回报
+    // 指数重建惯例：N 个月度回报对应 N+1 个指数点，不是编造 NAV(rebase.ts::alignedNav)。
+    const axisMonths = withLeadingBaseMonths(
+      computeAxisMonths(timeSeriesData.months, funds, period, anchorFundId), funds, anchorFundId,
+    )
 
     // NAV rebase：A/B 用 plain，C 用 anchored 拼接
     const rebased: RebasedSeries[] = anchorFundId
@@ -85,10 +90,11 @@ export default function NavChart() {
       symbol: 'none',
       smooth: false,
       lineStyle: {
-        width: inC ? (r.isAnchor ? 2.5 : 1.5) : 1.5,
+        width: 1.5,
         opacity: inC ? (r.isAnchor ? 1 : 0.35) : 1,
+        color: r.isAnchor ? '#000' : undefined,
       },
-      itemStyle: { color: COLORS[i % COLORS.length] },
+      itemStyle: { color: r.isAnchor ? '#000' : COLORS[i % COLORS.length] },
       z: r.isAnchor ? 10 : 2,
       // F2：NAV y 轴 1.0 起点基准线（A/B/C 均显示，参考线非数据修饰；silent 不吞 click）
       markLine: i === 0 ? {
@@ -110,8 +116,12 @@ export default function NavChart() {
       connectNulls: false,
       symbol: 'none',
       smooth: false,
-      lineStyle: { width: 1, opacity: inC ? (r.isAnchor ? 1 : 0.35) : 0.85 },
-      itemStyle: { color: COLORS[i % COLORS.length] },
+      lineStyle: {
+        width: 1,
+        opacity: inC ? (r.isAnchor ? 1 : 0.35) : 0.85,
+        color: r.isAnchor ? '#000' : undefined,
+      },
+      itemStyle: { color: r.isAnchor ? '#000' : COLORS[i % COLORS.length] },
       areaStyle: { opacity: 0.12 },
       z: r.isAnchor ? 10 : 2,
     }))
@@ -128,7 +138,7 @@ export default function NavChart() {
         itemStyle: { color: 'transparent', borderColor: '#555', borderWidth: 1.5 },
         tooltip: {
           formatter: () =>
-            `${codeMap.get(r.fund_id) ?? r.fund_name}：自 ${r.splicePoint!.month} 起加入对比，承接锚定基金上月累计值`,
+            `${codeMap.get(r.fund_id) ?? r.fund_name}：拼接基点，等于锚定基金 ${r.splicePoint!.month} 累计值，次月起为该基金自身收益`,
         },
         z: 20,
       }))

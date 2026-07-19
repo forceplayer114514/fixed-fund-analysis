@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.crud import get_returns, resolve_rf_rates, replace_anomalies, upsert_metrics
 from app.calculations import compute_all_metrics
 from app.anomaly import detect_anomalies
+from app.models import Fund
 
 
 def _find_month_gaps(dates: list[str]) -> list[str]:
@@ -85,3 +86,27 @@ def compute_and_store_metrics(
     upsert_metrics(session, fund_id, metrics)
 
     return metrics
+
+
+def recompute_all_funds(session: Session) -> dict:
+    """级联重算全部基金的 fund_metrics 缓存。
+
+    full 路径的缓存新鲜度校验（routers/metrics.py::compare）只比对 date_period
+    是否等于最新月度收益月份，不检测 rf_rates（RBA 利率）本身是否变过。RBA 数据
+    源更新（人工 /api/rba/refresh 或每日调度 run_rba_update）会改写
+    rba_cash_rates，但不会让已缓存的 fund_metrics 失效——旧缓存继续被 full 路径
+    读出，直到某个偶然触发即时重算的路径（如锚定态 start_month 切片）暴露出数值
+    不一致。这里在 RBA 更新之后统一重算一遍所有基金，消除这个缺口。
+
+    单基金失败（数据缺口等）跳过记入 failed，不拖垮其它基金。
+    """
+    fund_ids = [f.fund_id for f in session.query(Fund.fund_id).all()]
+    recomputed: list[str] = []
+    failed: list[dict] = []
+    for fid in fund_ids:
+        try:
+            compute_and_store_metrics(session, fid)
+            recomputed.append(fid)
+        except ValueError as e:
+            failed.append({"fund_id": fid, "reason": str(e)})
+    return {"recomputed": recomputed, "failed": failed}

@@ -3,7 +3,7 @@ import pytest
 
 from app.models import Fund, FundMetric, Anomaly, RbaCashRate
 from app.crud import create_fund, upsert_monthly_return
-from app.metrics_pipeline import compute_and_store_metrics, _find_month_gaps
+from app.metrics_pipeline import compute_and_store_metrics, _find_month_gaps, recompute_all_funds
 
 
 @pytest.mark.unit
@@ -139,3 +139,56 @@ def test_compute_and_store_metrics_gap_detection(db_session):
     assert "缺口" in msg
     # 报错后不应写入任何指标记录
     assert db_session.get(FundMetric, "f1") is None
+
+
+@pytest.mark.unit
+def test_recompute_all_funds_refreshes_stale_cache_after_rba_change(db_session):
+    """RBA 利率源变更后（如本次会话的官方源重写），旧 fund_metrics 缓存里的
+    orig_annualized_excess_return/information_ratio 是按旧 rf_rates 算的，不会
+    自动失效——full 路径的缓存新鲜度校验只比对 date_period（最新月份），不比对
+    rf_rates 是否变过。recompute_all_funds 补上这层级联重算。"""
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    for m in range(1, 7):
+        upsert_monthly_return(db_session, "f1", f"2025-{m:02d}-28", 0.01)
+        db_session.add(RbaCashRate(date_period=f"2025-{m:02d}", rate=0.03))
+    db_session.commit()
+
+    compute_and_store_metrics(db_session, "f1")
+    stale = db_session.get(FundMetric, "f1")
+    stale_excess = stale.orig_annualized_excess_return
+
+    # RBA 源"重写"：同一批月份改用明显不同的利率（模拟本次会话真实发生的场景）
+    for m in range(1, 7):
+        rate = db_session.get(RbaCashRate, f"2025-{m:02d}")
+        rate.rate = 0.06
+    db_session.commit()
+
+    result = recompute_all_funds(db_session)
+    assert result["recomputed"] == ["f1"]
+    assert result["failed"] == []
+
+    db_session.expire_all()
+    refreshed = db_session.get(FundMetric, "f1")
+    assert refreshed.orig_annualized_excess_return != pytest.approx(stale_excess)
+
+
+@pytest.mark.unit
+def test_recompute_all_funds_skips_gap_fund_without_failing_others(db_session):
+    """一支基金有月份缺口时跳过记入 failed，不拖垮其它基金的重算。"""
+    create_fund(db_session, fund_id="good", fund_name="Good Fund",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    for m in range(1, 4):
+        upsert_monthly_return(db_session, "good", f"2025-{m:02d}-28", 0.01)
+        db_session.add(RbaCashRate(date_period=f"2025-{m:02d}", rate=0.03))
+
+    create_fund(db_session, fund_id="gap", fund_name="Gap Fund",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    upsert_monthly_return(db_session, "gap", "2025-01-31", 0.01)
+    upsert_monthly_return(db_session, "gap", "2025-03-28", 0.01)  # 缺 2025-02
+    db_session.commit()
+
+    result = recompute_all_funds(db_session)
+    assert result["recomputed"] == ["good"]
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["fund_id"] == "gap"

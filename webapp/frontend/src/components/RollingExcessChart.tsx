@@ -47,6 +47,7 @@ export default function RollingExcessChart() {
         const idx = idxByMonth.get(m)
         return idx != null ? reFull[idx] : null
       })
+      const isAnchor = f.fund_id === anchorFundId
       return {
         id: `roll:${f.fund_id}`,
         name: short ? `${codeMap.get(f.fund_id) ?? f.fund_name}（历史不足12个月）` : (codeMap.get(f.fund_id) ?? f.fund_name),
@@ -55,8 +56,13 @@ export default function RollingExcessChart() {
         connectNulls: false,
         symbol: 'none',
         smooth: false,
-        lineStyle: { width: 1.5, opacity: short ? 0 : 1 },
-        itemStyle: { color: COLORS[i % COLORS.length] },
+        lineStyle: {
+          width: 1.5,
+          opacity: short ? 0 : (anchorFundId ? (isAnchor ? 1 : 0.35) : 1),
+          color: isAnchor ? '#000' : undefined,
+        },
+        itemStyle: { color: isAnchor ? '#000' : COLORS[i % COLORS.length] },
+        z: isAnchor ? 10 : 2,
         markLine: i === 0 ? {
           symbol: 'none',
           data: [{ yAxis: 0 }],

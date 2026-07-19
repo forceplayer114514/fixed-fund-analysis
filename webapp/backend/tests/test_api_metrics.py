@@ -62,6 +62,43 @@ def test_compare_common_aligns_multiple_funds(client, db_session):
 
 
 @pytest.mark.unit
+def test_compare_start_month_clips_earlier_history(client, db_session):
+    """锚定态：start_month 之前的历史被裁掉，指标随图表 rebase 窗口对齐。"""
+    data = [(f"2025-{m:02d}-28", 0.01) for m in range(1, 7)]  # 2025-01..2025-06
+    _seed_fund_with_data(client, db_session, "f1", "Fund One", data)
+    resp = client.get("/api/metrics/compare",
+                       params={"fund_ids": "f1", "period": "full", "start_month": "2025-03"})
+    assert resp.status_code == 200
+    body = resp.json()["funds"][0]
+    assert body["history_months"] == 4  # 03,04,05,06
+    assert body["date_period"] == "2025-06"
+
+
+@pytest.mark.unit
+def test_compare_start_month_no_effect_when_fund_starts_later(client, db_session):
+    """后发（锚定基金起点之后才有数据）的基金不受 start_month 影响，等同其自身全历史。"""
+    data = [(f"2025-{m:02d}-28", 0.01) for m in range(4, 7)]  # 2025-04..2025-06
+    _seed_fund_with_data(client, db_session, "f2", "Fund Two", data)
+    resp = client.get("/api/metrics/compare",
+                       params={"fund_ids": "f2", "period": "full", "start_month": "2025-01"})
+    assert resp.status_code == 200
+    body = resp.json()["funds"][0]
+    assert body["history_months"] == 3
+
+
+@pytest.mark.unit
+def test_compare_start_month_excludes_gap_inside_window(client, db_session):
+    """裁剪窗口内仍有月份缺口时按数据缺口零容忍规则排除该基金（CLAUDE.md 第一条）。"""
+    _seed_fund_with_gap(client, db_session, "f2", "Gap Fund")  # 缺 2026-02
+    resp = client.get("/api/metrics/compare",
+                       params={"fund_ids": "f2", "period": "full", "start_month": "2026-01"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["funds"] == []
+    assert body["excluded"][0]["fund_id"] == "f2"
+
+
+@pytest.mark.unit
 def test_compare_unknown_fund_returns_404(client):
     resp = client.get("/api/metrics/compare", params={"fund_ids": "ghost", "period": "full"})
     assert resp.status_code == 404

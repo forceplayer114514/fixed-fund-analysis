@@ -92,16 +92,21 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   fetchCompare: async () => {
-    const { selectedFundIds, period, anchorFundId } = get()
+    const { selectedFundIds, period, anchorFundId, timeSeriesData } = get()
     if (selectedFundIds.length === 0) {
       set({ compareData: null, compareError: null })
       return
     }
     // 修正A：锚定模式下 compare 用 full（卡片/表格/图表同口径=锚定完整历史）
     const effPeriod = anchorFundId ? 'full' : period
+    // 指标窗口随图表 rebase 对齐：锚定基金自身首月之前的历史，图上已裁剪显示，
+    // 指标（年化收益/超额/IR/回撤/波动率）也不应再用其它基金自己更早的历史算。
+    const startMonth = anchorFundId
+      ? (timeSeriesData?.series.find(s => s.fund_id === anchorFundId)?.dates[0].slice(0, 7) ?? null)
+      : null
     set({ compareLoading: true, compareError: null })
     try {
-      const data = await api.compare(selectedFundIds, effPeriod)
+      const data = await api.compare(selectedFundIds, effPeriod, startMonth)
       set({ compareData: data, compareLoading: false })
     } catch (e: unknown) {
       set({ compareLoading: false, compareError: (e as Error).message, compareData: null })
