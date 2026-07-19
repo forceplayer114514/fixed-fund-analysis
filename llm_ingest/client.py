@@ -203,6 +203,18 @@ _INLINE_SRC = re.compile(
 )
 _GROUNDING_HOST = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
 
+# 实测发现 (2026-07-19 sub2api web_search 兜底路径量化测试, 15次调用4次命中):
+# Gemini 有时把 grounding markdown link 的 label 写成跳板域名本身
+#   [vertexaisearch.cloud.google.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+# 而不是目标网站域名。label 形状上跟真域名一样能过 _LABEL_DOMAIN_RE/_MD_LINK
+# 的域名正则, 导致跳板域名被当成"搜到的结果"塞进 sources —— 这次调用其实
+# 什么真实网站都没搜到, 但 len(sources)>0 会被误判成触发成功。
+_GROUNDING_REDIRECT_LABEL = "vertexaisearch.cloud.google.com"
+
+
+def _is_grounding_redirect_label(label: str) -> bool:
+    return label == _GROUNDING_REDIRECT_LABEL or label.endswith("." + _GROUNDING_REDIRECT_LABEL)
+
 
 def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
     """从 sub2api 返回文本里抠 grounding sources + queries.
@@ -219,6 +231,8 @@ def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
     for m in _SRC_LINE.finditer(text):
         label = m.group(1).strip().lower()
         redirect_url = m.group(2).strip()
+        if _is_grounding_redirect_label(label):
+            continue
         if _LABEL_DOMAIN_RE.match(label):
             real = f"https://{label}"
         else:
@@ -229,6 +243,8 @@ def _parse_grounding(text: str) -> "tuple[List[str], List[str]]":
     # (redirect_url 走不通; label 已被正则强制为纯域名, 无幻觉风险)
     for m in _MD_LINK.finditer(text):
         host = m.group(1).strip().lower()
+        if _is_grounding_redirect_label(host):
+            continue
         real = f"https://{host}"
         if real not in sources:
             sources.append(real)
