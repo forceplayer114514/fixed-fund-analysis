@@ -10,7 +10,7 @@ from app.crud import create_fund, get_all_funds, get_fund, delete_fund, get_retu
 from app.database import get_db
 from app.models import Fund, FundMetric, MonthlyReturn, ConfirmedGap, PendingReview
 from app.metrics_pipeline import compute_and_store_metrics
-from app.schemas import FundCreate, FundResponse, sanitize_for_json
+from app.schemas import FundCreate, FundResponse, FundVisibilityUpdate, sanitize_for_json
 
 router = APIRouter(prefix="/api/funds", tags=["funds"])
 
@@ -41,6 +41,7 @@ def _to_response(fund: Fund, session: Session, gap_count: int | None = None,
         data_cutoff_month=cutoff, has_metrics=metric is not None,
         gap_count=gap_count, pending_count=pending_count,
         discovered_source_name=fund.discovered_source_name,
+        is_hidden=bool(fund.is_hidden),
     )
 
 
@@ -73,6 +74,18 @@ def add_fund(payload: FundCreate, session: Session = Depends(get_db)):
     except IntegrityError:
         session.rollback()
         raise HTTPException(status_code=409, detail=f"基金名 '{payload.fund_name}' 已存在")
+    return _to_response(fund, session)
+
+
+@router.patch("/{fund_id}/visibility", response_model=FundResponse)
+def set_fund_visibility(fund_id: str, payload: FundVisibilityUpdate,
+                        session: Session = Depends(get_db)):
+    """隐藏/取消隐藏：隐藏后不出现在对比看板(FundChips/默认选中)，基金管理页仍可见。"""
+    fund = get_fund(session, fund_id)
+    if fund is None:
+        raise HTTPException(status_code=404, detail=f"基金 {fund_id} 不存在")
+    fund.is_hidden = int(payload.is_hidden)
+    session.commit()
     return _to_response(fund, session)
 
 

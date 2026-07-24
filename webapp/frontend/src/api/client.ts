@@ -22,6 +22,12 @@ export const api = {
   deleteFund: (fundId: string) =>
     request<void>(`/api/funds/${fundId}`, { method: 'DELETE' }),
 
+  setFundHidden: (fundId: string, isHidden: boolean) =>
+    request<import('../types').Fund>(`/api/funds/${fundId}/visibility`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_hidden: isHidden }),
+    }),
+
   recomputeFund: (fundId: string) =>
     request<Record<string, unknown>>(`/api/funds/${fundId}/recompute`, { method: 'POST' }),
 

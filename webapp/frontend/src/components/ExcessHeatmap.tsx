@@ -16,7 +16,7 @@ export default function ExcessHeatmap() {
   const rows = useMemo(() => {
     if (!anchorFundId || !timeSeriesData) return null
     const anchorSeries = timeSeriesData.series.find(s => s.fund_id === anchorFundId)
-    if (!anchorSeries) return null
+    if (!anchorSeries || anchorSeries.dates.length === 0) return null
     const isOrig = smoothingMode === 'original'
     const toFundReturns = (s: typeof anchorSeries): FundReturns => ({
       fund_id: s.fund_id, fund_name: s.fund_name, dates: s.dates,
@@ -27,7 +27,7 @@ export default function ExcessHeatmap() {
     // 锚定基金自己的起讫月份（而非所有已选基金月份并集）——避免其他更早/更长
     // 历史的基金把热力图拖出一堆跟锚定基金毫无关系的空白灰色年份行。
     const allSelected = timeSeriesData.series
-      .filter(s => selectedFundIds.includes(s.fund_id))
+      .filter(s => selectedFundIds.includes(s.fund_id) && s.dates.length > 0)
       .map(toFundReturns)
     const axisMonths = new Set(
       computeAxisMonths(timeSeriesData.months, allSelected, 'full', anchorFundId),

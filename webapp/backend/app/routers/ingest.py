@@ -73,6 +73,20 @@ def _job_log(jid: str, msg: str) -> None:
             del tail[: len(tail) - _LOG_TAIL_MAX]
 
 
+def _rendered_pdf_filename(url: str) -> str:
+    """HTML 通道 (Spec F) 渲染出的 PDF 文件名: 按 url 哈希, 不用固定文件名.
+
+    固定文件名会导致同一 job 内出现多个不同 html url 时后一个覆盖前一个的
+    渲染产物; 且不缓存 Path 对象本身 (只缓存"已渲染过"这个事实, 见调用点的
+    rendered_urls set) -- 自动纠名 (rename_fund_id) 会把 pdf_dir 整个目录
+    rename 到新 fund_id 下, 若缓存的是绝对 Path, rename 后就指向不存在的旧
+    路径; 每次都从当前 pdf_dir 重新拼路径才不会踩这个坑。
+    """
+    import hashlib
+    h = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    return f"_rendered_{h}.pdf"
+
+
 def _upsert_fund_preserving_url_type(conn, store_mod, fund_id: str, fund_name: str,
                                      req: IngestRequest) -> None:
     """upsert_fund, 但保留已有 url_type (不被 upsert_fund 默认 'archive' 覆盖
@@ -165,6 +179,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         from llm_ingest import discover as disc_mod
         from llm_ingest import extract as ex_mod
         from llm_ingest import fundmonitors as fm_mod
+        from llm_ingest import html_to_pdf as html_to_pdf_mod
         from llm_ingest import parsers as parsers_mod
         from llm_ingest import pdf as pdf_mod
         from llm_ingest import verify
@@ -245,7 +260,13 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         links: List[tuple] = []
         # Spec D: 单文件多月 HTML/CSV 场景 (Coolabah Plotly 类)
         # 预抓一次, 缓存到 payload_cache; 每月复用
-        payload_cache: Dict[str, str] = {}  # url -> text (HTML/CSV)
+        payload_cache: Dict[str, str] = {}  # url -> text (CSV)
+        from pathlib import Path
+        pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
+        # Spec F: 记录本 job 内已渲染过的 url (只渲染 1 次, 见 docs/superpowers/
+        # plans/2026-07-20-html-rendered-pdf-channel.md) -- 只缓存"已渲染过"
+        # 这个事实, 不缓存 Path 本身 (原因见 _rendered_pdf_filename 注释)。
+        rendered_urls: set = set()
         if req.confirmed_url:
             _cu_low = req.confirmed_url.lower().split("?", 1)[0]
             # 分派: (1) 扩展名 .html/.htm/.csv 或 (2) funds.url_type 值为
@@ -272,15 +293,36 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 else:
                     _end_ym_dt = _end_ym_dt.replace(month=_end_ym_dt.month - 1)
                 _end_ym = f"{_end_ym_dt.year:04d}-{_end_ym_dt.month:02d}"
-                months = disc_mod._month_range(req.inception_month, _end_ym)
+                # inception_month 本身没有"上月 NAV"可比, 收益率结构上算不出来
+                # (不是搜不到, 是这个月不该被问) -- 枚举从 inception 次月起,
+                # 不然会被下面 extract 失败误记成 confirmed_gap (2026-07-20 修)
+                all_months = disc_mod._month_range(req.inception_month, _end_ym)
+                months = all_months[1:] if len(all_months) > 1 else []
                 links = [(m, req.confirmed_url) for m in months]
                 _job_log(jid, f"single_file_multi_month: {len(links)} months to try")
-                # 预抓
-                _text = disc_mod._fetch(req.confirmed_url) or ""
-                if not _text:
-                    raise ValueError(f"无法抓取 {req.confirmed_url}")
-                payload_cache[req.confirmed_url] = _text
-                _job_log(jid, f"pre-fetched {len(_text)} chars, {len(links)} months")
+                _cu_is_html_channel = (
+                    _cu_low.endswith((".html", ".htm"))
+                    or _url_type == "performance_report_html"
+                )
+                if _cu_is_html_channel:
+                    # Spec F: 硬约束通道, 渲染一次 PDF 供全部月份复用 (不再对
+                    # 原始 HTML 文本做预抓缓存 -- 渲染步骤自己会 goto 该 url,
+                    # 提前多抓一份原始文本纯属浪费带宽)
+                    _job_log(jid, f"pre-rendering HTML -> PDF: {req.confirmed_url}")
+                    _rendered_path = pdf_dir / _rendered_pdf_filename(req.confirmed_url)
+                    try:
+                        html_to_pdf_mod.render_html_to_pdf(req.confirmed_url, _rendered_path)
+                    except Exception as e:  # noqa: BLE001
+                        raise ValueError(f"HTML 渲染失败 {req.confirmed_url}: {e}")
+                    rendered_urls.add(req.confirmed_url)
+                    _job_log(jid, f"pre-rendered PDF, {len(links)} months to try")
+                else:
+                    # 预抓 (CSV 通道)
+                    _text = disc_mod._fetch(req.confirmed_url) or ""
+                    if not _text:
+                        raise ValueError(f"无法抓取 {req.confirmed_url}")
+                    payload_cache[req.confirmed_url] = _text
+                    _job_log(jid, f"pre-fetched {len(_text)} chars, {len(links)} months")
             else:
                 _job_log(jid, f"parse_archive: {req.confirmed_url}")
                 html = disc_mod._fetch(req.confirmed_url)
@@ -327,8 +369,6 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
 
         # ---- L2 数据源 ingest 循环 (PDF/HTML/CSV 3 通道) ----
         _job_update(jid, state="ingesting_l2_pdf")
-        from pathlib import Path
-        pdf_dir = Path(llm_cli.PDF_ROOT) / req.fund_id
         rename_attempted = False  # 只在本 job 内尝试一次自动纠名 (L2 通路)
 
         for i, (ym, url) in enumerate(links, 1):
@@ -348,7 +388,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 channel = "pdf"
 
             pdf_path = pdf_dir / f"{ym}.pdf"  # 仅 PDF 通道用
-            payload_text: Optional[str] = None  # HTML/CSV 通道装载
+            payload_text: Optional[str] = None  # CSV 通道装载 (HTML 通道走渲染 PDF, 见下)
 
             if channel == "pdf":
                 # Spec C1: file:// 表示 run_discovery L2.6 本地缓存兜底
@@ -374,8 +414,27 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         )
                         _job_log(jid, f"[{i}/{len(links)}] {ym} download FAIL")
                         continue
+            elif channel == "html":
+                # Spec F: HTML 硬约束通道 -- 渲染成 PDF (代码层, 非 LLM 判断),
+                # 不再对原始 HTML 文本做字节窗口切片 (extract_html.py 旧法认错
+                # 表格的根因, 见 PDD)。同一 url 只渲染一次, job 内缓存复用。
+                # 路径每次从当前 pdf_dir 重新拼 (不缓存绝对 Path) -- 自动纠名
+                # 可能把 pdf_dir 整个 rename 到新 fund_id, 缓存的旧 Path 会失效。
+                pdf_path = pdf_dir / _rendered_pdf_filename(url)
+                if url not in rendered_urls:
+                    try:
+                        html_to_pdf_mod.render_html_to_pdf(url, pdf_path)
+                    except Exception as e:  # noqa: BLE001
+                        stats["download_fail"] += 1
+                        store_mod.record_confirmed_gap(
+                            conn, fund_id=req.fund_id, missing_month=ym,
+                            exhausted_levels="html_render_fail",
+                        )
+                        _job_log(jid, f"[{i}/{len(links)}] {ym} html_render FAIL: {e}")
+                        continue
+                    rendered_urls.add(url)
             else:
-                # HTML/CSV 通道: 抓取文本到内存 (可能过大, 上限由 extract_from_source 内部截)
+                # CSV 通道: 抓取文本到内存 (可能过大, 上限由 extract_from_source 内部截)
                 if url in payload_cache:
                     payload_text = payload_cache[url]
                 elif url.startswith("file://"):
@@ -410,16 +469,21 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                     payload_cache[url] = payload_text
 
             try:
-                if channel == "pdf":
+                if channel in ("pdf", "html"):
+                    # HTML 通道已在上面渲染成 PDF (Spec F), 走同一 PDF 提取
+                    # 通道: max_pages=0 (全文) -- 页级裁剪会复现"字节窗口切片"
+                    # 同一类 bug (裁剪后看不到附录里的真实月份数据), 不能沿用
+                    # 常规 PDF 通道的 2 页默认值。
                     ex = ex_mod.extract_from_pdf(
-                        pdf_path, ym, max_pages=req.max_pdf_pages or 2,
+                        pdf_path,
+                        ym,
+                        max_pages=(req.max_pdf_pages or 2) if channel == "pdf" else 0,
                         fund_name=req.fund_name, issuer=req.issuer or "",
                     )
                 else:
                     ex = ex_mod.extract_from_source(
                         url, ym,
-                        html_text=payload_text if channel == "html" else None,
-                        csv_text=payload_text if channel == "csv" else None,
+                        csv_text=payload_text,
                         fund_name=req.fund_name, issuer=req.issuer or "",
                     )
             except Exception as e:  # noqa: BLE001
@@ -430,8 +494,8 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 _job_log(jid, f"[{i}/{len(links)}] {ym} extract ERR: {e}")
                 continue
 
-            # 反捏造两道闸: PDF 走 pdf_text, HTML/CSV 走 payload_text
-            if channel == "pdf":
+            # 反捏造两道闸: PDF/HTML(渲染后) 走 pdf_text, CSV 走 payload_text
+            if channel in ("pdf", "html"):
                 source_text = pdf_mod.full_text(pdf_path)
             else:
                 source_text = payload_text or ""

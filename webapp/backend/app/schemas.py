@@ -44,8 +44,13 @@ class FundResponse(BaseModel):
     pending_count: int = 0  # pending_review 表 state='pending' 行数（LLM 摄取两闸未过待人工审核）
     # Spec B: fundmonitors 页面实际抓到的基金名 (透明展示; 与 fund_name 不同时前端标红)
     discovered_source_name: Optional[str] = None
+    is_hidden: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class FundVisibilityUpdate(BaseModel):
+    is_hidden: bool
 
 
 class PendingReviewResponse(BaseModel):

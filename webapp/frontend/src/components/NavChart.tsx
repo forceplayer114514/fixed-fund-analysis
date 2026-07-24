@@ -40,7 +40,7 @@ export default function NavChart() {
     if (!timeSeriesData) return []
     const isOrig = smoothingMode === 'original'
     return timeSeriesData.series
-      .filter(s => selectedFundIds.includes(s.fund_id))
+      .filter(s => selectedFundIds.includes(s.fund_id) && s.dates.length > 0)
       .map(s => ({
         fund_id: s.fund_id, fund_name: s.fund_name, dates: s.dates,
         returns: (isOrig ? s.returns : (s.unsm_returns ?? s.returns)),

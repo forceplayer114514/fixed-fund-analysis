@@ -84,6 +84,27 @@ def test_delete_fund(client):
 
 
 @pytest.mark.unit
+def test_set_fund_hidden_and_unhidden(client):
+    client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
+                 "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})
+    assert client.get("/api/funds").json()[0]["is_hidden"] is False
+
+    resp = client.patch("/api/funds/f1/visibility", json={"is_hidden": True})
+    assert resp.status_code == 200
+    assert resp.json()["is_hidden"] is True
+    assert client.get("/api/funds").json()[0]["is_hidden"] is True
+
+    resp = client.patch("/api/funds/f1/visibility", json={"is_hidden": False})
+    assert resp.json()["is_hidden"] is False
+
+
+@pytest.mark.unit
+def test_set_fund_hidden_unknown_fund_404(client):
+    resp = client.patch("/api/funds/ghost/visibility", json={"is_hidden": True})
+    assert resp.status_code == 404
+
+
+@pytest.mark.unit
 def test_recompute_fund_metrics(client, db_session):
     client.post("/api/funds", json={"fund_id": "f1", "fund_name": "Fund One",
                  "confirmed_url": "http://x", "fetch_method": "pdf", "url_type": "pdf"})

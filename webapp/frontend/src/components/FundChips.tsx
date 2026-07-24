@@ -7,7 +7,7 @@ export default function FundChips() {
 
   return (
     <div className="flex flex-wrap gap-2 mb-5">
-      {funds.map(f => {
+      {funds.filter(f => !f.is_hidden).map(f => {
         const active = selected.includes(f.fund_id)
         return (
           <button

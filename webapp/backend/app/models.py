@@ -23,6 +23,8 @@ class Fund(Base):
     created_at: Mapped[Optional[str]] = mapped_column(String, server_default=text("(datetime('now'))"))
     # Spec B: fundmonitors 页面上实际抓到的基金名 (透明展示, 与 fund_name 不一致前端标红核对)
     discovered_source_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 隐藏：不出现在对比看板(FundChips/默认选中)，但基金管理页仍可见并可取消隐藏
+    is_hidden: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     monthly_returns: Mapped[list["MonthlyReturn"]] = relationship(
         back_populates="fund", cascade="all, delete-orphan")

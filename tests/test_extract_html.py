@@ -253,3 +253,40 @@ def test_plotly_shrink_fallback_no_hovertext_anchor():
     assert "hovertext anchor" not in shrunk  # 未命中 hover 锚
     assert "shrunk Plotly HTML" in shrunk
     assert "May 2026: 0.55%" in shrunk
+
+
+def test_plotly_shrink_strips_base64_images_before_windowing():
+    """base64 内联图片不该挤占窗口预算, 把真实文字挤到窗口外.
+
+    2026-07-20 Coolabah Institutional 2026-06 事故复现: 视觉上相邻的两段文字
+    (页首"成立以来汇总卡片" vs 真正的月度收益表格), 因为中间塞了几百KB的
+    base64 <img> 快照, 在字节流里被拉开到 60KB 窗口够不到的距离, LLM 只看到
+    汇总卡片, 把成立以来年化净收益当成月度收益提取。剥掉 base64 图片后, 真实
+    文字间距应远小于窗口, 两段应同时落在窗口内。
+    """
+    from llm_ingest.extract_html import _shrink_plotly_html
+    fake_b64 = "A" * 300_000  # 单张图片 300KB, 远超 60KB 窗口半径
+    html = (
+        "<html><body>"
+        '<script>Plotly.newPlot("div1", x);</script>'
+        "<p>Return/Risk: 9.91% pa gross/9.04% pa net (misleading annualized blurb)</p>"
+        f'<img src="data:image/png;base64,{fake_b64}">'
+        "<table><tr><td>1 month</td><td>0.71%</td></tr></table>"
+        '<script type="application/json">{"x":{"data":[{"name":"FRHY","text":['
+        '"FRHY<br />2026-05-31: $134.24","FRHY<br />2026-06-30: $135.16"]}]}}</script>'
+        "</body></html>"
+    )
+    shrunk = _shrink_plotly_html(html, "2026-06")
+    assert "hovertext anchor" in shrunk
+    assert "1 month" in shrunk and "0.71%" in shrunk  # 真实表格没被挤出窗口
+    assert "_stripped_" in shrunk  # 图片被剥掉留占位, 不是原样保留 300KB
+
+
+def test_strip_base64_images_helper_replaces_payload():
+    """_strip_base64_images 单独验证: 长 base64 payload 被替换成短占位."""
+    from llm_ingest.extract_html import _strip_base64_images
+    html = '<img src="data:image/png;base64,' + "B" * 50_000 + '">tail text'
+    out = _strip_base64_images(html)
+    assert len(out) < 1_000
+    assert "tail text" in out
+    assert "_stripped_" in out

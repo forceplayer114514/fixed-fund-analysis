@@ -74,12 +74,13 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const funds = await api.listFunds()
       const prev = get().selectedFundIds
+      const visibleIds = new Set(funds.filter(f => !f.is_hidden).map(f => f.fund_id))
       let selectedFundIds: string[]
       if (prev.length === 0) {
-        selectedFundIds = funds.map(f => f.fund_id)
+        selectedFundIds = funds.filter(f => !f.is_hidden).map(f => f.fund_id)
       } else {
-        const validIds = new Set(funds.map(f => f.fund_id))
-        selectedFundIds = prev.filter(id => validIds.has(id))
+        // 隐藏的基金即使之前已选中也退出对比看板（同"取消选中"处理，锚定逻辑随后一起清）
+        selectedFundIds = prev.filter(id => visibleIds.has(id))
       }
       // 锚定基金若被删除/取消选中，清除锚定（状态机 1.2）
       const anchor = get().anchorFundId
@@ -102,7 +103,7 @@ export const useStore = create<AppState>((set, get) => ({
     // 指标窗口随图表 rebase 对齐：锚定基金自身首月之前的历史，图上已裁剪显示，
     // 指标（年化收益/超额/IR/回撤/波动率）也不应再用其它基金自己更早的历史算。
     const startMonth = anchorFundId
-      ? (timeSeriesData?.series.find(s => s.fund_id === anchorFundId)?.dates[0].slice(0, 7) ?? null)
+      ? (timeSeriesData?.series.find(s => s.fund_id === anchorFundId)?.dates[0]?.slice(0, 7) ?? null)
       : null
     set({ compareLoading: true, compareError: null })
     try {

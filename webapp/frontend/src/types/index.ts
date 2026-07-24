@@ -15,6 +15,8 @@ export interface Fund {
   pending_count: number
   /** Spec B: fundmonitors 页面实际抓到的基金名 (与 fund_name 不同时前端标红) */
   discovered_source_name?: string | null
+  /** 隐藏：不出现在对比看板(FundChips/默认选中)，基金管理页仍可见 */
+  is_hidden: boolean
 }
 
 /** 因数据缺口被排除对比的基金（compare/time-series 降级返回） */

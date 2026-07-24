@@ -97,7 +97,7 @@ export default function CompareTable() {
     if (anchorFundId) {
       // 指标窗口起点=锚定基金自身首月（与图表 rebase 同口径），各基金终点各自最新月份
       const startMonth = timeSeriesData?.series
-        .find(s => s.fund_id === anchorFundId)?.dates[0].slice(0, 7)
+        .find(s => s.fund_id === anchorFundId)?.dates[0]?.slice(0, 7)
       return startMonth ? `锚定窗口: ${startMonth} 起 · 各基金至自身最新月份` : '锚定模式'
     }
     const items = compareData?.funds ?? []

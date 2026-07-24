@@ -26,7 +26,7 @@ export default function RollingExcessChart() {
     if (!timeSeriesData || timeSeriesData.series.length === 0) return null
     const isOrig = smoothingMode === 'original'
     const funds: FundReturns[] = timeSeriesData.series
-      .filter(s => selectedFundIds.includes(s.fund_id))
+      .filter(s => selectedFundIds.includes(s.fund_id) && s.dates.length > 0)
       .map(s => ({
         fund_id: s.fund_id, fund_name: s.fund_name, dates: s.dates,
         returns: (isOrig ? s.returns : (s.unsm_returns ?? s.returns)),

@@ -29,9 +29,21 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
 def init_db():
-    """创建所有表（幂等）。必须在导入 models 之后调用。"""
+    """创建所有表（幂等）。必须在导入 models 之后调用。
+
+    create_all 只建不存在的表，不会给已存在的表补新列——is_hidden 是后加字段，
+    对已存在的生产库需要手动 ALTER TABLE（幂等，列已存在时忽略报错）。
+    """
     from app import models  # noqa: F401 确保模型已注册
     Base.metadata.create_all(bind=engine)
+    if settings.DATABASE_URL.startswith("sqlite"):
+        with engine.connect() as conn:
+            try:
+                conn.exec_driver_sql(
+                    "ALTER TABLE funds ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")
+                conn.commit()
+            except Exception:
+                pass  # 列已存在
 
 
 def get_db():

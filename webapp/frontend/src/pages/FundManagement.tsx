@@ -127,6 +127,16 @@ export default function FundManagement() {
     setUpdatingFundId(null)
   }
 
+  const handleToggleHidden = async (f: Fund) => {
+    try {
+      await api.setFundHidden(f.fund_id, !f.is_hidden)
+      await fetchFunds()
+    } catch (e: unknown) {
+      // eslint-disable-next-line no-alert
+      alert((e as Error).message)
+    }
+  }
+
   const handleDelete = async (fundId: string) => {
     try {
       await deleteFund(fundId)
@@ -286,9 +296,14 @@ export default function FundManagement() {
           </thead>
           <tbody>
             {funds.map(f => (
-              <tr key={f.fund_id} className={`border-b border-gray-50 ${f.gap_count > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
+              <tr key={f.fund_id} className={`border-b border-gray-50 ${f.is_hidden ? 'bg-gray-50 opacity-60' : f.gap_count > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
                 <td className="py-3 px-4 text-gray-500 text-xs">{f.fund_id}</td>
-                <td className="py-3 px-4 font-medium">{f.fund_name}</td>
+                <td className="py-3 px-4 font-medium">
+                  {f.fund_name}
+                  {f.is_hidden && (
+                    <span className="ml-1.5 text-xs text-gray-400 font-normal">(已隐藏)</span>
+                  )}
+                </td>
                 <td
                   className={
                     f.discovered_source_name
@@ -359,6 +374,13 @@ export default function FundManagement() {
                     onClick={() => openReturns(f)}
                   >
                     查看数据
+                  </button>
+                  <button
+                    className="text-xs text-gray-600 border border-gray-200 rounded px-2.5 py-1 mr-2 hover:bg-gray-50"
+                    title="隐藏后不出现在对比看板"
+                    onClick={() => handleToggleHidden(f)}
+                  >
+                    {f.is_hidden ? '取消隐藏' : '隐藏'}
                   </button>
                   {deleteConfirm === f.fund_id ? (
                     <span className="text-xs">
