@@ -47,9 +47,9 @@ export interface FundMetrics {
   un_recovery_months: number | null
   orig_dd_recovered: boolean
   un_dd_recovered: boolean
-  // 维度3：性价比（信息比率；n<2 或 std=0 时为 null）
-  orig_information_ratio: number | null
-  un_information_ratio: number | null
+  // 维度3：性价比（夏普比率-超额口径；n<2 或 std=0 时为 null。现金基准下等于旧「信息比率」，2026-07 正名）
+  orig_sharpe_ratio: number | null
+  un_sharpe_ratio: number | null
   // 维度4：体感与煎熬度
   orig_excess_win_rate: number
   un_excess_win_rate: number

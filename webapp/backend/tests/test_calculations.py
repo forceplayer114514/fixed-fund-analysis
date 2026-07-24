@@ -6,7 +6,7 @@ from app.calculations import (
     calculate_annualized_volatility,
     calculate_max_drawdown,
     calculate_max_drawdown_detail,
-    calculate_information_ratio,
+    calculate_sharpe_ratio,
     calculate_excess_win_rate,
     calculate_max_consecutive_underperform,
     calculate_autocorrelation,
@@ -64,7 +64,7 @@ def test_calculate_max_drawdown_detail():
 
 
 @pytest.mark.unit
-def test_calculate_information_ratio():
+def test_calculate_sharpe_ratio():
     # excess=[0.01,-0.005,0.008,-0.003]: 手工算 mean/std(ddof=1)*sqrt(12)
     excess = [0.01, -0.005, 0.008, -0.003]
     n = len(excess)
@@ -72,12 +72,12 @@ def test_calculate_information_ratio():
     var = sum((e - mean_e) ** 2 for e in excess) / (n - 1)
     std_e = var ** 0.5
     expected = mean_e / std_e * (12.0 ** 0.5)
-    assert calculate_information_ratio(excess) == pytest.approx(expected)
+    assert calculate_sharpe_ratio(excess) == pytest.approx(expected)
     # n<2 -> None
-    assert calculate_information_ratio([0.01]) is None
-    assert calculate_information_ratio([]) is None
+    assert calculate_sharpe_ratio([0.01]) is None
+    assert calculate_sharpe_ratio([]) is None
     # std=0（全部相同）-> None
-    assert calculate_information_ratio([0.01, 0.01, 0.01]) is None
+    assert calculate_sharpe_ratio([0.01, 0.01, 0.01]) is None
 
 
 @pytest.mark.unit
@@ -157,7 +157,7 @@ def test_compute_all_metrics_short_history():
     assert m["is_geltner_applied"] == 0
     # un 指标应等于 orig 指标
     assert m["un_annualized_excess_return"] == pytest.approx(m["orig_annualized_excess_return"])
-    assert m["un_information_ratio"] == pytest.approx(m["orig_information_ratio"])
+    assert m["un_sharpe_ratio"] == pytest.approx(m["orig_sharpe_ratio"])
     assert m["un_max_drawdown"] == pytest.approx(m["orig_max_drawdown"])
     assert m["un_annualized_return"] == pytest.approx(m["orig_annualized_return"])
     assert m["un_recovery_months"] == m["orig_recovery_months"]
@@ -198,21 +198,21 @@ def test_compute_all_metrics_win_rate_and_underperform():
     m = compute_all_metrics(returns, rf_rates, "TestFund")
     assert m["orig_excess_win_rate"] == pytest.approx(1.0)
     assert m["orig_max_underperform_months"] == 0
-    # IR 可计算（4 个不同正值超额，std>0）
-    assert m["orig_information_ratio"] is not None
+    # 夏普可计算（4 个不同正值超额，std>0）
+    assert m["orig_sharpe_ratio"] is not None
 
 
 @pytest.mark.unit
-def test_ir_validation_anchor():
-    """PDD 1.1 校验锚点：IR 分子*12 ≈ 年化超额收益（算术 vs 几何年化 <0.3pp）。"""
+def test_sharpe_validation_anchor():
+    """PDD 1.1 校验锚点：夏普分子*12 ≈ 年化超额收益（算术 vs 几何年化 <0.3pp）。"""
     returns = [0.003, 0.004, 0.005, 0.004, 0.003, 0.006] * 6  # 36 个月
     rf_rates = [0.0435] * 36
     m = compute_all_metrics(returns, rf_rates, "AnchorFund")
     excess = [r - 0.0435 / 12.0 for r in returns]
     mean_e = sum(excess) / len(excess)
-    arithmetic_annualized_excess = mean_e * 12  # IR 分子*12
+    arithmetic_annualized_excess = mean_e * 12  # 夏普分子*12
     assert abs(arithmetic_annualized_excess - m["orig_annualized_excess_return"]) < 0.003
-    assert m["orig_information_ratio"] is not None
+    assert m["orig_sharpe_ratio"] is not None
 
 
 @pytest.mark.unit
@@ -236,8 +236,8 @@ def test_compute_all_metrics_rba_missing():
         expected_excess_ann *= (1.0 + e)
     expected_excess_ann = expected_excess_ann ** (12.0 / 5) - 1
     assert m["orig_annualized_excess_return"] == pytest.approx(expected_excess_ann)
-    # IR 可计算（5 个有效月，std>0）
-    assert m["orig_information_ratio"] is not None
+    # 夏普可计算（5 个有效月，std>0）
+    assert m["orig_sharpe_ratio"] is not None
     # 最长跑输：第3月 RBA 缺失，未压缩序列在该位 None 中断（此处全跑赢，仅验证不报错且为0）
     assert m["orig_max_underperform_months"] == 0
 

@@ -53,8 +53,8 @@ export default function CompareTable() {
 
     const rankExcess = rankBy(items, m =>
       isOrig ? m.orig_annualized_excess_return : m.un_annualized_excess_return)
-    const rankIR = rankBy(items, m =>
-      isOrig ? m.orig_information_ratio : m.un_information_ratio, statEligible)
+    const rankSharpe = rankBy(items, m =>
+      isOrig ? m.orig_sharpe_ratio : m.un_sharpe_ratio, statEligible)
     const rankDD = rankBy(items, m =>
       isOrig ? m.orig_max_drawdown : m.un_max_drawdown)
     const rankWin = rankBy(items, m =>
@@ -77,8 +77,8 @@ export default function CompareTable() {
         annReturn: fmt(isOrigRow ? m.orig_annualized_return : m.un_annualized_return, '%'),
         excess: fmt(isOrigRow ? m.orig_annualized_excess_return : m.un_annualized_excess_return, '%'),
         excessRank: rankExcess.get(m.fund_id),
-        ir: isOrigRow ? m.orig_information_ratio : m.un_information_ratio,
-        irRank: rankIR.get(m.fund_id),
+        sharpe: isOrigRow ? m.orig_sharpe_ratio : m.un_sharpe_ratio,
+        sharpeRank: rankSharpe.get(m.fund_id),
         dd: fmt(dd, '%'),
         ddRank: rankDD.get(m.fund_id),
         recoveryLabel,
@@ -128,7 +128,7 @@ export default function CompareTable() {
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">基金名称</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">年化收益率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">年化超额收益</th>
-              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">信息比率</th>
+              <th className="text-left py-2.5 px-3 text-gray-500 font-medium">夏普比率（超额）</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">最大回撤</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">超额胜率</th>
               <th className="text-left py-2.5 px-3 text-gray-500 font-medium">最长跑输</th>
@@ -156,8 +156,8 @@ export default function CompareTable() {
                 <td className="py-2.5 px-3">{r.annReturn}</td>
                 <td className="py-2.5 px-3">{r.excess} ({r.excessRank})</td>
                 <td className="py-2.5 px-3">
-                  {r.ir == null ? '-' : r.ir.toFixed(2)}
-                  {r.irRank != null && <span className="text-xs text-gray-400 ml-1">({r.irRank})</span>}
+                  {r.sharpe == null ? '-' : r.sharpe.toFixed(2)}
+                  {r.sharpeRank != null && <span className="text-xs text-gray-400 ml-1">({r.sharpeRank})</span>}
                   {r.small && <WarnBadge note={`样本不足(n=${r.n})，统计指标不可靠`} />}
                 </td>
                 <td className="py-2.5 px-3">

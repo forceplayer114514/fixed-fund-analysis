@@ -85,11 +85,18 @@ def calculate_max_drawdown(nav_series: list[float],
     return calculate_max_drawdown_detail(nav_series, fund_name=fund_name)["max_drawdown"]
 
 
-def calculate_information_ratio(excess_returns: list[float],
-                                fund_name: str = "Unknown") -> float | None:
-    """信息比率 = mean(e) / std(e, ddof=1) * sqrt(12)（PDD 1.1）。
+def calculate_sharpe_ratio(excess_returns: list[float],
+                           fund_name: str = "Unknown") -> float | None:
+    """夏普比率（超额口径）= mean(e) / std(e, ddof=1) * sqrt(12)（PDD 1.1）。
 
-    月度超额序列复用管道现有超额收益序列（r_fund - RBA/12）。
+    月度超额序列复用管道现有超额收益序列（e = r_fund - RBA/12）。
+    此处基准是 RBA 现金利率（无风险利率），分母 std(e) 即修订版夏普的
+    差额收益标准差 —— 这是 ex-post Sharpe（Sharpe 1994 修订定义），不是信息
+    比率。现金基准下 tracking error 退化为总波动率，IR 数值上恒等于本量，
+    故 2026-07 由「信息比率」正名为「夏普比率（超额）」，算法一字节未动。
+    （辩论锚点：若日后要建真 IR，须换风险资产基准并以 tracking error 作分母；
+    但本项目四支为浮动利率信用产品，其法定基准即 RBA cash rate + margin，
+    对久期错配的债券指数算 tracking error 在金融上无意义。）
     n<2 或 std=0 时返回 None（无法计算/无意义），前端显示 "-"。
     校验锚点：分子 mean(e)*12 ≈ 年化超额收益（算术 vs 几何年化，容差 <0.3pp）。
     """
@@ -294,9 +301,9 @@ def compute_all_metrics(returns: list[float], rf_rates: list[float | None],
     orig_dd = calculate_max_drawdown_detail(_build_nav_series(returns), fund_name=fund_name)
     un_dd = calculate_max_drawdown_detail(_build_nav_series(unsmoothed), fund_name=fund_name)
 
-    # 维度3：性价比（信息比率，超额口径，压缩序列）
-    orig_ir = calculate_information_ratio(excess_orig, fund_name=fund_name)
-    un_ir = calculate_information_ratio(excess_un, fund_name=fund_name)
+    # 维度3：性价比（夏普比率-超额口径，压缩序列）
+    orig_sharpe = calculate_sharpe_ratio(excess_orig, fund_name=fund_name)
+    un_sharpe = calculate_sharpe_ratio(excess_un, fund_name=fund_name)
 
     # 维度4：体感与煎熬度
     # 超额胜率（超额口径，压缩序列）；最长跑输（未压缩对齐序列，None 中断）
@@ -325,8 +332,8 @@ def compute_all_metrics(returns: list[float], rf_rates: list[float | None],
         "un_recovery_months": un_dd["recovery_months"],
         "orig_dd_recovered": 1 if orig_dd["recovered"] else 0,
         "un_dd_recovered": 1 if un_dd["recovered"] else 0,
-        "orig_information_ratio": orig_ir,
-        "un_information_ratio": un_ir,
+        "orig_sharpe_ratio": orig_sharpe,
+        "un_sharpe_ratio": un_sharpe,
         "orig_excess_win_rate": orig_win_rate,
         "un_excess_win_rate": un_win_rate,
         "orig_max_underperform_months": orig_max_under,

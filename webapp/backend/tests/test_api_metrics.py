@@ -26,7 +26,7 @@ def test_compare_full_reads_cached_metrics(client, db_session):
     assert body["funds"][0]["fund_id"] == "f1"
     assert body["funds"][0]["history_months"] == 2
     # Phase 1 新字段存在
-    assert "orig_information_ratio" in body["funds"][0]
+    assert "orig_sharpe_ratio" in body["funds"][0]
     assert "orig_annualized_return" in body["funds"][0]
     assert "excess_sample_months" in body["funds"][0]
     assert "orig_recovery_months" in body["funds"][0]

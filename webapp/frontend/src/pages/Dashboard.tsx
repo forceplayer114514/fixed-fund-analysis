@@ -54,7 +54,7 @@ export default function Dashboard() {
   const eligibleForStats = (x: FundMetrics) => (x.excess_sample_months ?? 0) >= SMALL_SAMPLE_THRESHOLD
 
   const excess = m ? (isOrig ? m.orig_annualized_excess_return : m.un_annualized_excess_return) : null
-  const ir = m ? (isOrig ? m.orig_information_ratio : m.un_information_ratio) : null
+  const sharpe = m ? (isOrig ? m.orig_sharpe_ratio : m.un_sharpe_ratio) : null
   const winRate = m ? (isOrig ? m.orig_excess_win_rate : m.un_excess_win_rate) : null
   const dd = m ? (isOrig ? m.orig_max_drawdown : m.un_max_drawdown) : null
   const recoveryMonths = m ? (isOrig ? m.orig_recovery_months : m.un_recovery_months) : null
@@ -129,10 +129,10 @@ export default function Dashboard() {
               isOrig ? x.orig_annualized_excess_return : x.un_annualized_excess_return)}
           />
           <MetricCard
-            label="信息比率"
-            value={ir != null ? ir.toFixed(2) : '-'}
-            rank={isSmallSample ? undefined : rankAmong(allMetrics, ir,
-              x => (isOrig ? x.orig_information_ratio : x.un_information_ratio), eligibleForStats)}
+            label="夏普比率（超额）"
+            value={sharpe != null ? sharpe.toFixed(2) : '-'}
+            rank={isSmallSample ? undefined : rankAmong(allMetrics, sharpe,
+              x => (isOrig ? x.orig_sharpe_ratio : x.un_sharpe_ratio), eligibleForStats)}
             warn={isSmallSample}
             warnNote={isSmallSample ? smallNote : undefined}
           />

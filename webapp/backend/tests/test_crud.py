@@ -143,7 +143,7 @@ def _minimal_metrics(**overrides) -> dict:
         orig_max_drawdown=0.0, un_max_drawdown=0.0,
         orig_recovery_months=None, un_recovery_months=None,
         orig_dd_recovered=1, un_dd_recovered=1,
-        orig_information_ratio=None, un_information_ratio=None,
+        orig_sharpe_ratio=None, un_sharpe_ratio=None,
         orig_excess_win_rate=0.5, un_excess_win_rate=0.5,
         orig_max_underperform_months=1, un_max_underperform_months=1,
         orig_annualized_volatility=0.01, un_annualized_volatility=0.01,
@@ -175,7 +175,7 @@ def test_upsert_metrics_refreshes_updated_at(db_session):
     time.sleep(1.1)
 
     # 第二次：更新（走 setattr 分支，触发 onupdate）
-    upsert_metrics(db_session, "f1", _minimal_metrics(orig_information_ratio=1.5))
+    upsert_metrics(db_session, "f1", _minimal_metrics(orig_sharpe_ratio=1.5))
     t2 = db_session.get(FundMetric, "f1").updated_at
 
     assert t2 != t1, f"updated_at 在 UPDATE 后未刷新: t1={t1!r} t2={t2!r}"

@@ -143,7 +143,7 @@ class AnomalyResponse(BaseModel):
 def sanitize_for_json(obj):
     """递归把 inf/NaN float 转为 None（JSON 标准不支持无穷大/NaN）。
 
-    信息比率在 std=0 或 n<2 时已由 calculate_information_ratio 返回 None（Omega 已
+    夏普比率在 std=0 或 n<2 时已由 calculate_sharpe_ratio 返回 None（Omega 已
     移除，不再有 inf 场景）。compare/time-series/recompute 等返回 metrics 的端点统一
     使用，作为通用防御保留。
     """

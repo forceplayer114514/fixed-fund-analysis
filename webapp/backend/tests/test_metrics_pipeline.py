@@ -144,7 +144,7 @@ def test_compute_and_store_metrics_gap_detection(db_session):
 @pytest.mark.unit
 def test_recompute_all_funds_refreshes_stale_cache_after_rba_change(db_session):
     """RBA 利率源变更后（如本次会话的官方源重写），旧 fund_metrics 缓存里的
-    orig_annualized_excess_return/information_ratio 是按旧 rf_rates 算的，不会
+    orig_annualized_excess_return/sharpe_ratio 是按旧 rf_rates 算的，不会
     自动失效——full 路径的缓存新鲜度校验只比对 date_period（最新月份），不比对
     rf_rates 是否变过。recompute_all_funds 补上这层级联重算。"""
     create_fund(db_session, fund_id="f1", fund_name="Fund One",
