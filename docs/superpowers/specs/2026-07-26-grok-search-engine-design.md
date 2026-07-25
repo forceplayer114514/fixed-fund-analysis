@@ -18,6 +18,10 @@
 用户在前端"加基金"表单里每次选一个。Grok 通路端到端验证通过后，删除两个已死/已弱的
 搜索通路（SearXNG、sub2api web_search）。
 
+**范围已于 2026-07-26 扩充**：讨论 Grok 时发现搜索层越界直接产出 PDF 链接，
+顺藤查出同一家族的另外 4 处错源漏洞（与引擎选择无关，两个引擎都会踩）。
+**见第十节**，本次一并以 TDD 方式修复。
+
 ### 1.2 为什么 Grok 不是"再加一个 Tavily"
 
 这是本设计最重要的前提，实施时若忽略会做出错误的抽象。
@@ -553,6 +557,15 @@ grounding 解析的用例，随之删除或改写。**删除前先确认这些�
 - [ ] `SEARCH_BACKEND` 默认值不再指向已死的 SearXNG（2.8 的静默降级故障已修复）
 - [ ] 全量单元测试绿
 
+### 错源漏洞（第十节）—— 每条均须有先 RED 后 GREEN 的 TDD 测试
+
+- [ ] 10.2 Wayback 入口收窄：文档类型黑名单 + 基金名 token 匹配，兄弟基金 PDF 不再入缺口
+- [ ] 10.3 `discovered_pdfs` 只回传 `matched_pdfs`（`discover2.py:450` 与 `:471` 两处）
+- [ ] 10.4 自动纠名判据收严为 token 集合相等；不等时只写 `discovered_source_name` 不纠名
+- [ ] 10.5 逐份身份核对：每份文档比对 `fund_name_text` 与目标基金，存疑转 `pending_review`
+- [ ] 10.6 删除搜索结果直接当 PDF 的捷径（`discover.py:423-427`）
+- [ ] 上述修复不破坏 HTML→PDF / CSV / `file://` 三条下游通道
+
 ---
 
 ## 九、未决/风险
@@ -565,3 +578,149 @@ grounding 解析的用例，随之删除或改写。**删除前先确认这些�
 3. **Grok 延迟 15–20s/次**，摄取 job 是后台线程不阻塞前端，可接受；
    但若将来要批量摄取几十支基金，需要重新考虑并发策略。
 4. **Bentham 类多份额基金**两个引擎都定位不准，只能靠人工白名单，本设计不解决该问题。
+
+---
+
+## 十、错源漏洞修复（2026-07-26 追加，与 Grok 接入一并处理）
+
+> 本节是 Spec G 的范围扩充。起因：讨论 Grok 时发现搜索层越界直接产出 PDF 链接，
+> 顺藤查出同一家族的另外 4 处漏洞。它们与引擎选择无关，两个引擎都会踩，
+> 且 Grok 通路上线后同样经过这些环节，因此一并修。
+>
+> **以下机制均为读代码推得，未实跑复现**，但每处都标了确切代码位置，实施时先写
+> 复现测试（RED）确认机制成立，再改（GREEN）。若某条测试写不出 RED，
+> 说明判断有误，停下来报告，不要硬改。
+
+### 10.1 根因：入库前没有任何一处逐份核对"这份文档属于哪支基金"
+
+全系统唯一的基金名核对闸是 `llm_ingest/fundmonitors.py:87` `_name_matches()`，
+判据为"两名字去停用词后 token 交集非空"。停用词表（`fundmonitors.py:68`
+`_NAME_STOPWORDS`）已排除 `income` / `enhanced` / `capital` / `australian` /
+`credit` / `bond` 等类别词。后果：
+
+| 目标基金 | 文档基金 | 去停用词后 token | 交集 | 判定 |
+|---|---|---|---|---|
+| Yarra Enhanced Income Fund | Yarra Australian Income Fund | `{yarra}` vs `{yarra}` | `{yarra}` | **放行** |
+| Coolabah Assisted … | Smarter Money Fund | `{coolabah}` vs `{smarter,money}`（`smarter`/`money` 也在停用词内 → `∅`） | `∅` | 拦下 |
+
+该闸为 2026-07-18 Coolabah 跨发行商错源事故而加，**设计上只能挡跨发行商错源，
+结构上无法分辨同发行商的兄弟基金**。而爬发行商自有网站 / 扒其整域历史存档时，
+兄弟基金正是最高频的错源来源。
+
+### 10.2 漏洞一：Wayback 按整个发行商域名抓，不筛基金（最严重）
+
+**位置**：`llm_ingest/discover.py:674` `probe_l2_wayback()`，在 `run_discovery` 约 885 行被调用。
+
+**机制**：CDX 查询范围是 `{issuer_domain}/*` 与 `{issuer_domain}/wp-content/uploads/*`，
+即该发行商站上曾存在过的**全部** PDF。筛选条件仅三条：`statuscode:200`、
+`mimetype:application/pdf`、文件名解析出的 ym 落在 `gap_set` 内。
+
+**没有基金名筛选**，也**没有接上别处已有的 `_NON_MONTHLY_HINTS` 文档类型黑名单**
+（该黑名单在 `discover.py:468` 定义，只在 `probe_l1_official` 与 L1_nav 用了）。
+
+一家发行商旗下十支基金的 PDF 同处一域，只要文件名月份落在缺口内，
+兄弟基金月报即被当作本基金数据填入。
+
+**加重情节**：此步专用于补缺口，而 `CLAUDE.md` 第一条对缺口是零容忍、禁填补的。
+当前实现却用全系统最宽松的条件往缺口里塞东西。
+
+**修复**：
+1. 入口收窄：对 CDX 返回的每个 `original` URL 应用 `_NON_MONTHLY_HINTS` 过滤
+2. 入口收窄：要求文件名 slug 与 fund_name 有实义 token 交集
+   （复用 `discover2._pdf_slug_match_count() > 0`）
+3. 出口兜底：由 10.5 的逐份身份核对统一把关
+
+### 10.3 漏洞二：同页其他基金的 PDF 被整页带回
+
+**位置**：`llm_ingest/discover2.py:450` 与 `:471`，两处均为 `discovered_pdfs=list(cand["pdf_urls"])`。
+消费点在 `llm_ingest/discover.py:611-625`（`probe_l1_official` 的 v2 快路）。
+
+**机制**：步 5 先用 `matched_pdfs = [u for u in cand["pdf_urls"] if _pdf_slug_match_count(u, fund_name) > 0]`
+筛出与基金名沾边的，逐个打样；**任一份打样通过，即把该页 `pdf_urls` 全量
+（未经 `matched_pdfs` 过滤）塞进 `discovered_pdfs` 返回**。
+
+下游 `probe_l1_official` 遍历 `discovered_pdfs`，仅以 `_NON_MONTHLY_HINTS`
+与"文件名能否解析出 ym"过滤，**不做基金名匹配**。
+
+代码注释自述的 Yarra 场景（`discover2.py:409-412`）正是此情形：
+`yarracm.com/performance` 同挂 Enhanced Income 与 Australian Income 两支基金月报。
+
+**修复**：`discovered_pdfs` 回传 `matched_pdfs` 而非 `cand["pdf_urls"]`。
+注意两处都要改（`:450` 强候选路径、`:471` 单份路径）。
+
+### 10.4 漏洞三：自动纠名可能把基金改成其兄弟基金
+
+**位置**：`webapp/backend/app/routers/ingest.py:506-528`。
+
+**机制**：读第一份文档的 `fund_name_text`，经 `check_fund_name_token`（验其确在文档中，
+防幻觉）+ `_name_matches`（10.1 已证挡不住兄弟基金）后，
+`slugify_fund_id` 生成新 id 并 `rename_fund_id` 整体迁移该基金已有数据。
+
+若首份文档是兄弟基金的，整支基金被改名迁走 —— 这是漏洞一、二的放大器。
+
+**修复**：把纠名判据从 `_name_matches`（交集非空）提升为更强判据。
+建议：去停用词后 token 集合**相等**才允许自动纠名；不等但交集非空 →
+不纠名、不阻断，仅写入 `discovered_source_name` 供前端人工核对（该列已存在，
+`funds.discovered_source_name`，Spec B 引入）。
+
+### 10.5 漏洞四：最后一道防线是空的（逐份身份核对缺失）
+
+**位置**：`webapp/backend/app/routers/ingest.py:506-541`。
+
+**机制**：
+- `extract_unified.md:71` 确实要求模型输出 `fund_name_text`（文档抬头基金全称原文）
+- `verify.check_fund_name_token`（`verify.py:101`）确实校验它，但**只校验"该名字确实出现在文档里"**（防模型编造），**不与目标基金比对**
+- 唯一与目标基金比对之处即 10.4 的纠名分支，且：
+  - 只对**第一份**文档执行（`rename_attempted` 标志，`:506` 与 `:528`）
+  - 比对不通过时**仅跳过纠名**，`rename_attempted = True` 照常置位，
+    数据继续流向 `:537` `write_extraction` **正常入库**
+
+代码注释（`:505`）称 `_name_matches` 为"同页多基金混淆的兜底防线"，
+**但它既不逐份检查，也不拒绝数据** —— 注释与实现不符。
+
+闸 1（`check_quote_tokens`）与闸 2（`check_rolling`）检查的是"数值是否如实抄自文档"
+与"月度复利是否对得上滚动值"，均属数值可信度，**不涉及文档身份**。
+
+**修复（本节核心，同时是 10.2/10.3/10.4 的共同出口兜底）**：
+
+在 `write_extraction` 之前，对**每一份** `not_found=False` 且 `fund_name_text` 非空的
+提取结果，比对 `fund_name_text` 与目标 `req.fund_name`：
+
+- 判据：比 `_name_matches` 严（`_name_matches` 挡不住兄弟基金）。
+  建议去停用词后 token 集合相等；不等即视为身份存疑
+- 处置：**转 `pending_review` 人工待审，既不静默入库，也不静默丢弃**。
+  理由：`CLAUDE.md` 要求宁可报错停下不许猜测；而自动丢弃会造成静默数据缺失，
+  同样违反缺口零容忍。系统已有 `pending_review` 表与前端审核抽屉，直接复用
+- `fund_name_text` 为空时（模型没读到抬头）不阻断，按现状入库，但记入 job 日志
+
+### 10.6 搜索层越界：搜索结果直接当 PDF 用（已定修）
+
+**位置**：`llm_ingest/discover.py:423-427`。
+
+**机制**：v1 兜底路径在无 `archive_url` 且无 `latest_pdf_url` 时，
+直接扫 `real_sources`，**取第一个以 `.pdf` 结尾的 URL 当月报**，
+不抓页面、不校验域名归属、不做内容打样。唯一把关是下游
+`probe_l1_official:634-637` 要求文件名能解析出合法 ym。
+
+**实证**：Tavily 搜 "Gryphon Capital Income Trust" 时，
+`https://www.pricefinancial.com.au/wp-content/uploads/2024/05/Gryphon-GCI-Mar-Factsheet.pdf`
+排在结果首位 —— `pricefinancial.com.au` 是第三方理财顾问站，非发行方，仅转贴该基金资料。
+该例因文件名无年份、ym 解析失败而侥幸未入库；换成 `GCI-Jun-2026.pdf` 式命名即会入库。
+
+**修复**：删除该 PDF 捷径分支。统一规矩 —— **搜索层只回答"哪一页"，
+PDF 链接一律只能来自真实抓取的页面 HTML**，两个引擎同此规矩。
+
+**已知代价（用户已确认接受）**：少数原靠此捷径摸到一份月报的基金，
+将变为该级别 0 链接、继续降级（Wayback → 本地缓存）。理由：
+0 链接是可见失败、会记入 `confirmed_gaps` 交人工；第三方转贴入库是不可见错误、静默污染。
+
+### 10.7 明确不在本次范围
+
+**本地 PDF 缓存按目录名兜底**（`discover.py:902` 起，L2.6）：
+扫 `data/pdf_cache/{fund_id}/*.pdf` 全量入库，不核对基金。
+需目录名撞车才触发，但缓存区现存 `stake_accumlate`（拼写缺 `u`）、
+`stake_accumulate`、`stake_accumulate_fund` 三个疑似同基金目录，
+说明此类混乱已发生过。
+
+**留待单独一轮处理**，因为它牵涉历史数据是否需要回溯清查，属独立课题。
+本次仅由 10.5 的逐份身份核对提供出口兜底。
