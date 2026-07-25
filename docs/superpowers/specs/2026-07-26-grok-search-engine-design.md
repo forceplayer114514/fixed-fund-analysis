@@ -279,6 +279,12 @@ def locate_candidates(
 
 ### 4.3 `llm_ingest/grok.py`
 
+> **⚠️ 本节的 `pdf_urls` 字段已于 2026-07-26 讨论后废弃，以第十节与实施计划为准。**
+> 当时的设计是"让 Grok 报 PDF，但我们不用，只记 evidence_log"。后改为**根本不问** ——
+> 不给它这个题目，它就没机会编（2.5 实测它会按文件名规律编造，且编造的 URL 能 200 下载）。
+> 因此 `ArchiveAnswer` **不含 `pdf_urls`**，prompt 里不得出现任何索要文件链接的措辞。
+> 4.4 的反捏造闸（PDF 只能来自抓取的页面 HTML）继续有效，作为纵深防御。
+
 ```python
 GROK_ENDPOINT = "https://grok2api.supernip.site/v1/chat/completions"
 GROK_MODEL = "grok-chat-fast"
