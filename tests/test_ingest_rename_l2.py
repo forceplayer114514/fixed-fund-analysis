@@ -88,10 +88,21 @@ def _make_extraction(fund_name_text):
 
 
 def test_l2_rename_on_fund_name_text(tmp_db):
-    """fund_name_text 过两道检查 -> fund_id/fund_name 换成官方值, job 同步."""
+    """fund_name_text 过两道检查 -> fund_id/fund_name 换成官方值, job 同步.
+
+    fund_name 显式改为 "Stake Accumulate Trust" (Spec G 10.4 收严后,
+    check_fund_identity 要求 token 逐个近似对应; 原先用的 "Stake Fund" 与
+    fund_name_text "Stake Accumulate Fund" 缺少 "accumulate" 的对应, 不再被
+    判定为同一支基金, 不能再用来验证"纠名成功"这个分支 -- 这是身份闸生效的
+    预期行为, 不是回归。"Stake Accumulate Trust" 与 "Stake Accumulate Fund"
+    去停用词后同为 {stake, accumulate}, 通过身份闸; 故意不用完全相同的字面串,
+    避免 rename_fund_id 插入新行时与仍未删除的旧行撞 funds.fund_name UNIQUE
+    约束 -- fund_id 仍用旧 slug "stake_fund", 模拟 fund_id 落后于 fund_name
+    的常见场景, 用于验证 rename_fund_id 本身正常触发)。
+    """
     from webapp.backend.app.routers import ingest as ing
 
-    req = _make_l2_req()
+    req = _make_l2_req(fund_name="Stake Accumulate Trust")
     fake_ex = _make_extraction("Stake Accumulate Fund")
     patches = _patch_l2_common(fake_ex)
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -148,7 +159,12 @@ def test_l2_rename_not_triggered_when_hallucinated(tmp_db):
 
 def test_l2_pdf_cache_dir_renamed_with_real_files(tmp_db, tmp_path, monkeypatch):
     """rename 触发时, pdf_cache/{old_fund_id}/ 整个目录物理搬到
-    pdf_cache/{new_fund_id}/ (真实文件系统, 不 mock Path.rename)."""
+    pdf_cache/{new_fund_id}/ (真实文件系统, 不 mock Path.rename)。
+
+    fund_name 显式改为 "Stake Accumulate Trust", 理由同
+    test_l2_rename_on_fund_name_text (Spec G 10.4 身份闸收严后的必要调整,
+    且须与 fund_name_text 字面不同以避免 rename_fund_id 内部瞬时 UNIQUE 撞车)。
+    """
     from llm_ingest import cli as llm_cli
     from webapp.backend.app.routers import ingest as ing
 
@@ -159,7 +175,7 @@ def test_l2_pdf_cache_dir_renamed_with_real_files(tmp_db, tmp_path, monkeypatch)
     old_dir.mkdir(parents=True)
     (old_dir / "2026-01.pdf").write_bytes(b"%PDF-fake")
 
-    req = _make_l2_req()
+    req = _make_l2_req(fund_name="Stake Accumulate Trust")
     fake_ex = _make_extraction("Stake Accumulate Fund")
     patches = _patch_l2_common(fake_ex)
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -171,6 +187,28 @@ def test_l2_pdf_cache_dir_renamed_with_real_files(tmp_db, tmp_path, monkeypatch)
     new_dir = fake_pdf_root / "stake_accumulate_fund"
     assert new_dir.exists()
     assert (new_dir / "2026-01.pdf").read_bytes() == b"%PDF-fake"
+
+
+class TestRenameRejectsSiblingFund:
+    """Spec G 10.4: 自动纠名不得把基金改成其兄弟基金。
+
+    _name_matches 停用词表已排除 income/enhanced, "Yarra Enhanced Income Fund"
+    与 "Yarra Australian Income Fund" 双方都只剩 {yarra} -> 交集非空 -> 旧判据放行,
+    整支基金会被改名迁移到兄弟基金名下。
+    """
+
+    def test_sibling_fund_name_does_not_trigger_rename(self):
+        from llm_ingest import verify
+        # 旧判据 (fundmonitors._name_matches) 会放行
+        from llm_ingest import fundmonitors as fm
+        old_ok, _ = fm._name_matches(
+            "Yarra Australian Income Fund", "Yarra Enhanced Income Fund")
+        assert old_ok, "前提: 旧判据确实放行 (这正是漏洞所在)"
+
+        # 新判据必须拦下
+        new = verify.check_fund_identity(
+            "Yarra Australian Income Fund", "Yarra Enhanced Income Fund")
+        assert not new.passed, "纠名判据必须拦下兄弟基金"
 
 
 if __name__ == "__main__":

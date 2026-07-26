@@ -502,11 +502,24 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
 
             # ---- 自动纠名 (L2 通路, 只尝试一次): fund_name_text 独立走
             # check_fund_name_token (只需是 doc_text 子串, 不进闸1/闸2, 不影响
-            # 上面数值提取), 再用 _name_matches 做同页多基金混淆的兜底防线 ----
+            # 上面数值提取), 再用身份闸做同页多基金混淆的兜底防线 ----
+            # Spec G 10.4: 纠名判据由 fm_mod._name_matches (去停用词后交集非空)
+            # 换成 verify.check_fund_identity。前者停用词表已排除 income/enhanced/
+            # capital/australian, "Yarra Enhanced Income" 与 "Yarra Australian
+            # Income" 双方都只剩 {yarra} -> 交集非空 -> 放行, 会把整支基金改名
+            # 迁移到兄弟基金名下 (单份错数据升级为整支基金身份错乱)。
+            # 不通过时不纠名也不阻断, 仅写 discovered_source_name 供前端人工核对。
             if not rename_attempted and ex.fund_name_text and not ex.not_found:
                 name_ok = verify.check_fund_name_token(ex.fund_name_text, source_text)
-                fuzzy_ok, _fuzzy_reason = fm_mod._name_matches(ex.fund_name_text, req.fund_name)
-                if name_ok.passed and fuzzy_ok:
+                ident_ok = verify.check_fund_identity(ex.fund_name_text, req.fund_name)
+                if not ident_ok.passed:
+                    _job_log(jid, f"rename_skipped: {ident_ok.reason}")
+                    conn.execute(
+                        "UPDATE funds SET discovered_source_name=? WHERE fund_id=?",
+                        (ex.fund_name_text, req.fund_id),
+                    )
+                    conn.commit()
+                if name_ok.passed and ident_ok.passed:
                     conn.execute(
                         "UPDATE funds SET discovered_source_name=? WHERE fund_id=?",
                         (ex.fund_name_text, req.fund_id),
