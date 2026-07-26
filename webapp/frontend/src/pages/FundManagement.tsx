@@ -26,6 +26,8 @@ export default function FundManagement() {
     issuer: '',
     issuer_domain: '',
     asx_code: '',
+    // Spec G: 搜索引擎选择, 每次摄取生效, 不记在基金上
+    search_engine: 'tavily' as 'tavily' | 'grok',
   })
   const [addError, setAddError] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -236,6 +238,7 @@ export default function FundManagement() {
         issuer: addForm.issuer || null,
         issuer_domain: addForm.issuer_domain || null,
         asx_code: addForm.asx_code || null,
+        search_engine: addForm.search_engine,
       })
       setJob(j)
       // 后端 start_ingest 已同步 upsert 一次, 这里立刻刷新让新行马上出现在表格里
@@ -254,6 +257,7 @@ export default function FundManagement() {
     setAddForm({
       fund_id: '', fund_name: '', apir_code: '',
       confirmed_url: '', issuer: '', issuer_domain: '', asx_code: '',
+      search_engine: 'tavily',
     })
   }
 
@@ -442,6 +446,32 @@ export default function FundManagement() {
                   />
                   <div className="text-xs text-gray-400 mt-1">
                     提交后 Gemini 会自动联网找归档页并抓月度数据。
+                  </div>
+                </div>
+
+                <div className="mb-3">
+                  <label className="block text-sm font-medium mb-1">搜索引擎</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-1 text-sm">
+                      <input
+                        type="radio"
+                        name="search_engine"
+                        value="tavily"
+                        checked={addForm.search_engine === 'tavily'}
+                        onChange={() => setAddForm({ ...addForm, search_engine: 'tavily' })}
+                      />
+                      Tavily（快，确定性高）
+                    </label>
+                    <label className="flex items-center gap-1 text-sm">
+                      <input
+                        type="radio"
+                        name="search_engine"
+                        value="grok"
+                        checked={addForm.search_engine === 'grok'}
+                        onChange={() => setAddForm({ ...addForm, search_engine: 'grok' })}
+                      />
+                      Grok（慢 15–20 秒，直接给答案）
+                    </label>
                   </div>
                 </div>
 

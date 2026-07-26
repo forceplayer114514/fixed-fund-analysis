@@ -148,6 +148,7 @@ export interface IngestRequest {
   asx_code?: string | null
   max_pdf_pages?: number | null
   limit?: number | null
+  search_engine?: 'tavily' | 'grok'
 }
 
 /** LLM 摄取任务状态 (GET /api/ingest/jobs/{id}) */
