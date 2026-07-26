@@ -493,6 +493,15 @@ def probe(
     else:
         wl_hit = None
     if wl_hit is None:
+        # task-15 回归修复: page_name 为空时须 fail-closed 拒收, 不能借
+        # check_fund_identity 对空信号的放行通道 (那是为 L2 PDF 通路设计的,
+        # 那边有 quote/rolling/field_type/antifab 四道数值闸兜底; L1 没有
+        # 数值闸兜底, check_fund_identity 是唯一身份判据, 空信号必须拒收
+        # 而非放行 -- 信息最少时防线不能最松)。
+        if not page_name:
+            return {"status": "name_mismatch", "records": [], "ytd_map": {},
+                    "url": url, "page_fund_name": page_name,
+                    "errors": ["name_missing: L1 页面未能抽出基金名, 无信号不可放行"]}
         # Spec G 终审补漏: 换 verify.check_fund_identity (与 L2 自动纠名闸
         # 同一判据), 老 _name_matches 停用词表分不出同发行商兄弟基金
         # (Yarra Enhanced Income vs Yarra Australian Income 均只剩 {yarra})。

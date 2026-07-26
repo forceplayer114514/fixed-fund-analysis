@@ -171,6 +171,33 @@ def test_name_matches_only_stopwords_shared_fails():
     assert any(kw in msg for kw in ("mismatch", "tokens_empty"))
 
 
+def test_probe_page_name_none_rejected_fail_closed():
+    """回归防线 (task-15): page_name 抽取失败 (None) 时须 fail-closed 拒收.
+
+    d58f1a4 把 L1 唯一身份判据换成 verify.check_fund_identity 后, 该函数对
+    fund_name_text 为空的设计是"放行" (no_fund_name_text, 为 L2 PDF 通路准备,
+    那边有数值闸兜底)。L1 没有数值闸兜底, page_name=None 时应保持旧
+    _name_matches 的 fail-closed 行为 (拒收), 而不是借用 check_fund_identity
+    的空信号放行通道。
+    """
+    fake_md = "no heading here, extractor finds nothing"
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "_extract_page_fund_name", return_value=None), \
+         patch.object(fm, "find_fundid",
+                      return_value=(9999, "unknownX")), \
+         patch.object(fm, "fetch_profile_markdown",
+                      return_value=(fake_md, "ok")), \
+         patch.object(fm, "parse_html_monthly_table",
+                      return_value=(fake_records, {})), \
+         patch.object(fm, "gate_check_table",
+                      return_value=(True, [])):
+        result = fm.probe("Some Target Fund Name")
+    assert result["status"] == "name_mismatch"
+    assert result["records"] == []
+    assert result["page_fund_name"] is None
+    assert any("name_missing" in e for e in result["errors"])
+
+
 class TestFindFundidEngineDispatch:
     """Spec G 4.7: L1 拿 FundID 支持 tavily / grok 两个引擎。"""
 
