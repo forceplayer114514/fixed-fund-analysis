@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _resp(status: int, payload: dict | None = None, text: str = ""):
+def _resp(status: int, payload: dict | None = None, text: str = "") -> MagicMock:
     m = MagicMock()
     m.status_code = status
     m.json.return_value = payload or {}
@@ -15,7 +15,7 @@ def _resp(status: int, payload: dict | None = None, text: str = ""):
     return m
 
 
-def _ok_payload(content: str, sources: list[str]):
+def _ok_payload(content: str, sources: list[str]) -> dict:
     return {
         "choices": [{"message": {"content": content, "annotations": []}}],
         "search_sources": [{"title": "", "type": "web", "url": u} for u in sources],
@@ -87,6 +87,22 @@ class TestAnswerArchive:
         with patch.object(grok.requests, "post", return_value=_resp(200, payload)):
             a = grok.answer_archive("Gryphon Capital Income Trust", "Gryphon Capital")
         assert a.archive_url == "https://gcapinvest.com/our-lit"
+
+    def test_respects_explicit_null_archive_url(self, monkeypatch):
+        """Grok 遵循 prompt 指示、正确返回合法 JSON 且 archive_url 明确为
+        null 时, 不得被正则兜底从 evidence/issuer_domain 里抓一个不相关的
+        URL 顶替这个诚实的"未找到" (Task 8 审查发现)。"""
+        from llm_ingest import grok
+        monkeypatch.setenv("GROK_API_KEY", "k")
+        content = json.dumps({
+            "issuer_domain": "https://realissuer.com",
+            "archive_url": None,
+            "evidence": "Found via https://some-random-thirdparty-aggregator.com/...",
+        })
+        payload = _ok_payload(content, ["https://realissuer.com"])
+        with patch.object(grok.requests, "post", return_value=_resp(200, payload)):
+            a = grok.answer_archive("Some Fund", "Some Issuer")
+        assert a.archive_url is None
 
     def test_answer_has_no_pdf_field(self, monkeypatch):
         """Spec G 2.5 硬约束: 绝不问 Grok 要 PDF 链接, 它会按文件名规律编造

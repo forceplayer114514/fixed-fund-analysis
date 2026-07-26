@@ -156,11 +156,15 @@ def answer_archive(
             .replace("{asx_hint}", f", ASX code: {asx_code}" if asx_code else "")
     )
     ans = grok_ask(prompt)
-    obj = _parse_json(ans.content) or {}
+    parsed = _parse_json(ans.content)
+    obj = parsed or {}
     archive_url = obj.get("archive_url") or None
     issuer_domain = obj.get("issuer_domain") or None
-    # 兜底: Grok 不听话直接说人话时, 正则从 prose 抽第一个 URL
-    if not archive_url:
+    # 兜底: 只在 JSON 解析彻底失败 (Grok 不听话直接说人话) 时才生效。
+    # JSON 解析成功且明确给 archive_url: null 是 Grok 遵循 prompt "找不到
+    # 用 null" 指示的诚实回答, 绝不能被正则从 evidence/issuer_domain 等
+    # 其它字段里抓一个不相关的 URL 顶替 (Task 8 审查发现)。
+    if parsed is None:
         urls = [u.rstrip(".,;") for u in _URL_RE.findall(ans.content)]
         archive_url = urls[0] if urls else None
     return ArchiveAnswer(
