@@ -191,5 +191,83 @@ class TestDiscoveredPdfsExcludeSiblingFunds:
         )
 
 
+class TestLocateCandidates:
+    """Spec G 4.1: 按引擎分派"定位候选页面", 下游抓页/抽 PDF/打样两引擎共用。"""
+
+    def test_tavily_engine_uses_search_and_rank(self, monkeypatch):
+        from llm_ingest import discover2 as d2
+        calls = {"search": 0, "rank": 0, "grok": 0}
+
+        def _search(*a, **k):
+            calls["search"] += 1
+            return ["https://issuer.com/reports"]
+
+        def _rank(urls, *a, **k):
+            calls["rank"] += 1
+            return [{"url": urls[0], "score": 90, "reason": "r"}]
+
+        monkeypatch.setattr(d2, "multi_query_search", _search)
+        monkeypatch.setattr(d2, "rank_urls", _rank)
+        domain, ranked, ev = d2.locate_candidates(
+            "Some Fund", "Some Issuer", engine="tavily", client=object())
+        assert calls["search"] == 1 and calls["rank"] == 1
+        assert ranked[0]["url"] == "https://issuer.com/reports"
+        assert ev["engine_used"] == "tavily"
+
+    def test_grok_engine_skips_gemini_rank(self, monkeypatch):
+        """本设计的核心收益: Grok 已排好序, 不再调 Gemini rank_urls。"""
+        from llm_ingest import discover2 as d2
+        from llm_ingest import grok
+
+        called = {"rank": 0}
+        monkeypatch.setattr(
+            d2, "rank_urls",
+            lambda *a, **k: called.__setitem__("rank", called["rank"] + 1) or [])
+        monkeypatch.setattr(
+            d2, "_grok_answer_archive",
+            lambda *a, **k: grok.ArchiveAnswer(
+                issuer_domain="https://gcapinvest.com",
+                archive_url="https://gcapinvest.com/our-lit",
+                sources=["https://gcapinvest.com/our-lit"],
+            ))
+        domain, ranked, ev = d2.locate_candidates(
+            "Gryphon Capital Income Trust", "Gryphon Capital",
+            engine="grok", client=object())
+        assert called["rank"] == 0, "engine=grok 时不得调用 Gemini rank_urls"
+        assert ranked[0]["url"] == "https://gcapinvest.com/our-lit"
+        assert domain == "https://gcapinvest.com"
+        assert ev["engine_used"] == "grok"
+
+    def test_grok_failure_falls_back_to_tavily_visibly(self, monkeypatch):
+        """降级必须可见 (Spec G 4.5): evidence 要记 engine_used 与 fallback_reason。"""
+        from llm_ingest import discover2 as d2
+        from llm_ingest import grok
+
+        def _boom(*a, **k):
+            raise grok.GrokError("HTTP 503: upstream_unavailable")
+
+        monkeypatch.setattr(d2, "_grok_answer_archive", _boom)
+        monkeypatch.setattr(
+            d2, "multi_query_search", lambda *a, **k: ["https://issuer.com/reports"])
+        monkeypatch.setattr(
+            d2, "rank_urls",
+            lambda urls, *a, **k: [{"url": urls[0], "score": 90, "reason": "r"}])
+
+        domain, ranked, ev = d2.locate_candidates(
+            "Some Fund", "Some Issuer", engine="grok", client=object())
+        assert ranked, "降级后应仍有候选"
+        assert ev["engine_requested"] == "grok"
+        assert ev["engine_used"] == "tavily"
+        assert "503" in ev["fallback_reason"]
+
+    def test_default_engine_is_tavily(self, monkeypatch):
+        from llm_ingest import discover2 as d2
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: ["https://x.com/a"])
+        monkeypatch.setattr(
+            d2, "rank_urls", lambda urls, *a, **k: [{"url": urls[0], "score": 1, "reason": ""}])
+        _d, _r, ev = d2.locate_candidates("F", "I", client=object())
+        assert ev["engine_used"] == "tavily"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

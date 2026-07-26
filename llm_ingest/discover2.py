@@ -285,6 +285,99 @@ def _heuristic_rank(
     return scored
 
 
+# ---- 定位候选页面: 按引擎分派 (Spec G 4.1) ----
+#
+# find_archive_v2 四步中, 第 1-2 步 (搜索 + Gemini 排序) 本质是产出
+# (issuer_domain, 已排序候选页面), 第 3-4 步 (抓页 + 正则抽 PDF + 打样) 消费它。
+# 按引擎分派只切第 1-2 步:
+#   - Tavily 是检索, 给的是一堆 URL, 需要 Gemini 排序
+#   - Grok 是 agentic search, 直接给答案, 已排好序, 再让 Gemini 排是多此一举
+#     (实测答 GCI 归档页 3 轮全对 https://gcapinvest.com/our-lit)
+# 第 3-4 步保持共用, 天然是反捏造闸: Grok 若主动提了 PDF, 那些 URL 不在抓下来的
+# 页面 <a href> 里, 自动被丢弃。
+
+def _grok_answer_archive(fund_name: str, issuer: str, asx_code: Optional[str]):
+    """薄封装, 便于测试 monkeypatch (避免 patch 到 grok 模块全局)."""
+    from .grok import answer_archive
+    return answer_archive(fund_name, issuer, asx_code)
+
+
+def _locate_via_tavily(
+    fund_name: str,
+    issuer: str,
+    issuer_domain: Optional[str],
+    client: Optional[Client],
+) -> Tuple[Optional[str], List[Dict[str, Any]], List[str]]:
+    """Tavily 路径: 三次 query 拿 URL 池 -> 挑 issuer 域 -> Gemini 排序."""
+    try:
+        sources = multi_query_search(
+            [fund_name, f"{fund_name} performance", f"{fund_name} monthly report"],
+            max_results_per_query=5,
+            exclude_aggregators=True,
+        )
+    except TavilyError:
+        sources = []
+    if not sources:
+        return (issuer_domain, [], [])
+    domain = _pick_issuer_domain(sources, issuer, fund_name) or issuer_domain
+    ranked = rank_urls(sources, fund_name, issuer, domain, client=client)
+    return (domain, ranked, sources)
+
+
+def locate_candidates(
+    fund_name: str,
+    issuer: str,
+    issuer_domain: Optional[str] = None,
+    asx_code: Optional[str] = None,
+    *,
+    engine: str = "tavily",
+    client: Optional[Client] = None,
+) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, Any]]:
+    """返 (issuer_domain, ranked, evidence).
+
+    ranked 元素形如 {"url": str, "score": int, "reason": str}, 已排序。
+    evidence 供 evidence_log 记录: engine_requested / engine_used /
+    fallback_reason / sources。
+
+    engine="grok" 且 Grok 失败时自动降级 Tavily, 但**降级必须可见** --
+    evidence 里记 engine_used 与 fallback_reason, 上层再写进 job 日志。
+    (Spec G 4.5: 旧代码注释禁止 SearXNG->Tavily 自动降级, 顾虑是"静默烧额度且
+    故障不可见"; 这里的降级不静默, 且 Grok 的 503 是 15-20% 的高频瞬时故障,
+    不降级会让相应比例的摄取直接失败。)
+    """
+    ev: Dict[str, Any] = {
+        "engine_requested": engine,
+        "engine_used": engine,
+        "fallback_reason": "",
+        "sources": [],
+    }
+
+    if engine == "grok":
+        try:
+            ans = _grok_answer_archive(fund_name, issuer, asx_code)
+        except Exception as e:  # noqa: BLE001  (GrokError 及网络异常一并降级)
+            ev["engine_used"] = "tavily"
+            ev["fallback_reason"] = f"{type(e).__name__}: {e}"
+        else:
+            ev["sources"] = list(ans.sources)
+            ev["grok_evidence"] = ans.evidence
+            if ans.archive_url:
+                ranked = [{
+                    "url": ans.archive_url, "score": 100, "reason": "grok_answer",
+                }]
+                return (ans.issuer_domain or issuer_domain, ranked, ev)
+            ev["engine_used"] = "tavily"
+            ev["fallback_reason"] = "grok_no_archive_url"
+
+    domain, ranked, sources = _locate_via_tavily(
+        fund_name, issuer, issuer_domain, client)
+    ev["engine_used"] = "tavily" if engine != "tavily" else "tavily"
+    ev["sources"] = sources
+    if not ranked:
+        ev["reason"] = "搜索无结果"
+    return (domain, ranked, ev)
+
+
 # ---- Step 2: 并发抓页 + 抽 PDF 链接 ----
 
 def _probe_one(url: str) -> Dict[str, Any]:
@@ -374,6 +467,7 @@ def find_archive_v2(
     *,
     client: Optional[Client] = None,
     top_n: int = TOP_N_PROBE,
+    engine: str = "tavily",
 ) -> ArchivePointer:
     """v2 归档定位: Tavily -> Gemini 排序 -> Scrapling 抓 -> PDF 打样验证.
 
@@ -382,34 +476,17 @@ def find_archive_v2(
     if client is None:
         client = Client()
 
-    # ---- 步 1: Tavily 拿 URL ----
-    try:
-        real_sources = multi_query_search(
-            [fund_name, f"{fund_name} performance", f"{fund_name} monthly report"],
-            max_results_per_query=5,
-            exclude_aggregators=True,
-        )
-    except TavilyError:
-        real_sources = []
-
-    if not real_sources:
-        return ArchivePointer(
-            archive_url=None, pagination_param=None, no_archive=True,
-            latest_pdf_url=None, issuer_domain_confirmed=issuer_domain,
-            evidence="Tavily 搜索无结果", raw={},
-            search_sources=[], search_queries=[],
-        )
-
-    # ---- 步 1.5: 挑 issuer 域 (用现有启发式, 排聚合站) ----
-    domain = _pick_issuer_domain(real_sources, issuer, fund_name) or issuer_domain
-
-    # ---- 步 2: Gemini 排优先级 ----
-    ranked = rank_urls(real_sources, fund_name, issuer, domain, client=client)
+    # ---- 步 1+2: 定位候选页面 (按引擎分派, Spec G 4.1) ----
+    domain, ranked, locate_ev = locate_candidates(
+        fund_name, issuer, issuer_domain, asx_code, engine=engine, client=client,
+    )
+    real_sources = list(locate_ev.get("sources") or [])
     if not ranked:
         return ArchivePointer(
             archive_url=None, pagination_param=None, no_archive=True,
-            latest_pdf_url=None, issuer_domain_confirmed=domain,
-            evidence="排序无结果", raw={"ranked": []},
+            latest_pdf_url=None, issuer_domain_confirmed=domain or issuer_domain,
+            evidence=str(locate_ev.get("reason") or "定位无候选页面"),
+            raw={"locate": locate_ev},
             search_sources=real_sources, search_queries=[],
         )
     top_urls = [r["url"] for r in ranked[:top_n]]
@@ -463,7 +540,7 @@ def find_archive_v2(
                 latest_pdf_url=pdf_url,
                 issuer_domain_confirmed=domain,
                 evidence=f"归档页确认: {cand['url']} 含 {len(cand['pdf_urls'])} 份 PDF, {pdf_url} 验证为月报",
-                raw={"ranked": ranked, "probes": [
+                raw={"ranked": ranked, "locate": locate_ev, "probes": [
                     {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                 ]},
                 search_sources=real_sources,
@@ -491,7 +568,7 @@ def find_archive_v2(
                 latest_pdf_url=first_pdf,
                 issuer_domain_confirmed=domain,
                 evidence=f"单份最新: {first_pdf} (归档页未找到, 走 wayback 补历史)",
-                raw={"ranked": ranked, "probes": [
+                raw={"ranked": ranked, "locate": locate_ev, "probes": [
                     {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                 ]},
                 search_sources=real_sources,
@@ -536,7 +613,7 @@ def find_archive_v2(
                             latest_pdf_url=first_pdf,
                             issuer_domain_confirmed=domain,
                             evidence=f"导航命中: {nav_start['url']} -> {next_url} ({len(next_pdfs)} 份 PDF)",
-                            raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
                                 {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                             ]},
                             search_sources=real_sources, search_queries=[],
@@ -574,7 +651,7 @@ def find_archive_v2(
                                     latest_pdf_url=first_pdf2,
                                     issuer_domain_confirmed=domain,
                                     evidence=f"主页重试导航命中: {home_url} -> {next_url2} ({len(next_pdfs2)} 份 PDF)",
-                                    raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                                    raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
                                         {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                                     ]},
                                     search_sources=real_sources, search_queries=[],
@@ -590,7 +667,7 @@ def find_archive_v2(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,
         evidence="top-N 探测 + 导航兜底均未发现月报 PDF, 走 L2/L3 兜底",
-        raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+        raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
             {"url": p["url"], "pdf_count": len(p["pdf_urls"]), "error": p.get("error")}
             for p in probes
         ]},
