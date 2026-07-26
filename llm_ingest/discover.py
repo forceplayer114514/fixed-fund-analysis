@@ -2,7 +2,8 @@
 
 三层 fallback (集合差驱动, 概念抄 skills/lib/strategies.py):
 
-  L1 官网归档页    Gemini 联网 (messages_with_search) 找页, 再 fetch, 再 Gemini 解析
+  L1 官网归档页    discover2.find_archive_v2 按 engine (tavily/grok) 分派定位归档页,
+                    未定位到时降级 find_archive_via_search (纯 Tavily), 再 fetch, 再 Gemini 解析
   L2 Wayback CDX  http://web.archive.org/cdx/search/cdx  (纯 requests, 20 行)
   L3 fundmonitors Full Fund Profile AJAX  (纯 requests, 40 行)
 
@@ -27,7 +28,7 @@ from dateutil import parser as _date_parser
 from dateutil.parser import ParserError as _DateParserError
 
 from . import extract as ex_mod
-from .client import Client, resolve_sources
+from .client import Client
 from .search import TavilyError, multi_query_search
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -47,7 +48,7 @@ class ArchivePointer:
     issuer_domain_confirmed: Optional[str]
     evidence: str
     raw: Dict[str, Any] = field(default_factory=dict)
-    search_sources: List[str] = field(default_factory=list)  # grounding 展开后的真实 URL
+    search_sources: List[str] = field(default_factory=list)  # 搜索引擎 (Tavily/Grok) 返回的真实 URL
     search_queries: List[str] = field(default_factory=list)
     # v2 (discover2.find_archive_v2) 抓页时已直接看见的所有 PDF URL. v1 不填。
     # run_discovery 若发现此字段非空, 优先用它反解 ym, 跳过再让 Gemini 解析归档页。
@@ -307,31 +308,6 @@ def _pick_issuer_domain(sources: List[str], issuer: str, fund_name: str) -> Opti
     return None
 
 
-def _search_and_resolve(
-    client: Client,
-    query_prompt: str,
-    max_uses: int = 6,
-) -> Tuple[List[str], List[str]]:
-    """一次搜索调用 -> (真实 URL, queries). 短明 prompt 强触发工具."""
-    resp = client.messages_with_search(query_prompt, max_tokens=2048, max_uses=max_uses)
-    reals = resolve_sources(resp.search_sources) if resp.search_sources else []
-    return reals, list(resp.search_queries)
-
-
-def _search_with_retry(
-    client: Client, prompts: List[str], max_tries: int = 3,
-) -> Tuple[List[str], List[str]]:
-    """轮流试多组 prompt, 拿到 sources 立即返回. sub2api web_search 触发是概率性的."""
-    all_queries: List[str] = []
-    for prompt in prompts:
-        for _ in range(max_tries):
-            sources, queries = _search_and_resolve(client, prompt)
-            all_queries.extend(queries)
-            if sources:
-                return sources, all_queries
-    return [], all_queries
-
-
 def find_archive_via_search(
     fund_name: str,
     issuer: str,
@@ -342,16 +318,13 @@ def find_archive_via_search(
 ) -> ArchivePointer:
     """L1 阶段 A (搜索) + 阶段 B (判 JSON).
 
-    sub2api 的 web_search 触发是概率性的 — 用多个显式子问 + [SOURCE] 标记 prompt
-    实测触发率高; 触发失败时重试并换 prompt 模板 (`_search_with_retry`)。
-    信 grounding sources 展开后的 URL, 不信文字回答里生成的 URL (幻觉高发)。
+    v1 兜底路径, 只在 v2 (discover2.find_archive_v2) 完全空手时才被调用。
+    纯 Tavily REST 一次调用给结构化真 URL, 无 grounding 中间层, 无幻觉。
     """
     if client is None:
         client = Client()
 
     # --- 阶段 A: 搜索 ---
-    # 首选 Tavily REST 一次调用给结构化真 URL, 无 grounding 中间层, 无幻觉。
-    # Tavily 失败 (key 缺 / 网错 / 全 query 空返) 再降级 sub2api web_search。
     real_sources: List[str] = []
     queries: List[str] = []
     try:
@@ -368,29 +341,9 @@ def find_archive_via_search(
         queries = tavily_queries if real_sources else []
     except TavilyError:
         real_sources = []
-
-    if not real_sources:
-        # --- 回退: sub2api web_search (英文简洁 prompt, 强制触发) ---
-        # 教训:
-        # - 中文 prompt: Gemini 只跑 1 条 vague query 且返幻觉 URL (澳洲基金语料全英)
-        # - 全裸 [SOURCE] <url>: 只出 grounding-redirect 链, 中国网络下 follow 超时
-        # 现改: 英文 + 强制 markdown link 格式 `[hostname](url)`, label 是纯域名
-        # -> _parse_grounding 走 label 短路, 免走 Google 直连
-        p_variants = [
-            (
-                f"Use web_search TWICE:\n"
-                f"1. Query: {fund_name}\n"
-                f"2. Query: {fund_name} performance\n"
-                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
-            ),
-            (
-                f"Use web_search TWICE:\n"
-                f"1. Query: {fund_name} monthly report\n"
-                f"2. Query: {fund_name} fact sheet\n"
-                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
-            ),
-        ]
-        real_sources, queries = _search_with_retry(client, p_variants, max_tries=2)
+    # Spec G: 此处原有 sub2api web_search 兜底 (messages_with_search + grounding
+    # 展开), 已删 -- 命中率仅 53%, 会幻觉 URL (Yarra 一测抓到 yarracapital.com,
+    # 真域是 yarracm.com), grounding 跳板需直连 Google 1e100.net 国内 20s 卡死。
 
     # --- 阶段 B: 让 Gemini 读 sources 判 JSON ---
     domain = _pick_issuer_domain(real_sources, issuer, fund_name) if real_sources else issuer_domain

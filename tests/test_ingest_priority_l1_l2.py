@@ -71,14 +71,32 @@ def test_l1_ok_skips_pdf_and_records_discovered_source_name(tmp_db):
 
 
 def test_l1_fail_falls_back_to_pdf(tmp_db):
-    """L1 status!=ok -> 走 L2 PDF 通路 (既有 discovery)."""
+    """L1 status!=ok -> 走 L2 PDF 通路 (既有 discovery).
+
+    Spec G: discover.py 的 find_archive_via_search 已删 sub2api web_search
+    兜底, 只走 Tavily。若不 mock discover2.find_archive_v2, Tavily 账号配额
+    用尽 (HTTP 432, 2026-07-26 起持续) 时 archive_url/latest_pdf_url 全空,
+    _fetch 压根不会被调, 这条测试会变成依赖 Tavily 账号活期状态的假单测。
+    直接 mock v2 定位结果, 保证测试与外部网络/账号状态解耦。
+    """
     from webapp.backend.app.routers import ingest as ing
     from llm_ingest import fundmonitors as fm
+    from llm_ingest import discover2 as d2_mod
+    from llm_ingest.discover import ArchivePointer
 
+    fake_pointer = ArchivePointer(
+        archive_url="https://issuer.example.com/reports/archive",
+        pagination_param=None,
+        no_archive=False,
+        latest_pdf_url=None,
+        issuer_domain_confirmed="issuer.example.com",
+        evidence="stub for test_l1_fail_falls_back_to_pdf",
+    )
     with patch.object(fm, "probe", return_value={
         "status": "fetch_fail", "records": [], "ytd_map": {},
         "url": None, "page_fund_name": None, "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch:
+    }), patch.object(d2_mod, "find_archive_v2", return_value=fake_pointer), \
+         patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch:
         # discovery 会尝试跑 (返 None 让 discover fallback 到 raise)
         jid = ing._job_new("test_fund")
         try:

@@ -1,10 +1,9 @@
-"""llm_ingest/search.py 搜索后端切换 (Tavily/SearXNG) 测试。
+"""llm_ingest/search.py Tavily 搜索客户端测试。
 
-2026-07-19 `tavily替代方案-最终报告.md` 实测后一度确定 SearXNG 换血做主搜索,
-Tavily 降级为 SEARCH_BACKEND 环境变量手动切的应急回退。但 SearXNG 服务已
-下线 (Spec G 2.8, localhost:8081 不通), 该变量全仓库未设置, 旧默认值
-"searxng" 导致每次搜索都静默降级到 sub2api web_search。现默认值改回
-tavily, SearXNG 仅作 SEARCH_BACKEND=searxng 手动切换的备选后端。
+Spec G: SearXNG 后端与 SEARCH_BACKEND 分派已删除 (该服务已下线,
+localhost:8081 不通, 且该环境变量全仓库从未设置过, 旧默认值一度让每次
+搜索都静默降级到 sub2api web_search)。现 tavily_search() 直接调
+_tavily_impl, 无分派逻辑。
 """
 from unittest.mock import MagicMock
 
@@ -14,8 +13,6 @@ from llm_ingest import search as tavily_mod
 from llm_ingest.search import (
     TavilyError,
     TavilyResult,
-    _host_blocked,
-    _searxng_impl,
     _tavily_impl,
     tavily_search,
 )
@@ -29,124 +26,14 @@ def _mock_resp(status_code: int = 200, json_data=None, text: str = "") -> MagicM
     return r
 
 
-class TestHostBlocked:
-    def test_exact_match_blocked(self):
-        assert _host_blocked("https://morningstar.com/x", ["morningstar.com"])
-
-    def test_subdomain_blocked(self):
-        assert _host_blocked("https://www.morningstar.com/x", ["morningstar.com"])
-
-    def test_lookalike_domain_not_blocked(self):
-        """notmorningstar.com.evil.com 不该被 morningstar.com 误伤."""
-        assert not _host_blocked("https://notmorningstar.com.evil.com/x", ["morningstar.com"])
-
-    def test_unrelated_domain_not_blocked(self):
-        assert not _host_blocked("https://hellostake.com/x", ["morningstar.com"])
-
-
-class TestSearxngImpl:
-    def test_parses_results(self, monkeypatch):
-        resp = _mock_resp(json_data={"results": [
-            {"url": "https://hellostake.com/au", "title": "Stake", "content": "snippet"},
-            {"url": "https://reddit.com/r/x", "title": "Reddit", "content": "noise"},
-        ]})
-        monkeypatch.setattr(tavily_mod.requests, "get", MagicMock(return_value=resp))
-        out = _searxng_impl("Stake Accumulate Fund", max_results=8)
-        assert out == [
-            TavilyResult(url="https://hellostake.com/au", title="Stake", content="snippet"),
-            TavilyResult(url="https://reddit.com/r/x", title="Reddit", content="noise"),
-        ]
-
-    def test_truncates_to_max_results(self, monkeypatch):
-        resp = _mock_resp(json_data={"results": [
-            {"url": f"https://site{i}.com"} for i in range(10)
-        ]})
-        monkeypatch.setattr(tavily_mod.requests, "get", MagicMock(return_value=resp))
-        out = _searxng_impl("q", max_results=3)
-        assert len(out) == 3
-
-    def test_skips_results_without_url(self, monkeypatch):
-        resp = _mock_resp(json_data={"results": [{"title": "no url"}, {"url": "https://x.com"}]})
-        monkeypatch.setattr(tavily_mod.requests, "get", MagicMock(return_value=resp))
-        out = _searxng_impl("q")
-        assert [r.url for r in out] == ["https://x.com"]
-
-    def test_non_200_raises_tavily_error(self, monkeypatch):
-        resp = _mock_resp(status_code=403, text="Forbidden")
-        monkeypatch.setattr(tavily_mod.requests, "get", MagicMock(return_value=resp))
-        with pytest.raises(TavilyError):
-            _searxng_impl("q")
-
-    def test_network_error_raises_tavily_error(self, monkeypatch):
-        import requests as real_requests
-        monkeypatch.setattr(
-            tavily_mod.requests, "get",
-            MagicMock(side_effect=real_requests.RequestException("conn refused")),
-        )
-        with pytest.raises(TavilyError):
-            _searxng_impl("q")
-
-    def test_uses_env_configured_url_and_engines(self, monkeypatch):
-        monkeypatch.setenv("SEARXNG_URL", "http://searxng-host:9000")
-        monkeypatch.setenv("SEARXNG_ENGINES", "bing")
-        mock_get = MagicMock(return_value=_mock_resp(json_data={"results": []}))
-        monkeypatch.setattr(tavily_mod.requests, "get", mock_get)
-        _searxng_impl("q")
-        called_url = mock_get.call_args[0][0]
-        called_params = mock_get.call_args[1]["params"]
-        assert called_url == "http://searxng-host:9000/search"
-        assert called_params["engines"] == "bing"
-
-
 class TestTavilySearchDispatch:
     def test_default_backend_is_tavily(self, monkeypatch):
-        """未设 SEARCH_BACKEND 时必须走 Tavily。
-
-        Spec G 2.8: 旧默认值 "searxng" 指向已死服务 (localhost:8081 不通),
-        导致每次搜索都抛 TavilyError 静默降级到 sub2api web_search。
-        """
-        monkeypatch.delenv("SEARCH_BACKEND", raising=False)
-        mock_searxng = MagicMock(return_value=[])
+        """tavily_search 必须直接调 _tavily_impl, 无后端分派。"""
         mock_tavily = MagicMock(return_value=[])
-        monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
-        monkeypatch.setattr(tavily_mod, "_tavily_impl", mock_tavily)
-        tavily_search("q")
-        mock_tavily.assert_called_once()
-        mock_searxng.assert_not_called()
-
-    def test_backend_env_var_switches_to_tavily(self, monkeypatch):
-        monkeypatch.setenv("SEARCH_BACKEND", "tavily")
-        mock_searxng = MagicMock(return_value=[])
-        mock_tavily = MagicMock(return_value=[])
-        monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
         monkeypatch.setattr(tavily_mod, "_tavily_impl", mock_tavily)
         tavily_search("q", search_depth="advanced")
         mock_tavily.assert_called_once()
-        mock_searxng.assert_not_called()
         assert mock_tavily.call_args[1]["search_depth"] == "advanced"
-
-    def test_searxng_backend_client_side_excludes_and_overfetches(self, monkeypatch):
-        monkeypatch.setenv("SEARCH_BACKEND", "searxng")
-        results = [
-            TavilyResult(url="https://morningstar.com/x", title="", content=""),
-            TavilyResult(url="https://hellostake.com/au", title="", content=""),
-            TavilyResult(url="https://lonsec.com.au/y", title="", content=""),
-        ]
-        mock_searxng = MagicMock(return_value=results)
-        monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
-        out = tavily_search(
-            "q", max_results=5, exclude_domains=["morningstar.com", "lonsec.com.au"],
-        )
-        assert [r.url for r in out] == ["https://hellostake.com/au"]
-        # over_fetch: exclude_domains 会让条数变少, 应多取几条再截断
-        assert mock_searxng.call_args[1]["max_results"] == 15
-
-    def test_searxng_backend_no_exclude_domains_no_overfetch(self, monkeypatch):
-        monkeypatch.setenv("SEARCH_BACKEND", "searxng")
-        mock_searxng = MagicMock(return_value=[])
-        monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
-        tavily_search("q", max_results=5)
-        assert mock_searxng.call_args[1]["max_results"] == 5
 
 
 class TestTavilyImplUnchanged:
