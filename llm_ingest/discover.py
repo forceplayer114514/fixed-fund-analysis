@@ -682,16 +682,32 @@ def probe_l1_official(
 def probe_l2_wayback(
     issuer_domain: str,
     gap_set: Set[str],
+    fund_name: str,
 ) -> List[Tuple[str, str]]:
     """L2: 用 CDX API 查 issuer_domain 快照, 从 original URL 提月份补 gap_set 中的洞.
 
     每月最多 CDX_SNAPSHOTS_PER_MONTH 快照 (抄自 strategies.py 补1).
+
+    Spec G 10.2: CDX 查的是整个发行商域名下的全部 PDF。一家发行商旗下多支基金
+    的文件同处一域, 若只按"文件名月份落在缺口内"筛选, 兄弟基金的月报会被当作
+    本基金数据填进缺口。而本步专用于补缺口 -- CLAUDE.md 一.3 对缺口是零容忍、
+    禁填补的, 这里必须是全系统最严的地方, 不是最宽的。故加两道过滤:
+      (a) _NON_MONTHLY_HINTS: 排除 PDS/TMD/FSG/研究报告等非月度业绩文档
+      (b) _best_match_pdfs: 只留与 fund_name 匹配分并列最高的
+          -- 必须用**相对**判据。绝对判据 (_pdf_slug_match_count > 0) 与
+          Spec G 10.1 的根因同病, 挡不住兄弟基金:
+            目标 "Yarra Enhanced Income Fund" -> {yarra, enhanced, income}
+            yarra-enhanced-income-jun-2026.pdf   交集 3
+            yarra-australian-income-jun-2026.pdf 交集 2, 同样 > 0
+          故改为两趟: 先收集候选, 再按最高分筛, 最后套快照数上限。
     """
     if not gap_set or not issuer_domain:
         return []
+    from .discover2 import _best_match_pdfs
     patterns = [f"{issuer_domain}/*", f"{issuer_domain}/wp-content/uploads/*"]
-    snap_count: Dict[str, int] = {}
-    hits: List[Tuple[str, str]] = []
+
+    # ---- 第一趟: 收集通过文档类型与月份筛选的候选 ----
+    cands: List[Tuple[str, str, str]] = []  # (ym, ts, original)
     for pat in patterns:
         # https 端更稳; http 通常也可, 但本机可能被拦
         api = (
@@ -711,14 +727,29 @@ def probe_l2_wayback(
             if len(row) < 2:
                 continue
             ts, original = row[0], row[1]
+            fname = original.rsplit("/", 1)[-1]
+            # (a) 文档类型: PDS/TMD/FSG/研究报告等不是月度业绩报告
+            if _NON_MONTHLY_HINTS.search(fname):
+                continue
             ym = _parse_ym_from_text(original)
             if not ym or ym not in gap_set:
                 continue
-            if snap_count.get(ym, 0) >= CDX_SNAPSHOTS_PER_MONTH:
-                continue
-            snap_count[ym] = snap_count.get(ym, 0) + 1
-            wayback_url = f"https://web.archive.org/web/{ts}/{original}"
-            hits.append((ym, wayback_url))
+            cands.append((ym, ts, original))
+
+    if not cands:
+        return []
+
+    # ---- 第二趟: (b) 只留与 fund_name 匹配分并列最高的 ----
+    keep = set(_best_match_pdfs([o for _ym, _ts, o in cands], fund_name))
+    snap_count: Dict[str, int] = {}
+    hits: List[Tuple[str, str]] = []
+    for ym, ts, original in cands:
+        if original not in keep:
+            continue
+        if snap_count.get(ym, 0) >= CDX_SNAPSHOTS_PER_MONTH:
+            continue
+        snap_count[ym] = snap_count.get(ym, 0) + 1
+        hits.append((ym, f"https://web.archive.org/web/{ts}/{original}"))
     return _dedup_links(hits)
 
 
@@ -890,7 +921,7 @@ def run_discovery(
         if gap_set and domain:
             # 去 scheme
             dom_clean = re.sub(r"^https?://", "", domain).rstrip("/")
-            l2_links = probe_l2_wayback(dom_clean, gap_set)
+            l2_links = probe_l2_wayback(dom_clean, gap_set, fund_name)
             l2_new = [(ym, url) for ym, url in l2_links if ym not in obtained]
             if l2_new:
                 obtained.update(ym for ym, _ in l2_new)

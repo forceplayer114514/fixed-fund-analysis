@@ -175,10 +175,10 @@ def test_recent_published_month_format():
 
 class TestProbeL2:
     def test_no_gap_returns_empty(self):
-        assert probe_l2_wayback("example.com", set()) == []
+        assert probe_l2_wayback("example.com", set(), "Some Fund") == []
 
     def test_no_domain_returns_empty(self):
-        assert probe_l2_wayback("", {"2025-01"}) == []
+        assert probe_l2_wayback("", {"2025-01"}, "Some Fund") == []
 
 
 # ---------- parse_archive_page + run_discovery: 用 monkeypatch 打桩 ----------
@@ -336,7 +336,7 @@ class TestRunDiscovery:
             )
             return (links, ptr, 0)
 
-        def fake_probe_l2(domain, gap_set):
+        def fake_probe_l2(domain, gap_set, fund_name):
             assert gap_set == {"2025-01"}
             return [("2025-01", "wayback:a")]
 
@@ -522,6 +522,55 @@ class TestSearchLayerDoesNotYieldPdfLinks:
             "搜索结果里的第三方 PDF 被直接当成月报采纳了 -- "
             "PDF 链接只能来自真实抓取的页面 HTML"
         )
+
+
+class TestWaybackNarrowing:
+    """Spec G 10.2: Wayback 按整个发行商域名抓, 必须筛基金名与文档类型。
+
+    该步专用于补缺口, 而 CLAUDE.md 一.3 对缺口零容忍禁填补 --
+    此处却曾用全系统最宽松的条件往缺口里塞东西。
+    """
+
+    def _cdx_payload(self, originals):
+        import json
+        rows = [["timestamp", "original", "statuscode"]]
+        for o in originals:
+            rows.append(["20260701000000", o, "200"])
+        return json.dumps(rows)
+
+    def test_sibling_fund_pdf_not_used_to_fill_gap(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        target = "https://yarracm.com/docs/yarra-enhanced-income-jun-2026.pdf"
+        sibling = "https://yarracm.com/docs/yarra-australian-income-jun-2026.pdf"
+        monkeypatch.setattr(
+            disc, "_curl",
+            lambda url, timeout=30: self._cdx_payload([sibling, target]),
+        )
+
+        hits = disc.probe_l2_wayback(
+            "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+        )
+        urls = [u for _ym, u in hits]
+
+        assert any(target in u for u in urls), "目标基金的 PDF 应当被采纳"
+        assert not any(sibling in u for u in urls), (
+            "兄弟基金 Yarra Australian Income 的 PDF 被用来填缺口了"
+        )
+
+    def test_pds_tmd_not_used_to_fill_gap(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        pds = "https://yarracm.com/docs/yarra-enhanced-income-PDS-jun-2026.pdf"
+        monkeypatch.setattr(
+            disc, "_curl", lambda url, timeout=30: self._cdx_payload([pds]),
+        )
+
+        hits = disc.probe_l2_wayback(
+            "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+        )
+
+        assert hits == [], "PDS 不是月度业绩报告, 不得用来填缺口"
 
 
 if __name__ == "__main__":
