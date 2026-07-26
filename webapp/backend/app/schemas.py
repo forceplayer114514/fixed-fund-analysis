@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -89,6 +89,9 @@ class IngestRequest(BaseModel):
     # Spec D: confirmed_url 是单文件多月 HTML/CSV 时, 需给 inception_month
     # (YYYY-MM), 会从 inception 到当月枚举 ym, 对同一 URL 逐月调 LLM 提取.
     inception_month: Optional[str] = None
+    # Spec G 4.6: 搜索引擎选择, 每次摄取请求级, 不落库。
+    # tavily = 检索型 (快, 确定性高); grok = agentic search (慢 15-20s, 但直接给答案)
+    search_engine: Literal["tavily", "grok"] = "tavily"
 
     @field_validator("apir_code")
     @classmethod

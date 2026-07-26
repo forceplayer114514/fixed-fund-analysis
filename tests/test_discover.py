@@ -573,5 +573,57 @@ class TestWaybackNarrowing:
         assert hits == [], "PDS 不是月度业绩报告, 不得用来填缺口"
 
 
+class TestEngineThreading:
+    """Spec G 4.6: engine 参数逐层透传, 默认 tavily 保证既有行为不变。"""
+
+    def test_run_discovery_passes_engine_to_v2(self, monkeypatch):
+        from llm_ingest import discover as disc
+        seen = {}
+
+        def _fake_v2(fund_name, issuer, issuer_domain=None, asx_code=None,
+                     *, client=None, top_n=4, engine="tavily"):
+            seen["engine"] = engine
+            return disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={},
+            )
+
+        from llm_ingest import discover2 as d2
+        monkeypatch.setattr(d2, "find_archive_v2", _fake_v2)
+        monkeypatch.setattr(
+            disc, "find_archive_via_search",
+            lambda *a, **k: disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={}))
+
+        disc.run_discovery("F", "I", "fid", engine="grok", client=object())
+        assert seen["engine"] == "grok"
+
+    def test_run_discovery_default_engine_is_tavily(self, monkeypatch):
+        from llm_ingest import discover as disc
+        from llm_ingest import discover2 as d2
+        seen = {}
+
+        def _fake_v2(fund_name, issuer, issuer_domain=None, asx_code=None,
+                     *, client=None, top_n=4, engine="tavily"):
+            seen["engine"] = engine
+            return disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={})
+
+        monkeypatch.setattr(d2, "find_archive_v2", _fake_v2)
+        monkeypatch.setattr(
+            disc, "find_archive_via_search",
+            lambda *a, **k: disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={}))
+        disc.run_discovery("F", "I", "fid", client=object())
+        assert seen["engine"] == "tavily"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

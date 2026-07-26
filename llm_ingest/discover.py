@@ -595,6 +595,7 @@ def probe_l1_official(
     *,
     client: Optional[Client] = None,
     max_pagination: int = 8,
+    engine: str = "tavily",
 ) -> Tuple[List[Tuple[str, str]], ArchivePointer, int]:
     """L1 完整流程: 找归档页 -> fetch -> Gemini 解析 -> 若分页则遍历.
 
@@ -607,7 +608,9 @@ def probe_l1_official(
         client = Client()
     # v2 首选
     from . import discover2 as d2
-    pointer = d2.find_archive_v2(fund_name, issuer, issuer_domain, asx_code, client=client)
+    pointer = d2.find_archive_v2(
+        fund_name, issuer, issuer_domain, asx_code, client=client, engine=engine,
+    )
     # v2 完全空 (无 archive 且无 latest_pdf) 时降级 v1 (可能 v1 web_search 拿到 v2 没找到的 URL)
     if not pointer.archive_url and not pointer.latest_pdf_url:
         pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
@@ -816,6 +819,7 @@ def run_discovery(
     inception_ym: Optional[str] = None,
     latest_ym: Optional[str] = None,
     client: Optional[Client] = None,
+    engine: str = "tavily",
 ) -> DiscoveryReport:
     """L1 -> L2 (补洞) -> L3 (占位). 集合差驱动.
 
@@ -831,7 +835,7 @@ def run_discovery(
 
     # L1
     l1_links, pointer, unp = probe_l1_official(
-        fund_name, issuer, issuer_domain, asx_code, client=client,
+        fund_name, issuer, issuer_domain, asx_code, client=client, engine=engine,
     )
     report.archive_pointer = pointer
     report.unparseable_count = unp
@@ -845,6 +849,7 @@ def run_discovery(
         "archive_url": pointer.archive_url,
         "no_archive": pointer.no_archive,
         "evidence": pointer.evidence,
+        "locate": (pointer.raw or {}).get("locate", {}),
     })
 
     # L1.5 (Spec C1): archive_url 或 latest_pdf_url 非空但 aggregate 空 -> 页可能是

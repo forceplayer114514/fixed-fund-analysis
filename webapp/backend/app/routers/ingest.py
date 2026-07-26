@@ -197,10 +197,13 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         _job_log(jid, f"upsert_fund: {req.fund_id}")
 
         # ---- L1: fundmonitors 主源 (Spec B 反转优先级) ----
-        _job_log(jid, "L1 fundmonitors: probing ...")
+        _job_log(jid, f"L1 fundmonitors: probing (engine={req.search_engine}) ...")
         l1_result: Dict[str, Any] = {"status": "skipped"}
         try:
-            l1_result = fm_mod.probe(req.fund_name, fund_id=req.fund_id, db_conn=conn)
+            l1_result = fm_mod.probe(
+                req.fund_name, fund_id=req.fund_id, db_conn=conn,
+                engine=req.search_engine,
+            )
         except Exception as e:  # noqa: BLE001
             l1_result = {"status": f"exception:{type(e).__name__}",
                          "page_fund_name": None, "records": [],
@@ -340,8 +343,19 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 fund_id=req.fund_id,
                 issuer_domain=req.issuer_domain,
                 asx_code=req.asx_code,
+                engine=req.search_engine,
             )
             links = rep.links
+            # Spec G 4.5: 引擎降级必须可见 -- evidence_log 之外还要写 job 日志
+            for _e in rep.evidence_log:
+                _loc = _e.get("locate") or {}
+                if _loc.get("engine_requested") and \
+                        _loc.get("engine_used") != _loc.get("engine_requested"):
+                    _job_log(
+                        jid,
+                        f"engine fallback: {_loc['engine_requested']} -> "
+                        f"{_loc['engine_used']} ({_loc.get('fallback_reason', '')})",
+                    )
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
 
             # rep.gaps 是 discovery 阶段就确定"预期月份里压根没找到任何 PDF 链接"
