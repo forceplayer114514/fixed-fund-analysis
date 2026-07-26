@@ -461,21 +461,27 @@ def write_extraction(
     ex: Extraction,
     quote_check: QuoteCheck,
     rolling_check: RollingCheck,
+    identity_check: QuoteCheck,
     monthly_history: Dict[str, float],
     exhausted_levels: str = "L1,L2,L3",
 ) -> WriteDecision:
-    """核心写库决策. 传入四个 check 结果, 决定 monthly / pending / gap.
+    """核心写库决策. 传入五个 check 结果, 决定 monthly / pending / gap.
 
     monthly_history: {ym: net_return} 已入库的历史, 用于 anti-fab 检测.
     exhausted_levels: not_found 时该月记 confirmed_gaps 的 exhausted 字段.
 
     决策矩阵:
       parse_error / not_found + net_return=None -> confirmed_gaps
-      net_return 存在 + 四闸全过 -> monthly_returns
+      net_return 存在 + 五闸全过 -> monthly_returns
       net_return 存在 + 任一闸未过 -> pending_review
 
+    identity_check (闸 5, Spec G 10.5): 文档抬头基金名是否与目标基金一致。
+    设为必填参数而非可选, 是要让"不核对身份就写库"在类型层面不可能发生 --
+    这道闸原本缺失, 导致兄弟基金月报可静默入库。
+
     reason 用 review_reason 落库: 'quote_failed' / 'rolling_failed' /
-    'field_type_failed' / 'antifab_failed' / 'parse_error' / 'multi:xxx'
+    'field_type_failed' / 'antifab_failed' / 'identity_failed' /
+    'parse_error' / 'multi:xxx'
     """
     date = _ym_to_date(ex.ym)
 
@@ -490,7 +496,7 @@ def write_extraction(
             reason=ex.parse_error or ("not_found" if ex.not_found else "no_value"),
         )
 
-    # 四道闸
+    # 五道闸
     f_ok, f_reason = check_field_type(ex.net_return)
     # anti-fab 用历史倒序
     hist_recent = sorted(monthly_history.items(), reverse=True)
@@ -501,8 +507,12 @@ def write_extraction(
         f"r{int(rolling_check.passed)}"
         f"f{int(f_ok)}"
         f"a{int(a_ok)}"
+        f"i{int(identity_check.passed)}"
     )
-    all_ok = quote_check.passed and rolling_check.passed and f_ok and a_ok
+    all_ok = (
+        quote_check.passed and rolling_check.passed
+        and f_ok and a_ok and identity_check.passed
+    )
 
     if all_ok:
         _upsert_monthly_return(
@@ -525,9 +535,11 @@ def write_extraction(
         reasons.append(f"field:{f_reason}")
     if not a_ok:
         reasons.append(f"antifab:{a_reason}")
+    if not identity_check.passed:
+        reasons.append(f"identity:{identity_check.reason}")
     reason = "|".join(reasons)
 
-    # candidates_json 存原始响应+四 gate reason, 供人工审核看到原始上下文
+    # candidates_json 存原始响应+五 gate reason, 供人工审核看到原始上下文
     payload: Dict[str, Any] = {
         "raw": ex.raw,
         "measure": ex.measure,
@@ -538,6 +550,7 @@ def write_extraction(
             "rolling": rolling_check.reason,
             "field_type": f_reason,
             "antifab": a_reason,
+            "identity": identity_check.reason,
         },
     }
     review_id = _add_pending(

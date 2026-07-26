@@ -534,9 +534,15 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             )
             history = store_mod.load_monthly_history(conn, req.fund_id)
             r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
+            # 闸 5 (Spec G 10.5): 逐份核对文档抬头基金名与目标基金是否同一支。
+            # 不通过 -> write_extraction 判 pending_review 转人工, 既不静默入库
+            # 也不静默丢弃 (CLAUDE.md: 宁可报错停下; 自动丢弃会造成静默缺失)。
+            identity = verify.check_fund_identity(ex.fund_name_text, req.fund_name)
+            if not identity.passed:
+                _job_log(jid, f"[{i}/{len(links)}] {ym} identity FAIL: {identity.reason}")
             dec = store_mod.write_extraction(
                 conn, fund_id=req.fund_id, ex=ex,
-                quote_check=q, rolling_check=r,
+                quote_check=q, rolling_check=r, identity_check=identity,
                 monthly_history=history,
             )
             stats[dec.action] = stats.get(dec.action, 0) + 1
