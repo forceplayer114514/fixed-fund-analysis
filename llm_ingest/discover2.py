@@ -152,6 +152,28 @@ def _pdf_slug_match_count(pdf_url: str, fund_name: str) -> int:
     return len(fund_tokens & slug_tokens)
 
 
+def _best_match_pdfs(pdf_urls: List[str], fund_name: str) -> List[str]:
+    """只保留与 fund_name 匹配分并列最高的 PDF (保序).
+
+    Spec G 10.3: 不能用 `_pdf_slug_match_count(u, fund_name) > 0` 这种绝对判据 --
+    它与 Spec G 10.1 的根因同病, 分不了兄弟基金:
+      目标 "Yarra Enhanced Income Fund" token = {yarra, enhanced, income}
+      目标 PDF  yarra-enhanced-income-jun-2026.pdf   -> 交集 3
+      兄弟 PDF  yarra-australian-income-jun-2026.pdf -> 交集 2, 同样 > 0
+    改用相对判据(取最高分并列): 3 > 2 排除兄弟基金; 而整页文件名统一用缩写时
+    (如 GIF-Monthly 代表 Bentham Global Income Fund) 全部并列, 不会过度过滤。
+
+    全页零匹配 -> 返回空列表 (该页与本基金无关)。
+    """
+    if not pdf_urls:
+        return []
+    scored = [(u, _pdf_slug_match_count(u, fund_name)) for u in pdf_urls]
+    best = max(s for _u, s in scored)
+    if best <= 0:
+        return []
+    return [u for u, s in scored if s == best]
+
+
 # ---- Step 1: Gemini 排优先级 (语言活) ----
 
 _RANK_PROMPT = """从下面 URL 列表中, 按"最可能是 {fund_name} 月度业绩报告归档页或含 PDF 下载"的可能性从高到低排序。
@@ -446,8 +468,15 @@ def find_archive_v2(
                 ]},
                 search_sources=real_sources,
                 search_queries=[],
-                # 把此页所有 PDF 都带回 run_discovery, 免它再让 Gemini 解析一遍
-                discovered_pdfs=list(cand["pdf_urls"]),
+                # 把此页**与本基金名匹配度最高的** PDF 带回 run_discovery, 免它
+                # 再让 Gemini 解析一遍。
+                #
+                # Spec G 10.3: 这里原本回传 cand["pdf_urls"] 全量(含同页其他基金
+                # 的月报)。下游 probe_l1_official 只按 _NON_MONTHLY_HINTS 与"文件名
+                # 能否解析出 ym"过滤, 不做基金名匹配 -> 兄弟基金月报直接入库。
+                # 真实场景: yarracm.com/performance 同挂 Enhanced Income 与
+                # Australian Income 两支基金月报。
+                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
             )
 
     # ---- 步 6: 无强候选 -> single_pdfs 里挑首份能通过打样的当"最新单份" (no_archive=True) ----
@@ -467,8 +496,9 @@ def find_archive_v2(
                 ]},
                 search_sources=real_sources,
                 search_queries=[],
-                # 单份场景下同页可能仍有其他 PDF (如 1-2 份), 一并带回
-                discovered_pdfs=list(cand["pdf_urls"]),
+                # 单份场景下同页可能仍有其他 PDF (如 1-2 份), 只带回与本基金名
+                # 匹配度最高的 (Spec G 10.3, 理由同步 5)。
+                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
             )
 
     # ---- 步 6.5 (Spec C1): 无强候选 + single_pdfs 全灰 -> 自主导航 1 跳 ----

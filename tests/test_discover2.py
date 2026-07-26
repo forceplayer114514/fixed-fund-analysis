@@ -88,5 +88,54 @@ def test_strong_candidate_skips_page_when_all_pdfs_unrelated(monkeypatch):
     assert pointer.no_archive is True
 
 
+class TestDiscoveredPdfsExcludeSiblingFunds:
+    """Spec G 10.3: 同页多基金时, discovered_pdfs 不得带回其他基金的 PDF。
+
+    真实场景 (discover2.py 注释自述): yarracm.com/performance 同挂
+    Yarra Enhanced Income Fund 与 Yarra Australian Income Fund 两支基金月报。
+    """
+
+    def test_sibling_fund_pdfs_not_returned(self, monkeypatch):
+        from llm_ingest import discover2 as d2
+
+        target_pdf = "https://yarracm.com/docs/yarra-enhanced-income-jun-2026.pdf"
+        sibling_pdf = "https://yarracm.com/docs/yarra-australian-income-jun-2026.pdf"
+        page_url = "https://yarracm.com/performance"
+
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: [page_url])
+        monkeypatch.setattr(
+            d2, "rank_urls",
+            lambda *a, **k: [{"url": page_url, "score": 90, "reason": "t"}],
+        )
+        # 该页抓下来含 3 份 PDF: 目标基金 1 份 + 兄弟基金 2 份
+        monkeypatch.setattr(
+            d2, "probe_urls",
+            lambda urls, **k: [{
+                "url": page_url,
+                "pdf_urls": [
+                    target_pdf,
+                    sibling_pdf,
+                    "https://yarracm.com/docs/yarra-australian-income-may-2026.pdf",
+                ],
+                "html": "",
+            }],
+        )
+        # 打样一律通过 (模拟目标基金 PDF 验证成功)
+        monkeypatch.setattr(
+            d2, "confirm_pdf_is_monthly_report", lambda *a, **k: (True, None),
+        )
+
+        ptr = d2.find_archive_v2(
+            "Yarra Enhanced Income Fund", "Yarra Capital Management",
+            client=object(),
+        )
+
+        assert target_pdf in ptr.discovered_pdfs
+        assert sibling_pdf not in ptr.discovered_pdfs, (
+            "兄弟基金 Yarra Australian Income 的 PDF 被带回了 -- "
+            "下游 probe_l1_official 不做基金名匹配, 会直接入库"
+        )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
