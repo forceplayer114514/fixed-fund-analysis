@@ -188,4 +188,4 @@ Result: `58 passed, 6 warnings in 0.11s` (4 + 54, no new failures).
 - `tests/test_discover2.py`: `+test_navigate_fallback_excludes_sibling_fund_pdfs`
   method on the existing `TestDiscoveredPdfsExcludeSiblingFunds` class.
 
-Commit: (to be filled in after commit)
+Commit: `53b6528` — `fix(discover2): 步6.5 导航兜底路径同样只回传匹配度最高的 PDF (Spec G 10.3 补漏)`
