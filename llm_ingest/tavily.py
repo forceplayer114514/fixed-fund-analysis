@@ -154,13 +154,15 @@ def tavily_search(
     exclude_domains: Optional[List[str]] = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> List[TavilyResult]:
-    """单次搜索, 按 SEARCH_BACKEND 环境变量分派后端 (默认 searxng)。
+    """单次搜索, 按 SEARCH_BACKEND 环境变量分派后端 (默认 tavily)。
 
     Tavily 服务端支持 exclude_domains 直接过滤; SearXNG 不支持, 这里改成
     客户端过滤 -- 过滤会让条数变少, 所以先多取 (over_fetch), 过滤后再截断
     到 max_results, 避免 exclude_aggregators=True 那条路径静默返回不足数。
     """
-    backend = os.environ.get("SEARCH_BACKEND", "searxng").strip().lower()
+    # 默认 tavily: SearXNG 服务已下线 (Spec G 2.8), 旧默认值 "searxng" 会让
+    # 每次搜索都抛 TavilyError 并静默降级到 sub2api web_search, Tavily 形同虚设。
+    backend = os.environ.get("SEARCH_BACKEND", "tavily").strip().lower()
     if backend == "tavily":
         return _tavily_impl(
             query, max_results=max_results, search_depth=search_depth,

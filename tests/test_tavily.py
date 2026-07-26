@@ -1,7 +1,10 @@
 """llm_ingest/tavily.py 搜索后端切换 (Tavily/SearXNG) 测试。
 
-2026-07-19 `tavily替代方案-最终报告.md` 实测后确定: SearXNG 换血做主搜索,
-Tavily 降级为 SEARCH_BACKEND 环境变量手动切的应急回退, 不做自动降级。
+2026-07-19 `tavily替代方案-最终报告.md` 实测后一度确定 SearXNG 换血做主搜索,
+Tavily 降级为 SEARCH_BACKEND 环境变量手动切的应急回退。但 SearXNG 服务已
+下线 (Spec G 2.8, localhost:8081 不通), 该变量全仓库未设置, 旧默认值
+"searxng" 导致每次搜索都静默降级到 sub2api web_search。现默认值改回
+tavily, SearXNG 仅作 SEARCH_BACKEND=searxng 手动切换的备选后端。
 """
 from unittest.mock import MagicMock
 
@@ -96,15 +99,20 @@ class TestSearxngImpl:
 
 
 class TestTavilySearchDispatch:
-    def test_default_backend_is_searxng(self, monkeypatch):
+    def test_default_backend_is_tavily(self, monkeypatch):
+        """未设 SEARCH_BACKEND 时必须走 Tavily。
+
+        Spec G 2.8: 旧默认值 "searxng" 指向已死服务 (localhost:8081 不通),
+        导致每次搜索都抛 TavilyError 静默降级到 sub2api web_search。
+        """
         monkeypatch.delenv("SEARCH_BACKEND", raising=False)
         mock_searxng = MagicMock(return_value=[])
         mock_tavily = MagicMock(return_value=[])
         monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
         monkeypatch.setattr(tavily_mod, "_tavily_impl", mock_tavily)
         tavily_search("q")
-        mock_searxng.assert_called_once()
-        mock_tavily.assert_not_called()
+        mock_tavily.assert_called_once()
+        mock_searxng.assert_not_called()
 
     def test_backend_env_var_switches_to_tavily(self, monkeypatch):
         monkeypatch.setenv("SEARCH_BACKEND", "tavily")
