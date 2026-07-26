@@ -175,10 +175,10 @@ def test_recent_published_month_format():
 
 class TestProbeL2:
     def test_no_gap_returns_empty(self):
-        assert probe_l2_wayback("example.com", set()) == []
+        assert probe_l2_wayback("example.com", set(), "Some Fund") == []
 
     def test_no_domain_returns_empty(self):
-        assert probe_l2_wayback("", {"2025-01"}) == []
+        assert probe_l2_wayback("", {"2025-01"}, "Some Fund") == []
 
 
 # ---------- parse_archive_page + run_discovery: 用 monkeypatch 打桩 ----------
@@ -336,7 +336,7 @@ class TestRunDiscovery:
             )
             return (links, ptr, 0)
 
-        def fake_probe_l2(domain, gap_set):
+        def fake_probe_l2(domain, gap_set, fund_name):
             assert gap_set == {"2025-01"}
             return [("2025-01", "wayback:a")]
 
@@ -484,6 +484,145 @@ class TestFetchPriority:
         monkeypatch.setattr(disc, "_fetch_requests", lambda url, timeout: None)
         monkeypatch.setattr(disc, "_fetch_playwright", lambda url, timeout: None)
         assert _fetch("https://x/archive") is None
+
+
+class TestSearchLayerDoesNotYieldPdfLinks:
+    """Spec G 10.6: 搜索层只回答"哪一页", PDF 链接只能来自真实抓取的页面 HTML。
+
+    历史漏洞: v1 兜底直接扫搜索结果取第一个 .pdf 当月报, 不抓页不验域名。
+    实证 Tavily 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au
+    转贴的 factsheet。
+    """
+
+    def test_third_party_pdf_in_search_results_is_not_adopted(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        third_party_pdf = (
+            "https://www.pricefinancial.com.au/wp-content/uploads/"
+            "2024/05/Gryphon-GCI-Jun-2026.pdf"
+        )
+        sources = [third_party_pdf, "https://gcapinvest.com/our-lit"]
+
+        monkeypatch.setattr(disc, "multi_query_search", lambda *a, **k: sources)
+
+        # 阶段 B 的 Gemini 判 JSON 返回空 -> 走兜底分支
+        class _FakeResp:
+            text = "{}"
+
+        class _FakeClient:
+            def messages(self, *a, **k):
+                return _FakeResp()
+
+        ptr = disc.find_archive_via_search(
+            "Gryphon Capital Income Trust", "Gryphon Capital",
+            client=_FakeClient(),
+        )
+
+        assert ptr.latest_pdf_url != third_party_pdf, (
+            "搜索结果里的第三方 PDF 被直接当成月报采纳了 -- "
+            "PDF 链接只能来自真实抓取的页面 HTML"
+        )
+
+
+class TestWaybackNarrowing:
+    """Spec G 10.2: Wayback 按整个发行商域名抓, 必须筛基金名与文档类型。
+
+    该步专用于补缺口, 而 CLAUDE.md 一.3 对缺口零容忍禁填补 --
+    此处却曾用全系统最宽松的条件往缺口里塞东西。
+    """
+
+    def _cdx_payload(self, originals):
+        import json
+        rows = [["timestamp", "original", "statuscode"]]
+        for o in originals:
+            rows.append(["20260701000000", o, "200"])
+        return json.dumps(rows)
+
+    def test_sibling_fund_pdf_not_used_to_fill_gap(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        target = "https://yarracm.com/docs/yarra-enhanced-income-jun-2026.pdf"
+        sibling = "https://yarracm.com/docs/yarra-australian-income-jun-2026.pdf"
+        monkeypatch.setattr(
+            disc, "_curl",
+            lambda url, timeout=30: self._cdx_payload([sibling, target]),
+        )
+
+        hits = disc.probe_l2_wayback(
+            "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+        )
+        urls = [u for _ym, u in hits]
+
+        assert any(target in u for u in urls), "目标基金的 PDF 应当被采纳"
+        assert not any(sibling in u for u in urls), (
+            "兄弟基金 Yarra Australian Income 的 PDF 被用来填缺口了"
+        )
+
+    def test_pds_tmd_not_used_to_fill_gap(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        pds = "https://yarracm.com/docs/yarra-enhanced-income-PDS-jun-2026.pdf"
+        monkeypatch.setattr(
+            disc, "_curl", lambda url, timeout=30: self._cdx_payload([pds]),
+        )
+
+        hits = disc.probe_l2_wayback(
+            "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+        )
+
+        assert hits == [], "PDS 不是月度业绩报告, 不得用来填缺口"
+
+
+class TestEngineThreading:
+    """Spec G 4.6: engine 参数逐层透传, 默认 tavily 保证既有行为不变。"""
+
+    def test_run_discovery_passes_engine_to_v2(self, monkeypatch):
+        from llm_ingest import discover as disc
+        seen = {}
+
+        def _fake_v2(fund_name, issuer, issuer_domain=None, asx_code=None,
+                     *, client=None, top_n=4, engine="tavily"):
+            seen["engine"] = engine
+            return disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={},
+            )
+
+        from llm_ingest import discover2 as d2
+        monkeypatch.setattr(d2, "find_archive_v2", _fake_v2)
+        monkeypatch.setattr(
+            disc, "find_archive_via_search",
+            lambda *a, **k: disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={}))
+
+        disc.run_discovery("F", "I", "fid", engine="grok", client=object())
+        assert seen["engine"] == "grok"
+
+    def test_run_discovery_default_engine_is_tavily(self, monkeypatch):
+        from llm_ingest import discover as disc
+        from llm_ingest import discover2 as d2
+        seen = {}
+
+        def _fake_v2(fund_name, issuer, issuer_domain=None, asx_code=None,
+                     *, client=None, top_n=4, engine="tavily"):
+            seen["engine"] = engine
+            return disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={})
+
+        monkeypatch.setattr(d2, "find_archive_v2", _fake_v2)
+        monkeypatch.setattr(
+            disc, "find_archive_via_search",
+            lambda *a, **k: disc.ArchivePointer(
+                archive_url=None, pagination_param=None, no_archive=True,
+                latest_pdf_url=None, issuer_domain_confirmed=None,
+                evidence="", raw={}))
+        disc.run_discovery("F", "I", "fid", client=object())
+        assert seen["engine"] == "tavily"
 
 
 if __name__ == "__main__":

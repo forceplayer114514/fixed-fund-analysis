@@ -18,6 +18,8 @@ import sqlite3
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from . import verify
+
 FUNDMONITORS_HOST = "https://www.fundmonitors.com"
 
 
@@ -302,24 +304,40 @@ _FUNDID_URL_RE = re.compile(
 )
 
 
-def find_fundid_via_tavily(fund_name: str) -> Optional[Tuple[int, str]]:
-    """用 Tavily `site:fundmonitors.com <fund_name>` 拿 FundID + AccCode.
+def _grok_fundmonitors_id(fund_name: str) -> Optional[Tuple[int, str]]:
+    """薄封装, 便于测试 monkeypatch."""
+    from .grok import answer_fundmonitors_id
+    return answer_fundmonitors_id(fund_name)
+
+
+def find_fundid(
+    fund_name: str,
+    *,
+    engine: str = "tavily",
+) -> Optional[Tuple[int, str]]:
+    """拿 fundmonitors FundID + AccCode. 支持 tavily / grok 两个引擎.
 
     fundmonitors 页面结构:
       - fund-factsheet.php?FundID=1512&AccCode=fresnjxju     (摘要, 无逐月表)
       - _ajax/_fund-profile.php?FundID=1512&AccCode=fresnjxju (AJAX, 含逐月表)
-
     两个 URL 里 FundID + AccCode 一致, 抓 factsheet URL 也能推出 profile URL。
-    返回 (fund_id, acc_code) 或 None (Tavily 搜不到)。
+
+    Spec G 2.4: 多份额类别基金上两个引擎都可能给错编号 (实测 Bentham,
+    Grok 给 3315/622, Tavily 给 3315/622, DB 真值 3312 -- 数据源本身歧义)。
+    下游 probe() 的 name-fuzzy 闸必须保留兜错源。
+
+    返回 (fund_id, acc_code) 或 None (搜不到)。
     """
-    from .tavily import tavily_search, TavilyError
+    if engine == "grok":
+        return _grok_fundmonitors_id(fund_name)
+    from . import search as _search
     try:
-        results = tavily_search(
+        results = _search.tavily_search(
             f"site:fundmonitors.com {fund_name}",
             max_results=8,
             search_depth="basic",
         )
-    except TavilyError:
+    except _search.TavilyError:
         return None
     for r in results:
         m = _FUNDID_URL_RE.search(r.url)
@@ -328,6 +346,10 @@ def find_fundid_via_tavily(fund_name: str) -> Optional[Tuple[int, str]]:
             acc = m.group(2) or ""
             return (fid, acc)
     return None
+
+
+# 向后兼容别名 (既有调用点/测试仍用旧名)
+find_fundid_via_tavily = find_fundid
 
 
 def build_profile_url(fund_id: int, acc_code: str = "") -> str:
@@ -423,6 +445,8 @@ def probe(
     fund_name: str,
     fund_id: Optional[str] = None,
     db_conn: Optional[sqlite3.Connection] = None,
+    *,
+    engine: str = "tavily",
 ) -> Dict[str, object]:
     """L1 主源端到端 (Spec B: fundmonitors 从 L3 提到 L1). 输入 fund_name -> 输出结构化结果。
 
@@ -449,7 +473,7 @@ def probe(
             hit = wl
     # B. 未白名单 (或 acc 空) -> Tavily 通路
     if hit is None:
-        hit = find_fundid_via_tavily(fund_name)
+        hit = find_fundid(fund_name, engine=engine)
         if not hit:
             return {"status": "no_fundid", "records": [], "ytd_map": {},
                     "url": None, "page_fund_name": None, "errors": []}
@@ -469,7 +493,20 @@ def probe(
     else:
         wl_hit = None
     if wl_hit is None:
-        ok_name, msg = _name_matches(page_name, fund_name)
+        # task-15 回归修复: page_name 为空时须 fail-closed 拒收, 不能借
+        # check_fund_identity 对空信号的放行通道 (那是为 L2 PDF 通路设计的,
+        # 那边有 quote/rolling/field_type/antifab 四道数值闸兜底; L1 没有
+        # 数值闸兜底, check_fund_identity 是唯一身份判据, 空信号必须拒收
+        # 而非放行 -- 信息最少时防线不能最松)。
+        if not page_name:
+            return {"status": "name_mismatch", "records": [], "ytd_map": {},
+                    "url": url, "page_fund_name": page_name,
+                    "errors": ["name_missing: L1 页面未能抽出基金名, 无信号不可放行"]}
+        # Spec G 终审补漏: 换 verify.check_fund_identity (与 L2 自动纠名闸
+        # 同一判据), 老 _name_matches 停用词表分不出同发行商兄弟基金
+        # (Yarra Enhanced Income vs Yarra Australian Income 均只剩 {yarra})。
+        ident = verify.check_fund_identity(page_name, fund_name)
+        ok_name, msg = ident.passed, ident.reason
         if not ok_name:
             return {"status": "name_mismatch", "records": [], "ytd_map": {},
                     "url": url, "page_fund_name": page_name,

@@ -42,7 +42,7 @@ from .discover import (
     _same_host,
     _parse_json_response,
 )
-from .tavily import TavilyError, multi_query_search
+from .search import TavilyError, multi_query_search
 
 # ---- 常量 ----
 TOP_N_PROBE = 4          # 排序后取 top-N 并发探测
@@ -150,6 +150,28 @@ def _pdf_slug_match_count(pdf_url: str, fund_name: str) -> int:
     slug = re.sub(r".*/", "", pdf_url).lower()
     slug_tokens = set(re.findall(r"[a-z]+", slug))
     return len(fund_tokens & slug_tokens)
+
+
+def _best_match_pdfs(pdf_urls: List[str], fund_name: str) -> List[str]:
+    """只保留与 fund_name 匹配分并列最高的 PDF (保序).
+
+    Spec G 10.3: 不能用 `_pdf_slug_match_count(u, fund_name) > 0` 这种绝对判据 --
+    它与 Spec G 10.1 的根因同病, 分不了兄弟基金:
+      目标 "Yarra Enhanced Income Fund" token = {yarra, enhanced, income}
+      目标 PDF  yarra-enhanced-income-jun-2026.pdf   -> 交集 3
+      兄弟 PDF  yarra-australian-income-jun-2026.pdf -> 交集 2, 同样 > 0
+    改用相对判据(取最高分并列): 3 > 2 排除兄弟基金; 而整页文件名统一用缩写时
+    (如 GIF-Monthly 代表 Bentham Global Income Fund) 全部并列, 不会过度过滤。
+
+    全页零匹配 -> 返回空列表 (该页与本基金无关)。
+    """
+    if not pdf_urls:
+        return []
+    scored = [(u, _pdf_slug_match_count(u, fund_name)) for u in pdf_urls]
+    best = max(s for _u, s in scored)
+    if best <= 0:
+        return []
+    return [u for u, s in scored if s == best]
 
 
 # ---- Step 1: Gemini 排优先级 (语言活) ----
@@ -263,6 +285,99 @@ def _heuristic_rank(
     return scored
 
 
+# ---- 定位候选页面: 按引擎分派 (Spec G 4.1) ----
+#
+# find_archive_v2 四步中, 第 1-2 步 (搜索 + Gemini 排序) 本质是产出
+# (issuer_domain, 已排序候选页面), 第 3-4 步 (抓页 + 正则抽 PDF + 打样) 消费它。
+# 按引擎分派只切第 1-2 步:
+#   - Tavily 是检索, 给的是一堆 URL, 需要 Gemini 排序
+#   - Grok 是 agentic search, 直接给答案, 已排好序, 再让 Gemini 排是多此一举
+#     (实测答 GCI 归档页 3 轮全对 https://gcapinvest.com/our-lit)
+# 第 3-4 步保持共用, 天然是反捏造闸: Grok 若主动提了 PDF, 那些 URL 不在抓下来的
+# 页面 <a href> 里, 自动被丢弃。
+
+def _grok_answer_archive(fund_name: str, issuer: str, asx_code: Optional[str]):
+    """薄封装, 便于测试 monkeypatch (避免 patch 到 grok 模块全局)."""
+    from .grok import answer_archive
+    return answer_archive(fund_name, issuer, asx_code)
+
+
+def _locate_via_tavily(
+    fund_name: str,
+    issuer: str,
+    issuer_domain: Optional[str],
+    client: Optional[Client],
+) -> Tuple[Optional[str], List[Dict[str, Any]], List[str]]:
+    """Tavily 路径: 三次 query 拿 URL 池 -> 挑 issuer 域 -> Gemini 排序."""
+    try:
+        sources = multi_query_search(
+            [fund_name, f"{fund_name} performance", f"{fund_name} monthly report"],
+            max_results_per_query=5,
+            exclude_aggregators=True,
+        )
+    except TavilyError:
+        sources = []
+    if not sources:
+        return (issuer_domain, [], [])
+    domain = _pick_issuer_domain(sources, issuer, fund_name) or issuer_domain
+    ranked = rank_urls(sources, fund_name, issuer, domain, client=client)
+    return (domain, ranked, sources)
+
+
+def locate_candidates(
+    fund_name: str,
+    issuer: str,
+    issuer_domain: Optional[str] = None,
+    asx_code: Optional[str] = None,
+    *,
+    engine: str = "tavily",
+    client: Optional[Client] = None,
+) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, Any]]:
+    """返 (issuer_domain, ranked, evidence).
+
+    ranked 元素形如 {"url": str, "score": int, "reason": str}, 已排序。
+    evidence 供 evidence_log 记录: engine_requested / engine_used /
+    fallback_reason / sources。
+
+    engine="grok" 且 Grok 失败时自动降级 Tavily, 但**降级必须可见** --
+    evidence 里记 engine_used 与 fallback_reason, 上层再写进 job 日志。
+    (Spec G 4.5: 旧代码注释禁止 SearXNG->Tavily 自动降级, 顾虑是"静默烧额度且
+    故障不可见"; 这里的降级不静默, 且 Grok 的 503 是 15-20% 的高频瞬时故障,
+    不降级会让相应比例的摄取直接失败。)
+    """
+    ev: Dict[str, Any] = {
+        "engine_requested": engine,
+        "engine_used": engine,
+        "fallback_reason": "",
+        "sources": [],
+    }
+
+    if engine == "grok":
+        try:
+            ans = _grok_answer_archive(fund_name, issuer, asx_code)
+        except Exception as e:  # noqa: BLE001  (GrokError 及网络异常一并降级)
+            ev["engine_used"] = "tavily"
+            ev["fallback_reason"] = f"{type(e).__name__}: {e}"
+        else:
+            ev["sources"] = list(ans.sources)
+            ev["grok_evidence"] = ans.evidence
+            if ans.archive_url:
+                ranked = [{
+                    "url": ans.archive_url, "score": 100, "reason": "grok_answer",
+                }]
+                return (ans.issuer_domain or issuer_domain, ranked, ev)
+            ev["engine_used"] = "tavily"
+            ev["fallback_reason"] = "grok_no_archive_url"
+
+    domain, ranked, sources = _locate_via_tavily(
+        fund_name, issuer, issuer_domain, client)
+    ev["engine_used"] = "tavily" if engine != "tavily" else "tavily"
+    ev["sources"] = sources
+    if not ranked:
+        ev["reason"] = "搜索无结果"
+    return (domain, ranked, ev)
+
+
 # ---- Step 2: 并发抓页 + 抽 PDF 链接 ----
 
 def _probe_one(url: str) -> Dict[str, Any]:
@@ -352,6 +467,7 @@ def find_archive_v2(
     *,
     client: Optional[Client] = None,
     top_n: int = TOP_N_PROBE,
+    engine: str = "tavily",
 ) -> ArchivePointer:
     """v2 归档定位: Tavily -> Gemini 排序 -> Scrapling 抓 -> PDF 打样验证.
 
@@ -360,34 +476,17 @@ def find_archive_v2(
     if client is None:
         client = Client()
 
-    # ---- 步 1: Tavily 拿 URL ----
-    try:
-        real_sources = multi_query_search(
-            [fund_name, f"{fund_name} performance", f"{fund_name} monthly report"],
-            max_results_per_query=5,
-            exclude_aggregators=True,
-        )
-    except TavilyError:
-        real_sources = []
-
-    if not real_sources:
-        return ArchivePointer(
-            archive_url=None, pagination_param=None, no_archive=True,
-            latest_pdf_url=None, issuer_domain_confirmed=issuer_domain,
-            evidence="Tavily 搜索无结果", raw={},
-            search_sources=[], search_queries=[],
-        )
-
-    # ---- 步 1.5: 挑 issuer 域 (用现有启发式, 排聚合站) ----
-    domain = _pick_issuer_domain(real_sources, issuer, fund_name) or issuer_domain
-
-    # ---- 步 2: Gemini 排优先级 ----
-    ranked = rank_urls(real_sources, fund_name, issuer, domain, client=client)
+    # ---- 步 1+2: 定位候选页面 (按引擎分派, Spec G 4.1) ----
+    domain, ranked, locate_ev = locate_candidates(
+        fund_name, issuer, issuer_domain, asx_code, engine=engine, client=client,
+    )
+    real_sources = list(locate_ev.get("sources") or [])
     if not ranked:
         return ArchivePointer(
             archive_url=None, pagination_param=None, no_archive=True,
-            latest_pdf_url=None, issuer_domain_confirmed=domain,
-            evidence="排序无结果", raw={"ranked": []},
+            latest_pdf_url=None, issuer_domain_confirmed=domain or issuer_domain,
+            evidence=str(locate_ev.get("reason") or "定位无候选页面"),
+            raw={"locate": locate_ev},
             search_sources=real_sources, search_queries=[],
         )
     top_urls = [r["url"] for r in ranked[:top_n]]
@@ -441,13 +540,20 @@ def find_archive_v2(
                 latest_pdf_url=pdf_url,
                 issuer_domain_confirmed=domain,
                 evidence=f"归档页确认: {cand['url']} 含 {len(cand['pdf_urls'])} 份 PDF, {pdf_url} 验证为月报",
-                raw={"ranked": ranked, "probes": [
+                raw={"ranked": ranked, "locate": locate_ev, "probes": [
                     {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                 ]},
                 search_sources=real_sources,
                 search_queries=[],
-                # 把此页所有 PDF 都带回 run_discovery, 免它再让 Gemini 解析一遍
-                discovered_pdfs=list(cand["pdf_urls"]),
+                # 把此页**与本基金名匹配度最高的** PDF 带回 run_discovery, 免它
+                # 再让 Gemini 解析一遍。
+                #
+                # Spec G 10.3: 这里原本回传 cand["pdf_urls"] 全量(含同页其他基金
+                # 的月报)。下游 probe_l1_official 只按 _NON_MONTHLY_HINTS 与"文件名
+                # 能否解析出 ym"过滤, 不做基金名匹配 -> 兄弟基金月报直接入库。
+                # 真实场景: yarracm.com/performance 同挂 Enhanced Income 与
+                # Australian Income 两支基金月报。
+                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
             )
 
     # ---- 步 6: 无强候选 -> single_pdfs 里挑首份能通过打样的当"最新单份" (no_archive=True) ----
@@ -462,13 +568,14 @@ def find_archive_v2(
                 latest_pdf_url=first_pdf,
                 issuer_domain_confirmed=domain,
                 evidence=f"单份最新: {first_pdf} (归档页未找到, 走 wayback 补历史)",
-                raw={"ranked": ranked, "probes": [
+                raw={"ranked": ranked, "locate": locate_ev, "probes": [
                     {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                 ]},
                 search_sources=real_sources,
                 search_queries=[],
-                # 单份场景下同页可能仍有其他 PDF (如 1-2 份), 一并带回
-                discovered_pdfs=list(cand["pdf_urls"]),
+                # 单份场景下同页可能仍有其他 PDF (如 1-2 份), 只带回与本基金名
+                # 匹配度最高的 (Spec G 10.3, 理由同步 5)。
+                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
             )
 
     # ---- 步 6.5 (Spec C1): 无强候选 + single_pdfs 全灰 -> 自主导航 1 跳 ----
@@ -506,11 +613,15 @@ def find_archive_v2(
                             latest_pdf_url=first_pdf,
                             issuer_domain_confirmed=domain,
                             evidence=f"导航命中: {nav_start['url']} -> {next_url} ({len(next_pdfs)} 份 PDF)",
-                            raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
                                 {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                             ]},
                             search_sources=real_sources, search_queries=[],
-                            discovered_pdfs=list(next_pdfs),
+                            # Spec G 10.3 补漏 (Task 4 审查发现): 这里原本回传
+                            # next_pdfs 全量 -- navigate_one_hop 抓的是整页 PDF,
+                            # 同样没做基金名过滤, 走同一条不判基金名的
+                            # probe_l1_official 消费路径, 与步 5/步 6 是同一类漏洞。
+                            discovered_pdfs=_best_match_pdfs(next_pdfs, fund_name),
                         )
             nav_hops.append((nav_start["url"], next_url or "(no_pick)"))
 
@@ -540,11 +651,14 @@ def find_archive_v2(
                                     latest_pdf_url=first_pdf2,
                                     issuer_domain_confirmed=domain,
                                     evidence=f"主页重试导航命中: {home_url} -> {next_url2} ({len(next_pdfs2)} 份 PDF)",
-                                    raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+                                    raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
                                         {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                                     ]},
                                     search_sources=real_sources, search_queries=[],
-                                    discovered_pdfs=list(next_pdfs2),
+                                    # Spec G 10.3 补漏 (Task 4 审查发现): 同上,
+                                    # 主页重试导航命中的 next_pdfs2 也需按基金名
+                                    # 匹配度筛, 不能原样透传整页给 discovered_pdfs。
+                                    discovered_pdfs=_best_match_pdfs(next_pdfs2, fund_name),
                                 )
                     nav_hops.append((home_url, next_url2 or "(no_pick)"))
 
@@ -553,7 +667,7 @@ def find_archive_v2(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,
         evidence="top-N 探测 + 导航兜底均未发现月报 PDF, 走 L2/L3 兜底",
-        raw={"ranked": ranked, "nav_hops": nav_hops, "probes": [
+        raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
             {"url": p["url"], "pdf_count": len(p["pdf_urls"]), "error": p.get("error")}
             for p in probes
         ]},

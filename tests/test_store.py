@@ -11,7 +11,7 @@ sys.path.insert(0, "/Users/chong/Desktop/fixed_fund_analysis")
 
 import pytest
 
-from llm_ingest import store
+from llm_ingest import store, verify
 from llm_ingest.extract import Extraction
 from llm_ingest.verify import QuoteCheck, RollingCheck
 
@@ -73,11 +73,11 @@ def test_write_extraction_all_pass_goes_monthly(conn):
     r = RollingCheck(passed=True, reason="ok", windows_verified=1)
     dec = store.write_extraction(
         conn, fund_id="fund_x", ex=ex,
-        quote_check=q, rolling_check=r,
+        quote_check=q, rolling_check=r, identity_check=QuoteCheck(passed=True, reason="ok"),
         monthly_history={},
     )
     assert dec.action == "monthly"
-    assert dec.gate_summary == "q1r1f1a1"
+    assert dec.gate_summary == "q1r1f1a1i1"
     row = conn.execute(
         "SELECT * FROM monthly_returns WHERE fund_id='fund_x'"
     ).fetchone()
@@ -107,6 +107,7 @@ def test_nav_recompute_across_multiple_months(conn):
             conn, fund_id="fund_x", ex=ex,
             quote_check=QuoteCheck(True, "ok"),
             rolling_check=RollingCheck(True, "ok", 0),
+            identity_check=QuoteCheck(True, "ok"),
             monthly_history=store.load_monthly_history(conn, "fund_x"),
         )
     rows = conn.execute(
@@ -132,11 +133,11 @@ def test_quote_fail_goes_pending(conn):
     r = RollingCheck(passed=True, reason="ok", windows_verified=0)
     dec = store.write_extraction(
         conn, fund_id="fund_x", ex=ex,
-        quote_check=q, rolling_check=r,
+        quote_check=q, rolling_check=r, identity_check=QuoteCheck(passed=True, reason="ok"),
         monthly_history={},
     )
     assert dec.action == "pending"
-    assert dec.gate_summary == "q0r1f1a1"
+    assert dec.gate_summary == "q0r1f1a1i1"
     assert "quote:value_0.8_not_in_quote" in dec.reason
 
     row = conn.execute(
@@ -144,7 +145,7 @@ def test_quote_fail_goes_pending(conn):
     ).fetchone()
     assert row["extract_method"] == "llm"
     assert row["review_state"] == "pending"
-    assert row["gate_result"] == "q0r1f1a1"
+    assert row["gate_result"] == "q0r1f1a1i1"
     payload = json.loads(row["candidates_json"])
     assert payload["raw"] == {"note": "some raw"}
     assert payload["gate_reasons"]["quote"] == "value_0.8_not_in_quote"
@@ -166,11 +167,11 @@ def test_rolling_fail_and_field_type_fail_both_recorded(conn):
     r = RollingCheck(False, "mismatch_3mo", 0)
     dec = store.write_extraction(
         conn, fund_id="fund_x", ex=ex,
-        quote_check=q, rolling_check=r,
+        quote_check=q, rolling_check=r, identity_check=QuoteCheck(passed=True, reason="ok"),
         monthly_history={},
     )
     assert dec.action == "pending"
-    assert dec.gate_summary == "q1r0f0a1"
+    assert dec.gate_summary == "q1r0f0a1i1"
     assert "rolling:mismatch_3mo" in dec.reason
     assert "field:" in dec.reason
 
@@ -189,6 +190,7 @@ def test_antifab_fail_after_history_run(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(True, "ok"),
         rolling_check=RollingCheck(True, "ok", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history=hist,
     )
     assert dec.action == "pending"
@@ -207,6 +209,7 @@ def test_not_found_goes_to_confirmed_gap(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(False, "empty_quote"),
         rolling_check=RollingCheck(True, "no_net_return", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     assert dec.action == "gap"
@@ -240,6 +243,7 @@ def test_retry_success_after_gap_clears_confirmed_gap(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(True, "ok"),
         rolling_check=RollingCheck(True, "ok", 1),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     assert dec.action == "monthly"
@@ -259,6 +263,7 @@ def test_parse_error_goes_to_gap(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(False, "empty_quote"),
         rolling_check=RollingCheck(True, "no_net_return", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     assert dec.action == "gap"
@@ -280,6 +285,7 @@ def test_promote_pending_writes_monthly(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(False, "orphan_numbers"),
         rolling_check=RollingCheck(True, "ok", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     assert dec.review_id is not None
@@ -308,6 +314,7 @@ def test_reject_pending_no_monthly_write(conn):
         conn, fund_id="fund_x", ex=ex,
         quote_check=QuoteCheck(False, "empty_quote"),
         rolling_check=RollingCheck(True, "ok", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     store.reject_pending(conn, dec.review_id, reason="hallucinated")
@@ -342,6 +349,7 @@ def test_load_monthly_history(conn):
             conn, fund_id="fund_x", ex=ex,
             quote_check=QuoteCheck(True, "ok"),
             rolling_check=RollingCheck(True, "ok", 0),
+            identity_check=QuoteCheck(True, "ok"),
             monthly_history=store.load_monthly_history(conn, "fund_x"),
         )
     hist = store.load_monthly_history(conn, "fund_x")
@@ -360,6 +368,7 @@ def test_list_pending_and_gaps(conn):
         ),
         quote_check=QuoteCheck(False, "empty_quote"),
         rolling_check=RollingCheck(True, "ok", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     store.write_extraction(
@@ -371,6 +380,7 @@ def test_list_pending_and_gaps(conn):
         ),
         quote_check=QuoteCheck(False, "empty_quote"),
         rolling_check=RollingCheck(True, "no_net_return", 0),
+        identity_check=QuoteCheck(True, "ok"),
         monthly_history={},
     )
     pending = store.list_pending(conn, fund_id="fund_x")
@@ -380,6 +390,37 @@ def test_list_pending_and_gaps(conn):
     gaps = store.list_gaps(conn, "fund_x")
     assert len(gaps) == 1
     assert gaps[0]["missing_month"] == "2025-11"
+
+
+def test_write_extraction_identity_fail_goes_pending(conn):
+    """Spec G 10.5: 身份闸未过的文档不得入 monthly_returns, 转 pending_review。"""
+    ex = Extraction(
+        ym="2025-03",
+        net_return=0.0065,
+        source_quote="Fund returned 0.65% (net of fees).",
+        measure="net_monthly",
+        measure_label_in_pdf="Net Return",
+        rolling={"1mo": 0.65, "3mo": None, "6mo": None, "12mo": None},
+        not_found=False,
+        raw={"net_return_pct": 0.65},
+        fund_name_text="Yarra Australian Income Fund",
+    )
+    q = QuoteCheck(passed=True, reason="ok")
+    r = RollingCheck(passed=True, reason="ok", windows_verified=1)
+    ident = verify.check_fund_identity(
+        ex.fund_name_text, "Yarra Enhanced Income Fund")
+    dec = store.write_extraction(
+        conn, fund_id="fund_x", ex=ex,
+        quote_check=q, rolling_check=r, identity_check=ident,
+        monthly_history={},
+    )
+    assert dec.action == "pending"
+    assert "identity" in dec.reason
+    assert dec.gate_summary == "q1r1f1a1i0"
+    n = conn.execute(
+        "SELECT COUNT(*) FROM monthly_returns WHERE fund_id='fund_x'"
+    ).fetchone()[0]
+    assert n == 0, "身份存疑的数据不得进 monthly_returns"
 
 
 # ---------- slugify_fund_id / rename_fund_id ----------

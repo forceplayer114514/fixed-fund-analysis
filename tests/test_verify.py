@@ -352,5 +352,54 @@ def test_antifab_rejects_run_of_3_adjacent_to_ym_regardless_of_input_order():
     assert "identical_run_3" in reason
 
 
+class TestCheckFundIdentity:
+    """Spec G 10.5: 逐份核对文档基金身份, 兄弟基金必须被拦下。"""
+
+    def test_exact_same_name_passes(self):
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Yarra Enhanced Income Fund", "Yarra Enhanced Income Fund")
+        assert r.passed
+
+    def test_sibling_fund_is_rejected(self):
+        """核心用例: 老的 _name_matches 判据在这里会放行 (双方去停用词后
+        都只剩 {yarra}), 新判据必须拦下。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Yarra Australian Income Fund", "Yarra Enhanced Income Fund")
+        assert not r.passed
+        assert "identity_mismatch" in r.reason
+
+    def test_structural_suffix_stripped(self):
+        """份额类别等结构性后缀不影响身份判定。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Bentham Syndicated Loan Fund - Wholesale Class",
+            "Bentham Syndicated Loan Fund")
+        assert r.passed
+
+    def test_user_typo_tolerated(self):
+        """真实案例: pdf_cache 里存在 stake_accumlate 目录 (少一个 u)。
+        用户输入拼写错误不应导致全部数据转待审。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Stake Accumulate Fund", "Stake Accumlate Fund")
+        assert r.passed
+
+    def test_different_issuer_rejected(self):
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Smarter Money Long-Short Credit Fund",
+            "Coolabah Active Composite Bond Fund")
+        assert not r.passed
+
+    def test_empty_fund_name_text_does_not_block(self):
+        """模型没读到抬头时不阻断 (与 check_fund_name_token 现有行为一致)。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(None, "Yarra Enhanced Income Fund")
+        assert r.passed
+        assert r.reason == "no_fund_name_text"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

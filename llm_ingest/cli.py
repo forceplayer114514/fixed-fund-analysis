@@ -401,9 +401,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         history = store_mod.load_monthly_history(conn, fund_id)
         r = verify.check_rolling(ex.net_return, ex.ym, history, ex.rolling)
         # 写库
+        identity = verify.check_fund_identity(ex.fund_name_text, fund_name)
         dec = store_mod.write_extraction(
             conn, fund_id=fund_id, ex=ex,
-            quote_check=q, rolling_check=r,
+            quote_check=q, rolling_check=r, identity_check=identity,
             monthly_history=history,
         )
         stats[dec.action] = stats.get(dec.action, 0) + 1

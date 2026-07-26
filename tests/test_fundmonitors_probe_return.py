@@ -69,7 +69,7 @@ def test_probe_name_mismatch_via_tavily_rejected():
     """
     fake_md = "# Smarter Money Long Short Credit Fund"
     fake_records = [("2024-01-31", 0.005)]
-    with patch.object(fm, "find_fundid_via_tavily",
+    with patch.object(fm, "find_fundid",
                       return_value=(2332, "smarterX")), \
          patch.object(fm, "fetch_profile_markdown",
                       return_value=(fake_md, "ok")), \
@@ -80,15 +80,16 @@ def test_probe_name_mismatch_via_tavily_rejected():
         result = fm.probe("Coolabah Floating-Rate High Yield Fund (Assisted)")
     assert result["status"] == "name_mismatch"
     assert result["records"] == []
-    # errors[0] 应写清 mismatch 原因 (inter=∅ 或 name_tokens_empty)
-    assert any(kw in result["errors"][0] for kw in ("inter=∅", "tokens_empty"))
+    # errors[0] 应写清 mismatch 原因 (Spec G 终审补漏后判据换 verify.check_
+    # fund_identity, reason 格式变 "identity_mismatch doc=... target=...")
+    assert "identity_mismatch" in result["errors"][0]
 
 
 def test_probe_name_match_via_tavily_ok():
     """Tavily 通路 + 页面名与输入名 token 有交集 -> 正常入库."""
     fake_md = "# Yarra Enhanced Income Fund"
     fake_records = [("2024-01-31", 0.005)]
-    with patch.object(fm, "find_fundid_via_tavily",
+    with patch.object(fm, "find_fundid",
                       return_value=(1512, "yarraX")), \
          patch.object(fm, "fetch_profile_markdown",
                       return_value=(fake_md, "ok")), \
@@ -98,6 +99,32 @@ def test_probe_name_match_via_tavily_ok():
                       return_value=(True, [])):
         result = fm.probe("Yarra Enhanced Income Fund")
     assert result["status"] == "ok"
+
+
+def test_probe_sibling_fund_rejected_via_tavily():
+    """Spec G 终审补漏: probe() 唯一身份闸 (line ~494) 仍用旧 _name_matches,
+    去停用词后 income/enhanced/australian 等区分词被剥掉, 分不出同发行商
+    兄弟基金 -- "Yarra Enhanced Income Fund" (目标) 与 fundmonitors 页面命中
+    "Yarra Australian Income Fund" (错源) 双方去停用词后都只剩 {yarra},
+    旧判据交集非空 -> 错误放行 status=ok。
+
+    换成 verify.check_fund_identity 后应正确拒绝 (status=name_mismatch),
+    与 tests/test_verify.py::TestCheckFundIdentity::test_sibling_fund_is_rejected
+    是同一对 fund_name 用例。
+    """
+    fake_md = "# Yarra Australian Income Fund"
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "find_fundid",
+                      return_value=(9999, "siblingX")), \
+         patch.object(fm, "fetch_profile_markdown",
+                      return_value=(fake_md, "ok")), \
+         patch.object(fm, "parse_html_monthly_table",
+                      return_value=(fake_records, {})), \
+         patch.object(fm, "gate_check_table",
+                      return_value=(True, [])):
+        result = fm.probe("Yarra Enhanced Income Fund")
+    assert result["status"] == "name_mismatch"
+    assert result["records"] == []
 
 
 def test_probe_whitelist_bypasses_name_check(db_with_whitelist):
@@ -142,3 +169,75 @@ def test_name_matches_only_stopwords_shared_fails():
     # 关键: 两侧都被停用词过滤后, coolabah/assisted 与 (无) 无交集
     assert ok is False
     assert any(kw in msg for kw in ("mismatch", "tokens_empty"))
+
+
+def test_probe_page_name_none_rejected_fail_closed():
+    """回归防线 (task-15): page_name 抽取失败 (None) 时须 fail-closed 拒收.
+
+    d58f1a4 把 L1 唯一身份判据换成 verify.check_fund_identity 后, 该函数对
+    fund_name_text 为空的设计是"放行" (no_fund_name_text, 为 L2 PDF 通路准备,
+    那边有数值闸兜底)。L1 没有数值闸兜底, page_name=None 时应保持旧
+    _name_matches 的 fail-closed 行为 (拒收), 而不是借用 check_fund_identity
+    的空信号放行通道。
+    """
+    fake_md = "no heading here, extractor finds nothing"
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "_extract_page_fund_name", return_value=None), \
+         patch.object(fm, "find_fundid",
+                      return_value=(9999, "unknownX")), \
+         patch.object(fm, "fetch_profile_markdown",
+                      return_value=(fake_md, "ok")), \
+         patch.object(fm, "parse_html_monthly_table",
+                      return_value=(fake_records, {})), \
+         patch.object(fm, "gate_check_table",
+                      return_value=(True, [])):
+        result = fm.probe("Some Target Fund Name")
+    assert result["status"] == "name_mismatch"
+    assert result["records"] == []
+    assert result["page_fund_name"] is None
+    assert any("name_missing" in e for e in result["errors"])
+
+
+class TestFindFundidEngineDispatch:
+    """Spec G 4.7: L1 拿 FundID 支持 tavily / grok 两个引擎。"""
+
+    def test_tavily_engine_scans_search_results(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        from llm_ingest import search as search_mod
+
+        results = [
+            search_mod.TavilyResult(
+                url="https://www.fundmonitors.com/fund-factsheet.php?FundID=1512&AccCode=fresnjxju",
+                title="", content=""),
+        ]
+        monkeypatch.setattr(search_mod, "tavily_search", lambda *a, **k: results)
+        got = fm.find_fundid("Yarra Enhanced Income Fund", engine="tavily")
+        assert got == (1512, "fresnjxju")
+
+    def test_grok_engine_asks_grok(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        called = {"n": 0}
+
+        def _ask(name):
+            called["n"] += 1
+            return (1512, "fresnjxju")
+
+        monkeypatch.setattr(fm, "_grok_fundmonitors_id", _ask)
+        got = fm.find_fundid("Yarra Enhanced Income Fund", engine="grok")
+        assert got == (1512, "fresnjxju")
+        assert called["n"] == 1
+
+    def test_grok_returns_none_falls_through(self, monkeypatch):
+        """Grok 拿不到 -> 返 None, probe 走既有 no_fundid 分支, 不抛异常。"""
+        from llm_ingest import fundmonitors as fm
+        monkeypatch.setattr(fm, "_grok_fundmonitors_id", lambda name: None)
+        assert fm.find_fundid("Nope Fund", engine="grok") is None
+
+    def test_default_engine_is_tavily(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        from llm_ingest import search as search_mod
+        monkeypatch.setattr(search_mod, "tavily_search", lambda *a, **k: [])
+        monkeypatch.setattr(
+            fm, "_grok_fundmonitors_id",
+            lambda name: pytest.fail("默认引擎不应调用 Grok"))
+        assert fm.find_fundid("Any Fund") is None

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""开发/测试阶段专用: 换机场订阅当前出口节点, 缓解压测时 SearXNG 底层引擎
+"""开发/测试阶段专用: 换机场订阅当前出口节点, 缓解压测时自建搜索后端底层引擎
 (bing/duckduckgo等) 对固定出口 IP 的限流 (`tavily替代方案-最终报告.md` 已
-实测确认限流是 IP 级, 换 IP 后全部引擎瞬间恢复)。
+实测确认限流是 IP 级, 换 IP 后全部引擎瞬间恢复)。该自建搜索后端 (曾用
+SearXNG) 已于 Spec G 下线并从代码中整体删除, 本脚本与 llm_ingest/search.py
+的生产请求路径 (现纯 Tavily) 无关, 仅作通用 Clash 节点切换工具保留。
 
-只是一个开发工具, 不改动 llm_ingest/tavily.py 的生产请求路径 -- SearXNG
-container 走不走代理是它自己 outgoing.proxies 配置决定的, 跟这个脚本无关。
 这个脚本只做一件事: 调用本地 Clash 系客户端 (ClashX / Clash Verge / mihomo /
 sing-box 的 Clash-兼容控制面板均可) 的 controller API, 把某个策略组当前选中
 的节点换成组内另一个。
 
-项目开发/压测阶段结束后不需要这个脚本、也不需要给 SearXNG 配代理 -- 默认
-就是本地直连, 符合"日常使用量小不会像压测那样被限流"的判断, 不用特地"切
-回去"。
+项目开发/压测阶段结束后不需要这个脚本 -- 默认就是本地直连, 符合"日常使用量
+小不会像压测那样被限流"的判断, 不用特地"切回去"。
 
 用法:
   python3 tools/rotate_proxy.py --list-groups          # 第一次跑, 先看有哪些策略组

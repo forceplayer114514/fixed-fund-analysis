@@ -117,6 +117,75 @@ def check_fund_name_token(fund_name_text: Optional[str], doc_text: str) -> Quote
     return QuoteCheck(True, "ok")
 
 
+# ---------- 闸 5: check_fund_identity (文档属于哪支基金) ----------
+#
+# Spec G 10.5: 闸 1/2/3/4 检查的都是"数值是否如实抄自文档"与"数值是否自洽",
+# 全都不涉及**文档身份**。历史上唯一与目标基金比对之处只跑第一份文档, 且比对
+# 不通过时仅跳过自动纠名, 数据照常入库 -> 兄弟基金月报可静默入库。
+#
+# 判据不复用 fundmonitors._name_matches: 它的停用词表已排除 income/enhanced/
+# capital/australian, "Yarra Enhanced Income Fund" 与 "Yarra Australian Income
+# Fund" 去停用词后双方都只剩 {yarra}, 交集非空即放行。那个闸是为跨发行商错源
+# (2026-07-18 Coolabah 事故) 设计的, 结构上分辨不了同发行商兄弟基金。
+#
+# 这里改为: 只剥结构性词 (fund/trust/class/wholesale...), 保留全部区分性词汇,
+# 要求两侧 token 逐个都能找到近似对应。近似用 difflib 容忍用户输入拼写错误
+# (真实案例: pdf_cache 存在 stake_accumlate 目录, 少一个 u), 但不容忍语义
+# 不同的词 ("enhanced" 与 "australian" 比值远低于 cutoff)。
+
+_IDENTITY_STOPWORDS = frozenset({
+    "fund", "funds", "trust", "the", "of", "and", "a", "an",
+    "class", "units", "unit", "au", "aud", "nz", "nzd",
+    "wholesale", "retail", "ltd", "limited", "pty", "plc",
+})
+_IDENTITY_CUTOFF = 0.85
+
+
+def _identity_tokens(name: str) -> frozenset:
+    """归一化基金名 -> 只剥结构性词后的 token 集合 (区分性词汇全部保留)."""
+    if not name:
+        return frozenset()
+    toks = re.findall(r"[a-z0-9]+", name.lower())
+    return frozenset(t for t in toks if t not in _IDENTITY_STOPWORDS and len(t) >= 2)
+
+
+def _tokens_correspond(a: frozenset, b: frozenset) -> bool:
+    """a 的每个 token 在 b 里都有近似对应, 且反向亦然 (对称)."""
+    import difflib
+    for src, dst in ((a, b), (b, a)):
+        dst_list = list(dst)
+        for t in src:
+            if t in dst:
+                continue
+            if not difflib.get_close_matches(t, dst_list, n=1, cutoff=_IDENTITY_CUTOFF):
+                return False
+    return True
+
+
+def check_fund_identity(
+    fund_name_text: Optional[str],
+    target_fund_name: str,
+) -> QuoteCheck:
+    """闸 5: 文档抬头的基金名须与本次摄取的目标基金指向同一支基金.
+
+    fund_name_text 为空 -> 放行 (模型没读到抬头, 无从判断, 不阻断; 与
+    check_fund_name_token 现有行为一致)。
+    """
+    if not fund_name_text:
+        return QuoteCheck(True, "no_fund_name_text")
+    doc = _identity_tokens(fund_name_text)
+    target = _identity_tokens(target_fund_name)
+    if not doc or not target:
+        return QuoteCheck(True, "identity_tokens_empty")
+    if _tokens_correspond(doc, target):
+        return QuoteCheck(True, f"identity_ok doc={sorted(doc)}")
+    return QuoteCheck(
+        False,
+        f"identity_mismatch doc={fund_name_text[:60]!r} "
+        f"target={target_fund_name[:60]!r}",
+    )
+
+
 # ---------- 闸 2: check_rolling (十进制单位) ----------
 
 @dataclass(frozen=True)

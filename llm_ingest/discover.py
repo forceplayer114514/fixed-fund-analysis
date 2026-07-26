@@ -2,7 +2,8 @@
 
 三层 fallback (集合差驱动, 概念抄 skills/lib/strategies.py):
 
-  L1 官网归档页    Gemini 联网 (messages_with_search) 找页, 再 fetch, 再 Gemini 解析
+  L1 官网归档页    discover2.find_archive_v2 按 engine (tavily/grok) 分派定位归档页,
+                    未定位到时降级 find_archive_via_search (纯 Tavily), 再 fetch, 再 Gemini 解析
   L2 Wayback CDX  http://web.archive.org/cdx/search/cdx  (纯 requests, 20 行)
   L3 fundmonitors Full Fund Profile AJAX  (纯 requests, 40 行)
 
@@ -27,8 +28,8 @@ from dateutil import parser as _date_parser
 from dateutil.parser import ParserError as _DateParserError
 
 from . import extract as ex_mod
-from .client import Client, resolve_sources
-from .tavily import TavilyError, multi_query_search
+from .client import Client
+from .search import TavilyError, multi_query_search
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 CDX_SNAPSHOTS_PER_MONTH = 3
@@ -47,7 +48,7 @@ class ArchivePointer:
     issuer_domain_confirmed: Optional[str]
     evidence: str
     raw: Dict[str, Any] = field(default_factory=dict)
-    search_sources: List[str] = field(default_factory=list)  # grounding 展开后的真实 URL
+    search_sources: List[str] = field(default_factory=list)  # 搜索引擎 (Tavily/Grok) 返回的真实 URL
     search_queries: List[str] = field(default_factory=list)
     # v2 (discover2.find_archive_v2) 抓页时已直接看见的所有 PDF URL. v1 不填。
     # run_discovery 若发现此字段非空, 优先用它反解 ym, 跳过再让 Gemini 解析归档页。
@@ -307,31 +308,6 @@ def _pick_issuer_domain(sources: List[str], issuer: str, fund_name: str) -> Opti
     return None
 
 
-def _search_and_resolve(
-    client: Client,
-    query_prompt: str,
-    max_uses: int = 6,
-) -> Tuple[List[str], List[str]]:
-    """一次搜索调用 -> (真实 URL, queries). 短明 prompt 强触发工具."""
-    resp = client.messages_with_search(query_prompt, max_tokens=2048, max_uses=max_uses)
-    reals = resolve_sources(resp.search_sources) if resp.search_sources else []
-    return reals, list(resp.search_queries)
-
-
-def _search_with_retry(
-    client: Client, prompts: List[str], max_tries: int = 3,
-) -> Tuple[List[str], List[str]]:
-    """轮流试多组 prompt, 拿到 sources 立即返回. sub2api web_search 触发是概率性的."""
-    all_queries: List[str] = []
-    for prompt in prompts:
-        for _ in range(max_tries):
-            sources, queries = _search_and_resolve(client, prompt)
-            all_queries.extend(queries)
-            if sources:
-                return sources, all_queries
-    return [], all_queries
-
-
 def find_archive_via_search(
     fund_name: str,
     issuer: str,
@@ -342,16 +318,13 @@ def find_archive_via_search(
 ) -> ArchivePointer:
     """L1 阶段 A (搜索) + 阶段 B (判 JSON).
 
-    sub2api 的 web_search 触发是概率性的 — 用多个显式子问 + [SOURCE] 标记 prompt
-    实测触发率高; 触发失败时重试并换 prompt 模板 (`_search_with_retry`)。
-    信 grounding sources 展开后的 URL, 不信文字回答里生成的 URL (幻觉高发)。
+    v1 兜底路径, 只在 v2 (discover2.find_archive_v2) 完全空手时才被调用。
+    纯 Tavily REST 一次调用给结构化真 URL, 无 grounding 中间层, 无幻觉。
     """
     if client is None:
         client = Client()
 
     # --- 阶段 A: 搜索 ---
-    # 首选 Tavily REST 一次调用给结构化真 URL, 无 grounding 中间层, 无幻觉。
-    # Tavily 失败 (key 缺 / 网错 / 全 query 空返) 再降级 sub2api web_search。
     real_sources: List[str] = []
     queries: List[str] = []
     try:
@@ -368,29 +341,9 @@ def find_archive_via_search(
         queries = tavily_queries if real_sources else []
     except TavilyError:
         real_sources = []
-
-    if not real_sources:
-        # --- 回退: sub2api web_search (英文简洁 prompt, 强制触发) ---
-        # 教训:
-        # - 中文 prompt: Gemini 只跑 1 条 vague query 且返幻觉 URL (澳洲基金语料全英)
-        # - 全裸 [SOURCE] <url>: 只出 grounding-redirect 链, 中国网络下 follow 超时
-        # 现改: 英文 + 强制 markdown link 格式 `[hostname](url)`, label 是纯域名
-        # -> _parse_grounding 走 label 短路, 免走 Google 直连
-        p_variants = [
-            (
-                f"Use web_search TWICE:\n"
-                f"1. Query: {fund_name}\n"
-                f"2. Query: {fund_name} performance\n"
-                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
-            ),
-            (
-                f"Use web_search TWICE:\n"
-                f"1. Query: {fund_name} monthly report\n"
-                f"2. Query: {fund_name} fact sheet\n"
-                f"Return 5 URLs per query, format each as markdown link `[hostname](url)`."
-            ),
-        ]
-        real_sources, queries = _search_with_retry(client, p_variants, max_tries=2)
+    # Spec G: 此处原有 sub2api web_search 兜底 (messages_with_search + grounding
+    # 展开), 已删 -- 命中率仅 53%, 会幻觉 URL (Yarra 一测抓到 yarracapital.com,
+    # 真域是 yarracm.com), grounding 跳板需直连 Google 1e100.net 国内 20s 卡死。
 
     # --- 阶段 B: 让 Gemini 读 sources 判 JSON ---
     domain = _pick_issuer_domain(real_sources, issuer, fund_name) if real_sources else issuer_domain
@@ -419,21 +372,29 @@ def find_archive_via_search(
     latest_pdf_url = llm_latest if _validate_url_in_sources(llm_latest, real_sources) else None
     final_domain = llm_domain if _validate_url_in_sources(llm_domain, real_sources) else domain
 
-    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的
+    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的**页面**。
+    #
+    # Spec G 10.6: 这里曾有一段"优先 PDF"捷径 -- 直接扫 real_sources 取第一个
+    # 以 .pdf 结尾的 URL 当月报, 不抓页、不验域名归属、不做内容打样。实证 Tavily
+    # 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au 转贴的 factsheet,
+    # 一旦其文件名能解析出 ym 就会被当作官方月报入库。已删除。
+    #
+    # 统一规矩: 搜索层只回答"哪一页", PDF 链接一律只能来自真实抓取的页面 HTML
+    # (由 discover2.probe_urls 从 <a href> 正则抽取)。
     if not archive_url and not latest_pdf_url and real_sources:
-        # 优先 PDF
-        for s in real_sources:
-            if s.lower().endswith(".pdf"):
-                latest_pdf_url = s
-                break
-        # 其次 domain 下, path 匹配基金关键词的
-        if not latest_pdf_url and final_domain:
+        if final_domain:
             fund_tokens = re.findall(r"[a-z]+", fund_name.lower())
             fund_tokens = [t for t in fund_tokens if len(t) >= 4 and t not in {"fund", "trust", "capital"}]
             best_score = -1
             best_url = None
             for s in real_sources:
                 if not _same_host(s, final_domain):
+                    continue
+                # 这里挑的必须是"页面", 不是 PDF -- 否则当 _pick_issuer_domain
+                # 因关键词未命中而回退选中了三方站域名时 (如 pricefinancial.com.au
+                # 转贴 GCI factsheet), 同域下唯一/最高分候选可能正好就是那份被转
+                # 贴的 PDF 本身, 从而绕过本 task (Spec G 10.6) 要堵的口子。
+                if s.lower().endswith(".pdf"):
                     continue
                 from urllib.parse import urlparse
                 path_low = urlparse(s).path.lower()
@@ -587,6 +548,7 @@ def probe_l1_official(
     *,
     client: Optional[Client] = None,
     max_pagination: int = 8,
+    engine: str = "tavily",
 ) -> Tuple[List[Tuple[str, str]], ArchivePointer, int]:
     """L1 完整流程: 找归档页 -> fetch -> Gemini 解析 -> 若分页则遍历.
 
@@ -599,7 +561,9 @@ def probe_l1_official(
         client = Client()
     # v2 首选
     from . import discover2 as d2
-    pointer = d2.find_archive_v2(fund_name, issuer, issuer_domain, asx_code, client=client)
+    pointer = d2.find_archive_v2(
+        fund_name, issuer, issuer_domain, asx_code, client=client, engine=engine,
+    )
     # v2 完全空 (无 archive 且无 latest_pdf) 时降级 v1 (可能 v1 web_search 拿到 v2 没找到的 URL)
     if not pointer.archive_url and not pointer.latest_pdf_url:
         pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
@@ -674,16 +638,32 @@ def probe_l1_official(
 def probe_l2_wayback(
     issuer_domain: str,
     gap_set: Set[str],
+    fund_name: str,
 ) -> List[Tuple[str, str]]:
     """L2: 用 CDX API 查 issuer_domain 快照, 从 original URL 提月份补 gap_set 中的洞.
 
     每月最多 CDX_SNAPSHOTS_PER_MONTH 快照 (抄自 strategies.py 补1).
+
+    Spec G 10.2: CDX 查的是整个发行商域名下的全部 PDF。一家发行商旗下多支基金
+    的文件同处一域, 若只按"文件名月份落在缺口内"筛选, 兄弟基金的月报会被当作
+    本基金数据填进缺口。而本步专用于补缺口 -- CLAUDE.md 一.3 对缺口是零容忍、
+    禁填补的, 这里必须是全系统最严的地方, 不是最宽的。故加两道过滤:
+      (a) _NON_MONTHLY_HINTS: 排除 PDS/TMD/FSG/研究报告等非月度业绩文档
+      (b) _best_match_pdfs: 只留与 fund_name 匹配分并列最高的
+          -- 必须用**相对**判据。绝对判据 (_pdf_slug_match_count > 0) 与
+          Spec G 10.1 的根因同病, 挡不住兄弟基金:
+            目标 "Yarra Enhanced Income Fund" -> {yarra, enhanced, income}
+            yarra-enhanced-income-jun-2026.pdf   交集 3
+            yarra-australian-income-jun-2026.pdf 交集 2, 同样 > 0
+          故改为两趟: 先收集候选, 再按最高分筛, 最后套快照数上限。
     """
     if not gap_set or not issuer_domain:
         return []
+    from .discover2 import _best_match_pdfs
     patterns = [f"{issuer_domain}/*", f"{issuer_domain}/wp-content/uploads/*"]
-    snap_count: Dict[str, int] = {}
-    hits: List[Tuple[str, str]] = []
+
+    # ---- 第一趟: 收集通过文档类型与月份筛选的候选 ----
+    cands: List[Tuple[str, str, str]] = []  # (ym, ts, original)
     for pat in patterns:
         # https 端更稳; http 通常也可, 但本机可能被拦
         api = (
@@ -703,14 +683,29 @@ def probe_l2_wayback(
             if len(row) < 2:
                 continue
             ts, original = row[0], row[1]
+            fname = original.rsplit("/", 1)[-1]
+            # (a) 文档类型: PDS/TMD/FSG/研究报告等不是月度业绩报告
+            if _NON_MONTHLY_HINTS.search(fname):
+                continue
             ym = _parse_ym_from_text(original)
             if not ym or ym not in gap_set:
                 continue
-            if snap_count.get(ym, 0) >= CDX_SNAPSHOTS_PER_MONTH:
-                continue
-            snap_count[ym] = snap_count.get(ym, 0) + 1
-            wayback_url = f"https://web.archive.org/web/{ts}/{original}"
-            hits.append((ym, wayback_url))
+            cands.append((ym, ts, original))
+
+    if not cands:
+        return []
+
+    # ---- 第二趟: (b) 只留与 fund_name 匹配分并列最高的 ----
+    keep = set(_best_match_pdfs([o for _ym, _ts, o in cands], fund_name))
+    snap_count: Dict[str, int] = {}
+    hits: List[Tuple[str, str]] = []
+    for ym, ts, original in cands:
+        if original not in keep:
+            continue
+        if snap_count.get(ym, 0) >= CDX_SNAPSHOTS_PER_MONTH:
+            continue
+        snap_count[ym] = snap_count.get(ym, 0) + 1
+        hits.append((ym, f"https://web.archive.org/web/{ts}/{original}"))
     return _dedup_links(hits)
 
 
@@ -777,6 +772,7 @@ def run_discovery(
     inception_ym: Optional[str] = None,
     latest_ym: Optional[str] = None,
     client: Optional[Client] = None,
+    engine: str = "tavily",
 ) -> DiscoveryReport:
     """L1 -> L2 (补洞) -> L3 (占位). 集合差驱动.
 
@@ -792,7 +788,7 @@ def run_discovery(
 
     # L1
     l1_links, pointer, unp = probe_l1_official(
-        fund_name, issuer, issuer_domain, asx_code, client=client,
+        fund_name, issuer, issuer_domain, asx_code, client=client, engine=engine,
     )
     report.archive_pointer = pointer
     report.unparseable_count = unp
@@ -806,6 +802,7 @@ def run_discovery(
         "archive_url": pointer.archive_url,
         "no_archive": pointer.no_archive,
         "evidence": pointer.evidence,
+        "locate": (pointer.raw or {}).get("locate", {}),
     })
 
     # L1.5 (Spec C1): archive_url 或 latest_pdf_url 非空但 aggregate 空 -> 页可能是
@@ -882,7 +879,7 @@ def run_discovery(
         if gap_set and domain:
             # 去 scheme
             dom_clean = re.sub(r"^https?://", "", domain).rstrip("/")
-            l2_links = probe_l2_wayback(dom_clean, gap_set)
+            l2_links = probe_l2_wayback(dom_clean, gap_set, fund_name)
             l2_new = [(ym, url) for ym, url in l2_links if ym not in obtained]
             if l2_new:
                 obtained.update(ym for ym, _ in l2_new)
