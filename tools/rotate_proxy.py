@@ -3,7 +3,7 @@
 (bing/duckduckgo等) 对固定出口 IP 的限流 (`tavily替代方案-最终报告.md` 已
 实测确认限流是 IP 级, 换 IP 后全部引擎瞬间恢复)。
 
-只是一个开发工具, 不改动 llm_ingest/tavily.py 的生产请求路径 -- SearXNG
+只是一个开发工具, 不改动 llm_ingest/search.py 的生产请求路径 -- SearXNG
 container 走不走代理是它自己 outgoing.proxies 配置决定的, 跟这个脚本无关。
 这个脚本只做一件事: 调用本地 Clash 系客户端 (ClashX / Clash Verge / mihomo /
 sing-box 的 Clash-兼容控制面板均可) 的 controller API, 把某个策略组当前选中

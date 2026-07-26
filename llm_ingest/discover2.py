@@ -42,7 +42,7 @@ from .discover import (
     _same_host,
     _parse_json_response,
 )
-from .tavily import TavilyError, multi_query_search
+from .search import TavilyError, multi_query_search
 
 # ---- 常量 ----
 TOP_N_PROBE = 4          # 排序后取 top-N 并发探测

@@ -1,11 +1,12 @@
-"""搜索客户端 -- 阶段 A discovery 首选. 默认后端 SearXNG, 可切回 Tavily.
+"""搜索客户端 -- 阶段 A discovery 首选. 默认后端 Tavily, 可切回 SearXNG.
 
 选型依据 (2026-07-19 `tavily替代方案-最终报告.md` 实测): 5支基金x3变体x4轮,
 SearXNG 池命中率打平 Tavily (80%), 噪声 0%, 延迟更快 (P50 0.8-1.1s vs
 Tavily 2.2s), 且全程测试未被限流打断 (SearXNG 是自建服务, 限流作用在
 底层引擎的出口IP上, 不是账号/密钥配额, 不会像 Tavily 那样把 credits 用尽)。
-Tavily 保留作应急回退 (key 还没失效), 用 SEARCH_BACKEND 环境变量手动切换,
-不做自动侦测降级 -- 自动切换会在 SearXNG 故障时无声燃烧 Tavily 免费额度,
+但 SearXNG 服务已于此后下线 (Spec G 2.8), 默认后端已改回 Tavily; SearXNG
+分支代码原样保留 (阶段三才删), 用 SEARCH_BACKEND 环境变量手动切换,
+不做自动侦测降级 -- 自动切换会在某后端故障时无声燃烧另一后端配额,
 且故障不会被发现 (表面上还在正常出结果)。
 
 为什么两个搜索后端都优先于 sub2api web_search (兜底, 不变):

@@ -312,7 +312,7 @@ def find_fundid_via_tavily(fund_name: str) -> Optional[Tuple[int, str]]:
     两个 URL 里 FundID + AccCode 一致, 抓 factsheet URL 也能推出 profile URL。
     返回 (fund_id, acc_code) 或 None (Tavily 搜不到)。
     """
-    from .tavily import tavily_search, TavilyError
+    from .search import tavily_search, TavilyError
     try:
         results = tavily_search(
             f"site:fundmonitors.com {fund_name}",

@@ -1,4 +1,4 @@
-"""llm_ingest/tavily.py 搜索后端切换 (Tavily/SearXNG) 测试。
+"""llm_ingest/search.py 搜索后端切换 (Tavily/SearXNG) 测试。
 
 2026-07-19 `tavily替代方案-最终报告.md` 实测后一度确定 SearXNG 换血做主搜索,
 Tavily 降级为 SEARCH_BACKEND 环境变量手动切的应急回退。但 SearXNG 服务已
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llm_ingest import tavily as tavily_mod
-from llm_ingest.tavily import (
+from llm_ingest import search as tavily_mod
+from llm_ingest.search import (
     TavilyError,
     TavilyResult,
     _host_blocked,

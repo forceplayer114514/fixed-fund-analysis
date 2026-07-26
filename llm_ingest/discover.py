@@ -28,7 +28,7 @@ from dateutil.parser import ParserError as _DateParserError
 
 from . import extract as ex_mod
 from .client import Client, resolve_sources
-from .tavily import TavilyError, multi_query_search
+from .search import TavilyError, multi_query_search
 
 PROMPT_DIR = Path(__file__).parent / "prompts"
 CDX_SNAPSHOTS_PER_MONTH = 3
