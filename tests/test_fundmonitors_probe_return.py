@@ -69,7 +69,7 @@ def test_probe_name_mismatch_via_tavily_rejected():
     """
     fake_md = "# Smarter Money Long Short Credit Fund"
     fake_records = [("2024-01-31", 0.005)]
-    with patch.object(fm, "find_fundid_via_tavily",
+    with patch.object(fm, "find_fundid",
                       return_value=(2332, "smarterX")), \
          patch.object(fm, "fetch_profile_markdown",
                       return_value=(fake_md, "ok")), \
@@ -88,7 +88,7 @@ def test_probe_name_match_via_tavily_ok():
     """Tavily 通路 + 页面名与输入名 token 有交集 -> 正常入库."""
     fake_md = "# Yarra Enhanced Income Fund"
     fake_records = [("2024-01-31", 0.005)]
-    with patch.object(fm, "find_fundid_via_tavily",
+    with patch.object(fm, "find_fundid",
                       return_value=(1512, "yarraX")), \
          patch.object(fm, "fetch_profile_markdown",
                       return_value=(fake_md, "ok")), \
@@ -142,3 +142,48 @@ def test_name_matches_only_stopwords_shared_fails():
     # 关键: 两侧都被停用词过滤后, coolabah/assisted 与 (无) 无交集
     assert ok is False
     assert any(kw in msg for kw in ("mismatch", "tokens_empty"))
+
+
+class TestFindFundidEngineDispatch:
+    """Spec G 4.7: L1 拿 FundID 支持 tavily / grok 两个引擎。"""
+
+    def test_tavily_engine_scans_search_results(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        from llm_ingest import search as search_mod
+
+        results = [
+            search_mod.TavilyResult(
+                url="https://www.fundmonitors.com/fund-factsheet.php?FundID=1512&AccCode=fresnjxju",
+                title="", content=""),
+        ]
+        monkeypatch.setattr(search_mod, "tavily_search", lambda *a, **k: results)
+        got = fm.find_fundid("Yarra Enhanced Income Fund", engine="tavily")
+        assert got == (1512, "fresnjxju")
+
+    def test_grok_engine_asks_grok(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        called = {"n": 0}
+
+        def _ask(name):
+            called["n"] += 1
+            return (1512, "fresnjxju")
+
+        monkeypatch.setattr(fm, "_grok_fundmonitors_id", _ask)
+        got = fm.find_fundid("Yarra Enhanced Income Fund", engine="grok")
+        assert got == (1512, "fresnjxju")
+        assert called["n"] == 1
+
+    def test_grok_returns_none_falls_through(self, monkeypatch):
+        """Grok 拿不到 -> 返 None, probe 走既有 no_fundid 分支, 不抛异常。"""
+        from llm_ingest import fundmonitors as fm
+        monkeypatch.setattr(fm, "_grok_fundmonitors_id", lambda name: None)
+        assert fm.find_fundid("Nope Fund", engine="grok") is None
+
+    def test_default_engine_is_tavily(self, monkeypatch):
+        from llm_ingest import fundmonitors as fm
+        from llm_ingest import search as search_mod
+        monkeypatch.setattr(search_mod, "tavily_search", lambda *a, **k: [])
+        monkeypatch.setattr(
+            fm, "_grok_fundmonitors_id",
+            lambda name: pytest.fail("默认引擎不应调用 Grok"))
+        assert fm.find_fundid("Any Fund") is None
