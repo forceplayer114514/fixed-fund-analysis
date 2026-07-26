@@ -18,6 +18,8 @@ import sqlite3
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from . import verify
+
 FUNDMONITORS_HOST = "https://www.fundmonitors.com"
 
 
@@ -491,7 +493,11 @@ def probe(
     else:
         wl_hit = None
     if wl_hit is None:
-        ok_name, msg = _name_matches(page_name, fund_name)
+        # Spec G 终审补漏: 换 verify.check_fund_identity (与 L2 自动纠名闸
+        # 同一判据), 老 _name_matches 停用词表分不出同发行商兄弟基金
+        # (Yarra Enhanced Income vs Yarra Australian Income 均只剩 {yarra})。
+        ident = verify.check_fund_identity(page_name, fund_name)
+        ok_name, msg = ident.passed, ident.reason
         if not ok_name:
             return {"status": "name_mismatch", "records": [], "ytd_map": {},
                     "url": url, "page_fund_name": page_name,

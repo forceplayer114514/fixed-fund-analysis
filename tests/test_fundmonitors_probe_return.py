@@ -80,8 +80,9 @@ def test_probe_name_mismatch_via_tavily_rejected():
         result = fm.probe("Coolabah Floating-Rate High Yield Fund (Assisted)")
     assert result["status"] == "name_mismatch"
     assert result["records"] == []
-    # errors[0] 应写清 mismatch 原因 (inter=∅ 或 name_tokens_empty)
-    assert any(kw in result["errors"][0] for kw in ("inter=∅", "tokens_empty"))
+    # errors[0] 应写清 mismatch 原因 (Spec G 终审补漏后判据换 verify.check_
+    # fund_identity, reason 格式变 "identity_mismatch doc=... target=...")
+    assert "identity_mismatch" in result["errors"][0]
 
 
 def test_probe_name_match_via_tavily_ok():
@@ -98,6 +99,32 @@ def test_probe_name_match_via_tavily_ok():
                       return_value=(True, [])):
         result = fm.probe("Yarra Enhanced Income Fund")
     assert result["status"] == "ok"
+
+
+def test_probe_sibling_fund_rejected_via_tavily():
+    """Spec G 终审补漏: probe() 唯一身份闸 (line ~494) 仍用旧 _name_matches,
+    去停用词后 income/enhanced/australian 等区分词被剥掉, 分不出同发行商
+    兄弟基金 -- "Yarra Enhanced Income Fund" (目标) 与 fundmonitors 页面命中
+    "Yarra Australian Income Fund" (错源) 双方去停用词后都只剩 {yarra},
+    旧判据交集非空 -> 错误放行 status=ok。
+
+    换成 verify.check_fund_identity 后应正确拒绝 (status=name_mismatch),
+    与 tests/test_verify.py::TestCheckFundIdentity::test_sibling_fund_is_rejected
+    是同一对 fund_name 用例。
+    """
+    fake_md = "# Yarra Australian Income Fund"
+    fake_records = [("2024-01-31", 0.005)]
+    with patch.object(fm, "find_fundid",
+                      return_value=(9999, "siblingX")), \
+         patch.object(fm, "fetch_profile_markdown",
+                      return_value=(fake_md, "ok")), \
+         patch.object(fm, "parse_html_monthly_table",
+                      return_value=(fake_records, {})), \
+         patch.object(fm, "gate_check_table",
+                      return_value=(True, [])):
+        result = fm.probe("Yarra Enhanced Income Fund")
+    assert result["status"] == "name_mismatch"
+    assert result["records"] == []
 
 
 def test_probe_whitelist_bypasses_name_check(db_with_whitelist):
