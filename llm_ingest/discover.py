@@ -419,21 +419,29 @@ def find_archive_via_search(
     latest_pdf_url = llm_latest if _validate_url_in_sources(llm_latest, real_sources) else None
     final_domain = llm_domain if _validate_url_in_sources(llm_domain, real_sources) else domain
 
-    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的
+    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的**页面**。
+    #
+    # Spec G 10.6: 这里曾有一段"优先 PDF"捷径 -- 直接扫 real_sources 取第一个
+    # 以 .pdf 结尾的 URL 当月报, 不抓页、不验域名归属、不做内容打样。实证 Tavily
+    # 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au 转贴的 factsheet,
+    # 一旦其文件名能解析出 ym 就会被当作官方月报入库。已删除。
+    #
+    # 统一规矩: 搜索层只回答"哪一页", PDF 链接一律只能来自真实抓取的页面 HTML
+    # (由 discover2.probe_urls 从 <a href> 正则抽取)。
     if not archive_url and not latest_pdf_url and real_sources:
-        # 优先 PDF
-        for s in real_sources:
-            if s.lower().endswith(".pdf"):
-                latest_pdf_url = s
-                break
-        # 其次 domain 下, path 匹配基金关键词的
-        if not latest_pdf_url and final_domain:
+        if final_domain:
             fund_tokens = re.findall(r"[a-z]+", fund_name.lower())
             fund_tokens = [t for t in fund_tokens if len(t) >= 4 and t not in {"fund", "trust", "capital"}]
             best_score = -1
             best_url = None
             for s in real_sources:
                 if not _same_host(s, final_domain):
+                    continue
+                # 这里挑的必须是"页面", 不是 PDF -- 否则当 _pick_issuer_domain
+                # 因关键词未命中而回退选中了三方站域名时 (如 pricefinancial.com.au
+                # 转贴 GCI factsheet), 同域下唯一/最高分候选可能正好就是那份被转
+                # 贴的 PDF 本身, 从而绕过本 task (Spec G 10.6) 要堵的口子。
+                if s.lower().endswith(".pdf"):
                     continue
                 from urllib.parse import urlparse
                 path_low = urlparse(s).path.lower()

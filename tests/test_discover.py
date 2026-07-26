@@ -486,5 +486,43 @@ class TestFetchPriority:
         assert _fetch("https://x/archive") is None
 
 
+class TestSearchLayerDoesNotYieldPdfLinks:
+    """Spec G 10.6: 搜索层只回答"哪一页", PDF 链接只能来自真实抓取的页面 HTML。
+
+    历史漏洞: v1 兜底直接扫搜索结果取第一个 .pdf 当月报, 不抓页不验域名。
+    实证 Tavily 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au
+    转贴的 factsheet。
+    """
+
+    def test_third_party_pdf_in_search_results_is_not_adopted(self, monkeypatch):
+        from llm_ingest import discover as disc
+
+        third_party_pdf = (
+            "https://www.pricefinancial.com.au/wp-content/uploads/"
+            "2024/05/Gryphon-GCI-Jun-2026.pdf"
+        )
+        sources = [third_party_pdf, "https://gcapinvest.com/our-lit"]
+
+        monkeypatch.setattr(disc, "multi_query_search", lambda *a, **k: sources)
+
+        # 阶段 B 的 Gemini 判 JSON 返回空 -> 走兜底分支
+        class _FakeResp:
+            text = "{}"
+
+        class _FakeClient:
+            def messages(self, *a, **k):
+                return _FakeResp()
+
+        ptr = disc.find_archive_via_search(
+            "Gryphon Capital Income Trust", "Gryphon Capital",
+            client=_FakeClient(),
+        )
+
+        assert ptr.latest_pdf_url != third_party_pdf, (
+            "搜索结果里的第三方 PDF 被直接当成月报采纳了 -- "
+            "PDF 链接只能来自真实抓取的页面 HTML"
+        )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
