@@ -540,7 +540,11 @@ def find_archive_v2(
                                 {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                             ]},
                             search_sources=real_sources, search_queries=[],
-                            discovered_pdfs=list(next_pdfs),
+                            # Spec G 10.3 补漏 (Task 4 审查发现): 这里原本回传
+                            # next_pdfs 全量 -- navigate_one_hop 抓的是整页 PDF,
+                            # 同样没做基金名过滤, 走同一条不判基金名的
+                            # probe_l1_official 消费路径, 与步 5/步 6 是同一类漏洞。
+                            discovered_pdfs=_best_match_pdfs(next_pdfs, fund_name),
                         )
             nav_hops.append((nav_start["url"], next_url or "(no_pick)"))
 
@@ -574,7 +578,10 @@ def find_archive_v2(
                                         {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
                                     ]},
                                     search_sources=real_sources, search_queries=[],
-                                    discovered_pdfs=list(next_pdfs2),
+                                    # Spec G 10.3 补漏 (Task 4 审查发现): 同上,
+                                    # 主页重试导航命中的 next_pdfs2 也需按基金名
+                                    # 匹配度筛, 不能原样透传整页给 discovered_pdfs。
+                                    discovered_pdfs=_best_match_pdfs(next_pdfs2, fund_name),
                                 )
                     nav_hops.append((home_url, next_url2 or "(no_pick)"))
 

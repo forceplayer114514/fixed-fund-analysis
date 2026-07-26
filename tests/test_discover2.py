@@ -136,6 +136,60 @@ class TestDiscoveredPdfsExcludeSiblingFunds:
             "下游 probe_l1_official 不做基金名匹配, 会直接入库"
         )
 
+    def test_navigate_fallback_excludes_sibling_fund_pdfs(self, monkeypatch):
+        """Spec G 10.3 补漏 (Task 4 审查发现): 步 6.5 (Spec C1) 自主导航兜底分支
+        同样只能带回与本基金匹配度最高的 PDF。
+
+        场景: probe_urls 对 top-N 候选一份 PDF 都没抽到 (只有 HTML), 触发步 6.5
+        导航兜底 -- navigate_one_hop 跳一跳后落到一个多基金共用的页面, 里面既有
+        目标基金 (Stake Accumulate) 的月报, 也有兄弟基金 (Stake Growth) 的月报。
+        修复前 discovered_pdfs=list(next_pdfs) 原样透传整页, 兄弟基金 PDF 会被
+        下游 probe_l1_official (不做基金名匹配) 直接入库。
+        """
+        from llm_ingest import navigate as nav_mod
+
+        target_pdf = "https://hellostake.com/docs/stake-accumulate-report-jun-2026.pdf"
+        sibling_pdf = "https://hellostake.com/docs/stake-growth-report-jun-2026.pdf"
+        start_url = "https://hellostake.com/legal/monthly-performance-report"
+        landing_url = "https://hellostake.com/legal/monthly-performance-report/all"
+
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: [start_url])
+        monkeypatch.setattr(
+            d2, "rank_urls",
+            lambda *a, **k: [{"url": start_url, "score": 90, "reason": "t"}],
+        )
+        # top-N 候选抓下来只有 HTML, 没有直接 PDF 链接 -> 步 4/5/6 全部空跑,
+        # 落入步 6.5 导航兜底
+        monkeypatch.setattr(
+            d2, "probe_urls",
+            lambda urls, **k: [{
+                "url": start_url, "html_ok": True, "pdf_urls": [], "error": None,
+                "html_snippet": "<html>...</html>",
+            }],
+        )
+        # 步 6.5.a 重抓全量 HTML (probes 只留 2000 字符 snippet)
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: "<html>full page</html>")
+        # navigate_one_hop 导航跳到多基金共用页, 含目标基金 1 份 + 兄弟基金 1 份
+        monkeypatch.setattr(
+            nav_mod, "navigate_one_hop",
+            lambda *a, **k: (landing_url, "<html>...</html>", [target_pdf, sibling_pdf]),
+        )
+        monkeypatch.setattr(
+            d2, "confirm_pdf_is_monthly_report", lambda *a, **k: (True, None),
+        )
+
+        ptr = d2.find_archive_v2(
+            "Stake Accumulate Fund", "Stake", client=object(),
+        )
+
+        assert ptr.no_archive is False
+        assert ptr.latest_pdf_url == target_pdf
+        assert target_pdf in ptr.discovered_pdfs
+        assert sibling_pdf not in ptr.discovered_pdfs, (
+            "兄弟基金 Stake Growth 的 PDF 被步 6.5 导航兜底路径带回了 -- "
+            "下游 probe_l1_official 不做基金名匹配, 会直接入库"
+        )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
