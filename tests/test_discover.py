@@ -6,6 +6,7 @@ sys.path.insert(0, "/Users/chong/Desktop/fixed_fund_analysis")
 
 import pytest
 
+from conftest import SelectStubClient
 from llm_ingest.discover import (
     ArchivePointer,
     _dedup_links,
@@ -14,6 +15,9 @@ from llm_ingest.discover import (
     _parse_ym_from_text,
     _recent_published_month,
     _valid_ym,
+    ClassifyError,
+    classify_pdf_links,
+    extract_all_pdf_links,
     parse_archive_page,
     probe_l2_wayback,
     run_discovery,
@@ -58,8 +62,9 @@ class TestParseYmFromText:
         """回归 (2026-07 Stake 9月幻影缺口事故): 文件名 AccumulateReport_Sept_2025.pdf
         用 4 字母 "Sept" (September 唯一常见的非 3 字母缩写), 旧版 _MONTHS_ABBR 只有
         3 字母 "sep", 正则被多出的 "t" 卡住整体失配, ym 解析静默返回 None, 该月 PDF
-        被 _extract_pdf_links_by_regex 悄悄丢弃 (不进 confirmed_gaps, 看起来像
-        "文档没有这个月")。"""
+        被当时按文件名反解 ym 的链接筛选悄悄丢弃 (不进 confirmed_gaps, 看起来像
+        "文档没有这个月")。该筛选现已换成 classify_pdf_links; 本函数仍用于 wayback
+        缺口粗筛与本地缓存文件名解析, 所以这条回归继续保留。"""
         assert _parse_ym_from_text("AccumulateReport_Sept_2025.pdf") == "2025-09"
         assert _parse_ym_from_text("Sept 2025") == "2025-09"
         assert _parse_ym_from_text("Accumulate_Sept25.pdf") == "2025-09"
@@ -183,108 +188,148 @@ class TestProbeL2:
 
 # ---------- parse_archive_page + run_discovery: 用 monkeypatch 打桩 ----------
 
-class TestParseArchivePage:
-    def test_stub_gemini(self, monkeypatch):
-        """打桩 Client.messages 模拟 Gemini 返 JSON list."""
-        from llm_ingest import discover as disc
-
-        class FakeResp:
-            text = '{"links":[{"ym":"2025-01","url":"https://x/2025-01.pdf"},{"ym":"2025-02","url":"https://x/2025-02.pdf"}],"has_more_pages":true,"next_page_hint":"page=2","unparseable_count":1}'
-
-        class FakeClient:
-            def messages(self, prompt, max_tokens=None):
-                return FakeResp()
-
-        links, more, hint, unp = parse_archive_page("<html>...</html>", client=FakeClient())
-        assert links == [("2025-01", "https://x/2025-01.pdf"),
-                         ("2025-02", "https://x/2025-02.pdf")]
-        assert more is True
-        assert hint == "page=2"
-        assert unp == 1
-
-    def test_gemini_invalid_json_returns_empty(self):
-        class FakeResp:
-            text = "nope, not json"
-
-        class FakeClient:
-            def messages(self, prompt, max_tokens=None):
-                return FakeResp()
-
-        links, more, hint, unp = parse_archive_page("<html>", client=FakeClient())
-        assert links == []
-        assert more is False
-
-    def test_code_regex_path_skips_llm_when_pdf_links_past_80kb_cutoff(self):
-        """Stake 实况回归: 归档页 >80KB 且全部 PDF 链接落在截断线之后,
-        代码正则应直接从全文抓到, 完全不调 LLM (client.messages 被调即 fail)."""
-        class FailingClient:
-            def messages(self, prompt, max_tokens=None):
-                raise AssertionError("不该调 LLM -- 代码正则应已命中")
-
-        padding = "<!-- filler -->" * 6000  # far more than 80_000 chars
+class TestExtractAllPdfLinks:
+    def test_lists_every_pdf_href_absolute_and_deduped(self):
         html = (
-            "<html><body>" + padding
-            + '<a href="https://cdn.example.com/AccumulateReport_March2025.pdf">March 2025</a>'
-            + '<a href="https://cdn.example.com/Accumulate_April_2025.pdf">April 2025</a>'
-            + "</body></html>"
+            '<a href="/docs/a.pdf">A</a>'
+            '<a href="https://cdn.x/b.pdf?v=2">B</a>'
+            '<a href="/docs/a.pdf">A again</a>'
+            '<a href="/about">not pdf</a>'
         )
-        assert len(html) > 80_000
-        links, more, hint, unp = parse_archive_page(
-            html, client=FailingClient(), base_url="https://issuer.com/archive",
-        )
-        assert links == [
-            ("2025-03", "https://cdn.example.com/AccumulateReport_March2025.pdf"),
-            ("2025-04", "https://cdn.example.com/Accumulate_April_2025.pdf"),
+        assert extract_all_pdf_links(html, "https://issuer.com/archive") == [
+            "https://issuer.com/docs/a.pdf",
+            "https://cdn.x/b.pdf?v=2",
         ]
+
+    def test_no_filtering_pds_and_sibling_funds_still_listed(self):
+        """本函数只负责如实列出, 判归属是 classify_pdf_links 的事 -- 这里若先筛,
+        判断就又散成两处 (打地鼠的根源)."""
+        html = ('<a href="/Stake_Accumulate_Fund_PDS.pdf">PDS</a>'
+                '<a href="/yarra-australian-equities-30-june-2024.pdf">other fund</a>')
+        assert len(extract_all_pdf_links(html, "https://x.com/")) == 2
+
+
+class TestClassifyPdfLinks:
+    """判"哪些链接是本基金月报"唯一的一处逻辑. 覆盖原来散在 7 处的手写文件名
+    规则各自的失效模式。"""
+
+    def test_real_stake_page_returns_all_monthlies_not_just_one(self):
+        """2026-07 Stake 事故 (核心回归): 同页 PDS/TMD 文件名把基金全称拼全,
+        真月报只写简称且部分是驼峰无分隔 -- 旧的 token 打分 + 黑名单组合让
+        16 份真月报只剩 1 份入库。"""
+        pds = "https://cdn/Stake_Accumulate_Fund_PDS_25May26.pdf"
+        tmd = "https://cdn/Stake_Accumulate_TMD_25May26.pdf"
+        monthlies = {
+            "https://cdn/Accumulate report_March2025.pdf": "2025-03",
+            "https://cdn/AccumulateMonthly_April25.pdf": "2025-04",
+            "https://cdn/AccumulateReport_Sept_2025.pdf": "2025-09",
+            "https://cdn/AccumulateReport_Jun26.pdf": "2026-06",
+        }
+        client = SelectStubClient(lambda u: monthlies.get(u))
+        pairs, rejected, dropped = classify_pdf_links(
+            [pds, tmd] + list(monthlies), "Stake Accumulate Fund", client=client)
+
+        assert pairs == sorted((ym, u) for u, ym in monthlies.items())
+        assert {r["url"] for r in rejected} == {pds, tmd}
+        assert dropped == 0
+
+    def test_sibling_fund_file_rejected(self):
+        """Yarra 归档页实况: 同页挂兄弟基金月报, 文件名日期解析得出来且不在任何
+        黑名单里 -- 旧代码会当本基金月报入库。"""
+        target = "https://cdn/yarra-enhanced-income-jun-2026.pdf"
+        sibling = "https://cdn/Yarra-Australian-Equities-Fund-30-June-2024.pdf"
+        client = SelectStubClient(lambda u: "2026-06" if u == target else None)
+        pairs, rejected, _dr = classify_pdf_links(
+            [sibling, target], "Yarra Enhanced Income Fund", client=client)
+        assert pairs == [("2026-06", target)]
+        assert rejected[0]["url"] == sibling
+
+    def test_model_cannot_inject_url_only_index_is_trusted(self):
+        """反捏造: 模型回文里夹带 URL 字段一律无视, 只按编号从真实清单取。"""
+        real = "https://cdn/Accumulate_June_2025.pdf"
+        client = SelectStubClient(
+            lambda u: None,
+            raw_text='{"reports":[{"i":1,"ym":"2025-06",'
+                     '"url":"https://evil.com/fabricated.pdf"}]}')
+        pairs, _rej, _dr = classify_pdf_links([real], "Stake Accumulate", client=client)
+        assert pairs == [("2025-06", real)]
+
+    def test_out_of_range_index_and_bad_ym_dropped(self):
+        real = "https://cdn/a.pdf"
+        client = SelectStubClient(
+            lambda u: None,
+            raw_text='{"reports":[{"i":9,"ym":"2025-06"},{"i":1,"ym":"2025-13"},'
+                     '{"i":1,"ym":"June 2025"}]}')
+        pairs, _rej, dropped = classify_pdf_links([real], "F", client=client)
+        assert pairs == []
+        assert dropped == 3
+
+    def test_empty_url_list_makes_no_call(self):
+        client = SelectStubClient(lambda u: "2025-01")
+        assert classify_pdf_links([], "F", client=client) == ([], [], 0)
+        assert client.prompts == []
+
+    def test_batches_long_history_instead_of_truncating_output(self):
+        """20 年历史 240 份月报若一次全塞进去, 输出会撞 max_tokens 被截断 --
+        截断即静默丢月份。必须分批。"""
+        urls = [f"https://cdn/monthly-{i:03d}.pdf" for i in range(130)]
+        client = SelectStubClient(lambda u: "2025-01")
+        classify_pdf_links(urls, "F", client=client)
+        assert len(client.prompts) == 3  # SELECT_BATCH=60 -> 60+60+10
+
+    def test_retries_once_then_raises_rather_than_silently_losing_months(self):
+        client = SelectStubClient(lambda u: "2025-01", raise_times=99)
+        with pytest.raises(ClassifyError):
+            classify_pdf_links(["https://cdn/a.pdf"], "F", client=client)
+        assert len(client.prompts) == 2  # 重试一次后才放弃
+
+    def test_transient_failure_recovers_on_retry(self):
+        client = SelectStubClient(lambda u: "2025-01", raise_times=1)
+        pairs, _rej, _dr = classify_pdf_links(["https://cdn/a.pdf"], "F", client=client)
+        assert pairs == [("2025-01", "https://cdn/a.pdf")]
+
+    def test_requires_fund_name(self):
+        with pytest.raises(ValueError):
+            classify_pdf_links(["https://cdn/a.pdf"], "", client=object())
+
+
+class TestParseArchivePage:
+    def test_links_past_80kb_cutoff_still_reach_the_model(self):
+        """Stake 实况回归: 归档页 149KB, 全部 PDF 链接落在 8.3 万字节之后。旧实现
+        把 HTML 截到 80KB 才交给模型, 一个链接都看不见, 恒返 0 links。现在交给
+        模型的是代码扫全文抽出的链接清单, 与 HTML 长度无关。"""
+        a = "https://cdn.example.com/AccumulateReport_March2025.pdf"
+        b = "https://cdn.example.com/Accumulate_April_2025.pdf"
+        html = ("<html><body>" + "<!-- filler -->" * 6000
+                + f'<a href="{a}">March 2025</a><a href="{b}">April 2025</a>'
+                + "</body></html>")
+        assert len(html) > 80_000
+        client = SelectStubClient(
+            lambda u: {a: "2025-03", b: "2025-04"}.get(u))
+        links, more, hint, unp = parse_archive_page(
+            html, fund_name="Stake Accumulate Fund", client=client,
+            base_url="https://issuer.com/archive")
+        assert links == [("2025-03", a), ("2025-04", b)]
         assert unp == 0
+        assert a in client.prompts[0] and b in client.prompts[0]
 
-    def test_code_regex_path_filters_unrelated_domain_date_path_noise(self):
-        """Stake 实况: 混入无关域名的条款 PDF, 路径含 "/2024/02/" (上传日期非月报期),
-        不应被文件名反解逻辑之外的整段 URL 兜底误判为 2024-02。"""
-        class FailingClient:
-            def messages(self, prompt, max_tokens=None):
-                raise AssertionError("不该调 LLM")
-
-        html = (
-            '<a href="https://finclear.com.au/wp-content/uploads/2024/02/Terms-of-Trade.pdf">Terms</a>'
-            '<a href="https://cdn.example.com/Accumulate_March_2025.pdf">March 2025</a>'
-        )
-        links, _more, _hint, _unp = parse_archive_page(
-            html, client=FailingClient(), base_url="https://issuer.com/archive",
-        )
-        assert links == [("2025-03", "https://cdn.example.com/Accumulate_March_2025.pdf")]
-
-    def test_code_regex_path_falls_back_to_llm_when_no_pdf_hrefs(self):
-        """正则一无所获 (无 .pdf 后缀 href, 如中转页无扩展名) 时仍退回 LLM 路径, 行为不变."""
-        class FakeResp:
-            text = '{"links":[{"ym":"2025-01","url":"https://x/2025-01"}],"has_more_pages":false,"next_page_hint":null,"unparseable_count":0}'
-
-        class FakeClient:
-            def messages(self, prompt, max_tokens=None):
-                return FakeResp()
-
-        html = '<a href="https://x/2025-01">Report Jan 2025</a>'
-        links, more, hint, unp = parse_archive_page(
-            html, client=FakeClient(), base_url="https://x/",
-        )
-        assert links == [("2025-01", "https://x/2025-01")]
-
-    def test_code_regex_path_pagination_heuristic(self):
-        """代码路径命中时, 页面含分页字样应把 has_more_pages 猜为 True (启发式)."""
-        class FailingClient:
-            def messages(self, prompt, max_tokens=None):
-                raise AssertionError("不该调 LLM")
-
-        html = (
-            '<a href="https://cdn.example.com/Accumulate_March_2025.pdf">March 2025</a>'
-            '<button>Load More</button>'
-        )
-        links, more, hint, unp = parse_archive_page(
-            html, client=FailingClient(), base_url="https://issuer.com/archive",
-        )
-        assert links == [("2025-03", "https://cdn.example.com/Accumulate_March_2025.pdf")]
+    def test_pagination_heuristic(self):
+        pdf = "https://cdn.example.com/Accumulate_March_2025.pdf"
+        html = f'<a href="{pdf}">March 2025</a><button>Load More</button>'
+        client = SelectStubClient(lambda u: "2025-03")
+        links, more, hint, _unp = parse_archive_page(
+            html, fund_name="F", client=client, base_url="https://issuer.com/a")
+        assert links == [("2025-03", pdf)]
         assert more is True
         assert hint == ""
+
+    def test_no_pdf_hrefs_makes_no_llm_call(self):
+        client = SelectStubClient(lambda u: "2025-01")
+        links, more, _hint, unp = parse_archive_page(
+            '<a href="/about">About</a>', fund_name="F", client=client,
+            base_url="https://x/")
+        assert links == []
+        assert client.prompts == []
 
 
 # ---------- run_discovery: 全打桩集成 ----------
@@ -336,7 +381,7 @@ class TestRunDiscovery:
             )
             return (links, ptr, 0)
 
-        def fake_probe_l2(domain, gap_set, fund_name):
+        def fake_probe_l2(domain, gap_set, fund_name, **kwargs):
             assert gap_set == {"2025-01"}
             return [("2025-01", "wayback:a")]
 

@@ -1,4 +1,4 @@
-"""discover2: 归档页发现 v2 -- Tavily 排序 + Scrapling 抓 + PDF 打样验证.
+"""discover2: 归档页发现 v2 -- 搜索排序 + 抓页 + LLM 判链接清单.
 
 问题背景 (discover.py v1 的坑):
   阶段 B 只喂 Gemini URL 字面串, 让它凭 slug 猜"归档 vs 单份"。
@@ -6,41 +6,37 @@
   两个候选, Gemini 挑了前者 (营销页, 无 PDF), 忽略后者 (真归档)。
   信息量根本不够 -- Gemini 语义猜错必然发生。
 
-v2 流程 (四步, LLM 只做能力内的活):
-  1. Tavily 拿 URL (discover.py 已通)
-  2. **Gemini 排优先级**   -- 语言活: 按"最可能含月报下载链接"排序输出 JSON
-  3. **_fetch top-N 并发** -- 抓 HTML (playwright/requests), 抽 PDF 链接
-  4. **Gemini 判 PDF**     -- 内容活: 首份 PDF 走 extract_from_pdf, not_found=False 且
-                             measure=net_monthly 则该页确认为月报归档 (或单份最新)
+v2 流程 (三步, LLM 只做能力内的活):
+  1. 搜索拿 URL (Grok 直答归档页, 或 Tavily 检索 + Gemini 排序)
+  2. **_fetch top-N 并发** -- 抓 HTML (playwright/requests), 代码列出页内全部 PDF 链接
+  3. **discover.classify_pdf_links** -- 把链接清单编号交 LLM 判"哪几条是本基金
+     月报、各是哪个月"。答案非空即认定该页为归档页, 且月报清单同时到手。
 
 关键决策:
-  - LLM 只做 "排序 URL" + "判 PDF 内容", 决不猜"URL 是不是归档" (Yarra 坑)
-  - top-N 并发抓 (ThreadPoolExecutor), 谁先出 PDF 谁赢
-  - PDF 打样必要: 有站能抓到 PDF 链接但不是月报 (PDS/白皮书/因子表), 不打样会入错
+  - LLM 只做语义判断 (排序 URL / 判链接归属与月份), URL 一律由代码从真实抓到的
+    页面里取, LLM 只能回编号, 不允许产出 URL。
+  - top-N 并发抓 (ThreadPoolExecutor), 谁先判出本基金月报谁赢。
+  - "哪些是月报" 只在 classify_pdf_links 一处判。原来这里另有一步下载整份 PDF
+    上传打样, 且挑哪份打样要靠文件名打分 -- 打分挑错就整页误杀 (2026-07 Stake
+    事故), 已删。
 
-依赖复用: discover.py 的 _fetch / _load_prompt / ArchivePointer / _same_host
+依赖复用: discover.py 的 _fetch / classify_pdf_links / ArchivePointer / _same_host
 """
 from __future__ import annotations
 
 import concurrent.futures
 import json
 import re
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
-import requests
-
-from . import extract as ex_mod
+from . import discover as disc_mod
 from .client import Client
 from .discover import (
     ArchivePointer,
     _fetch,
-    _load_prompt,
     _pick_issuer_domain,
     _same_host,
-    _parse_json_response,
 )
 from .search import TavilyError, multi_query_search
 
@@ -48,15 +44,12 @@ from .search import TavilyError, multi_query_search
 TOP_N_PROBE = 4          # 排序后取 top-N 并发探测
 FETCH_TIMEOUT = 30       # 单次抓页超时
 PROBE_CONCURRENCY = 4    # 并发线程池
-PDF_DOWNLOAD_TIMEOUT = 30
 
 # ---- PDF 链接抽取 ----
 # 抓到 HTML 后, 认下面路径特征算 PDF 候选:
 #  (a) .pdf 直链
 #  (b) href 里含 report/factsheet/monthly/performance 且是链接文本或路径特征
 _PDF_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
-_HTML_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.html?(?:\?[^"\']*)?)["\']', re.I)
-_CSV_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.csv(?:\?[^"\']*)?)["\']', re.I)
 _HTML_LINK_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>', re.I)
 _MONTHLY_HINTS = re.compile(
     r"(monthly|month-end|fund\s*report|fact\s*sheet|performance|report|update)",
@@ -93,85 +86,6 @@ def _extract_pdf_links(html: str, base_url: str) -> List[str]:
         seen.add(full)
         out.append(full)
     return out
-
-
-def _extract_html_links(html: str, base_url: str) -> List[str]:
-    """抓页 HTML -> 候选 .html/.htm 归档链接 (Coolabah Plotly 报告场景).
-
-    只抽 href 后缀是 .html/.htm 的直链, 关键词命中的中转链保持原策略走
-    _extract_pdf_links (以免与 PDF 通道重复计算).
-    """
-    seen: set = set()
-    out: List[str] = []
-    for href in _HTML_HREF_RE.findall(html):
-        full = urljoin(base_url, href)
-        low = full.lower()
-        # 排掉自身归档索引页
-        if any(k in low for k in ("/login", "/contact", "/subscribe")):
-            continue
-        if full not in seen:
-            seen.add(full)
-            out.append(full)
-    return out
-
-
-def _extract_csv_links(html: str, base_url: str) -> List[str]:
-    """抓页 HTML -> 候选 .csv 直链 (unit price CSV 场景)."""
-    seen: set = set()
-    out: List[str] = []
-    for href in _CSV_HREF_RE.findall(html):
-        full = urljoin(base_url, href)
-        if full not in seen:
-            seen.add(full)
-            out.append(full)
-    return out
-
-
-def _rank_pdfs_by_name_match(pdf_urls: List[str], fund_name: str) -> List[str]:
-    """按 fund_name token 与 PDF slug 匹配度重排 PDF URL 列表 (降序).
-
-    命中越多排越前。tie-break: 保原顺序 (稳定排序)。
-    """
-    fund_tokens = set(re.findall(r"[a-z]+", fund_name.lower()))
-    fund_tokens -= {"fund", "the", "and", "of", "trust", "class"}
-    if not fund_tokens:
-        return pdf_urls
-    def _score(u: str) -> int:
-        slug = re.sub(r".*/", "", u).lower()
-        slug_tokens = set(re.findall(r"[a-z]+", slug))
-        return len(fund_tokens & slug_tokens)
-    return sorted(pdf_urls, key=_score, reverse=True)
-
-
-def _pdf_slug_match_count(pdf_url: str, fund_name: str) -> int:
-    """PDF slug 与 fund_name token 的交集大小 (0 = 完全无关)."""
-    fund_tokens = set(re.findall(r"[a-z]+", fund_name.lower()))
-    fund_tokens -= {"fund", "the", "and", "of", "trust", "class"}
-    slug = re.sub(r".*/", "", pdf_url).lower()
-    slug_tokens = set(re.findall(r"[a-z]+", slug))
-    return len(fund_tokens & slug_tokens)
-
-
-def _best_match_pdfs(pdf_urls: List[str], fund_name: str) -> List[str]:
-    """只保留与 fund_name 匹配分并列最高的 PDF (保序).
-
-    Spec G 10.3: 不能用 `_pdf_slug_match_count(u, fund_name) > 0` 这种绝对判据 --
-    它与 Spec G 10.1 的根因同病, 分不了兄弟基金:
-      目标 "Yarra Enhanced Income Fund" token = {yarra, enhanced, income}
-      目标 PDF  yarra-enhanced-income-jun-2026.pdf   -> 交集 3
-      兄弟 PDF  yarra-australian-income-jun-2026.pdf -> 交集 2, 同样 > 0
-    改用相对判据(取最高分并列): 3 > 2 排除兄弟基金; 而整页文件名统一用缩写时
-    (如 GIF-Monthly 代表 Bentham Global Income Fund) 全部并列, 不会过度过滤。
-
-    全页零匹配 -> 返回空列表 (该页与本基金无关)。
-    """
-    if not pdf_urls:
-        return []
-    scored = [(u, _pdf_slug_match_count(u, fund_name)) for u in pdf_urls]
-    best = max(s for _u, s in scored)
-    if best <= 0:
-        return []
-    return [u for u, s in scored if s == best]
 
 
 # ---- Step 1: Gemini 排优先级 (语言活) ----
@@ -287,13 +201,13 @@ def _heuristic_rank(
 
 # ---- 定位候选页面: 按引擎分派 (Spec G 4.1) ----
 #
-# find_archive_v2 四步中, 第 1-2 步 (搜索 + Gemini 排序) 本质是产出
-# (issuer_domain, 已排序候选页面), 第 3-4 步 (抓页 + 正则抽 PDF + 打样) 消费它。
+# find_archive_v2 三步中, 第 1-2 步 (搜索 + Gemini 排序) 本质是产出
+# (issuer_domain, 已排序候选页面), 第 3 步 (抓页 + 列出 PDF 链接 + 交 LLM 判) 消费它。
 # 按引擎分派只切第 1-2 步:
 #   - Tavily 是检索, 给的是一堆 URL, 需要 Gemini 排序
 #   - Grok 是 agentic search, 直接给答案, 已排好序, 再让 Gemini 排是多此一举
 #     (实测答 GCI 归档页 3 轮全对 https://gcapinvest.com/our-lit)
-# 第 3-4 步保持共用, 天然是反捏造闸: Grok 若主动提了 PDF, 那些 URL 不在抓下来的
+# 第 3 步保持共用, 天然是反捏造闸: Grok 若主动提了 PDF, 那些 URL 不在抓下来的
 # 页面 <a href> 里, 自动被丢弃。
 
 def _grok_answer_archive(fund_name: str, issuer: str, asx_code: Optional[str]):
@@ -410,54 +324,14 @@ def probe_urls(urls: List[str], *, concurrency: int = PROBE_CONCURRENCY) -> List
     return [r for r in results if r is not None]
 
 
-# ---- Step 3: PDF 打样 (extract 判 net_return) ----
-
-def _download_pdf(url: str, timeout: int = PDF_DOWNLOAD_TIMEOUT) -> Optional[bytes]:
-    try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"},
-                         allow_redirects=True)
-        if r.status_code == 200 and r.content:
-            # 简验: PDF magic
-            if r.content[:4] == b"%PDF":
-                return r.content
-    except Exception:
-        pass
-    return None
-
-
-def confirm_pdf_is_monthly_report(
-    pdf_url: str, fund_name: str, *, client: Optional[Client] = None,
-) -> Tuple[bool, Optional[ex_mod.Extraction]]:
-    """下载 PDF -> 走 extract -> not_found=False + measure 合理 -> 是月报.
-
-    返 (is_monthly, extraction). 下载失败/解析失败/not_found -> (False, ex_or_None).
-    """
-    pdf_bytes = _download_pdf(pdf_url)
-    if not pdf_bytes:
-        return False, None
-    # 写到临时文件 (extract_from_pdf 接 Path)
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-        f.write(pdf_bytes)
-        tmp_path = Path(f.name)
-    try:
-        # ym 未知先给占位 (打样只要判是不是月报, 具体 ym 由 parse_archive 阶段做)
-        ex = ex_mod.extract_from_pdf(tmp_path, expected_ym="0000-00", client=client,
-                                     max_pages=2, fund_name=fund_name)
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-    if ex.not_found or ex.net_return is None:
-        return False, ex
-    # measure 合理性: net_monthly 是月报; 其他 (annualized/quarterly/ytd) 不算
-    if ex.measure and ex.measure.lower() not in ("net_monthly", "monthly_net", "monthly"):
-        # 结构性字段类型错 -- 按 CLAUDE.md 五节, 不能保留, 视作"不是月报"
-        return False, ex
-    return True, ex
-
-
-# ---- Step 4: 顶层 ----
+# ---- Step 3: 顶层 ----
+#
+# 原来这里还有一步 "PDF 打样": 下载候选页里排第一的 PDF, 整份上传给模型问
+# "这是不是本基金月报", 用来确认该页是否归档页。已删, 由 classify_pdf_links
+# 取代 -- 同一个判断改成只看链接清单 (一次几百 token 的文本调用, 而非一份
+# 24 页 3.8 万 token 的 PDF 上传), 且顺带直接产出 [(ym, url)] 全量月报清单,
+# 不必再"确认页面 -> 另起一套规则筛该页文件"分两步走。
+# 打样这一步本身也是 2026-07 Stake 事故的直接故障点 (见 git 历史)。
 
 def find_archive_v2(
     fund_name: str,
@@ -469,7 +343,7 @@ def find_archive_v2(
     top_n: int = TOP_N_PROBE,
     engine: str = "tavily",
 ) -> ArchivePointer:
-    """v2 归档定位: Tavily -> Gemini 排序 -> Scrapling 抓 -> PDF 打样验证.
+    """v2 归档定位: 搜索 -> 排序 -> 抓页 -> classify_pdf_links 判链接清单.
 
     返回 ArchivePointer (与 v1 兼容, 让 run_discovery 无缝接).
     """
@@ -494,175 +368,117 @@ def find_archive_v2(
     # ---- 步 3: 并发抓 top-N, 抽 PDF 链接 ----
     probes = probe_urls(top_urls, concurrency=min(PROBE_CONCURRENCY, len(top_urls)))
 
-    # ---- 步 4: 分类 - 抓到 PDF 链接的按"数量+归档 hint"评分 ----
-    # 逻辑:
-    #   PDF 链接 >= 3 且抓到页 -> 强候选归档页
-    #   PDF 链接 = 1..2       -> 单份最新 / 备选
-    #   PDF 链接 = 0          -> 该 URL 非归档 (可能是营销/介绍页)
-    strong_candidates: List[Dict[str, Any]] = []
-    single_pdfs: List[Dict[str, Any]] = []
+    # ---- 步 4: 按 ranked 顺序逐页判定, 首个产出本基金月报的页即归档页 ----
+    # 原来分三步: 按"页内 PDF 数量 >= 3"分强/弱候选 -> 按 fund_name token 打分
+    # 挑几份 -> 逐份下载整个 PDF 上传给模型打样"这是不是月报"。数量与打样都是
+    # 间接判据, 且各自带一套文件名规则:
+    #   - 数量: 只挂 1 份月报的页与只挂 1 份 PDS 的页无法区分
+    #   - 打样: 挑哪一份去打样又得靠文件名打分, 挑错整页误杀 (2026-07 Stake 事故
+    #     根因: PDS 文件名把基金全称拼全, 打分反而高于真月报, 排第一被打样判否)
+    # 现在一次问清: 这页全部 PDF 链接里哪几条是本基金月报、各是哪个月。答案非空
+    # 即归档页, 且清单已到手 -- 不必"先确认页面, 再另起一套规则筛该页文件"。
     for p in probes:
         if not p["pdf_urls"]:
             continue
-        # 步 4.5: PDF 列表按 slug 与 fund_name 匹配度重排, 匹配度高的先打样
-        # 教训 (Yarra /performance): 排序拿到的 top-1 页可能含多份 PDF, 其中
-        # 只有部分是目标基金的月报, 其余是别的基金 (同域下多基金共存)。
-        # 直接取 pdf_urls[0] 会打样到别的基金 PDF 判 not_found, 浪费一轮 Gemini。
-        # 按 fund_name token 匹配度筛后, 目标 PDF 排到最前, 首份就命中。
-        p["pdf_urls"] = _rank_pdfs_by_name_match(p["pdf_urls"], fund_name)
-        if len(p["pdf_urls"]) >= 3:
-            strong_candidates.append(p)
-        else:
-            single_pdfs.append(p)
-
-    # ---- 步 5: 逐个 strong_candidate 打样, 通过即敲定归档 ----
-    # 只试排第一的 PDF 曾致 Stake 事故 (2026-07): fund_name 有拼写误差
-    # ("stake accumlate" 缺一个 u) 时, _rank_pdfs_by_name_match 对 PDS/TMD/月报
-    # 打分全部打平 (都只命中 "stake" 一个 token), 稳定排序把 PDS 排在最前, 首份
-    # 打样判"不是月报"就整页跳过 -- 冤枉丢弃了同页 14~19 份真月报。改为同一
-    # candidate 内按序多试几份 (PDS/TMD 通常挤在前几个), 一份通过即敲定归档。
-    _MAX_PROBE_PER_CANDIDATE = 5
-    for cand in strong_candidates:
-        matched_pdfs = [u for u in cand["pdf_urls"] if _pdf_slug_match_count(u, fund_name) > 0]
-        # 优化: 全页 PDF 与 fund_name 零匹配 -> 该页所有 PDF 都跟目标基金无关,
-        # 跳过整页免除 Gemini API 调用 (Yarra /performance 全是 Australian Income
-        # 基金 PDF, 与 Enhanced Income 无关, 打样必失败, 直接跳)
-        if not matched_pdfs:
+        try:
+            pairs, rejected, dropped = disc_mod.classify_pdf_links(
+                p["pdf_urls"], fund_name, client=client)
+        except disc_mod.ClassifyError as e:
+            # 单页判不了不致命 (后面还有候选页与导航兜底), 记进 probes 供 evidence
+            p["error"] = f"classify_failed: {e}"
             continue
-        for pdf_url in matched_pdfs[:_MAX_PROBE_PER_CANDIDATE]:
-            ok, ex = confirm_pdf_is_monthly_report(pdf_url, fund_name, client=client)
-            if not ok:
-                continue
-            return ArchivePointer(
-                archive_url=cand["url"],
-                pagination_param=None,   # 由后续 parse_archive 探测
-                no_archive=False,
-                latest_pdf_url=pdf_url,
-                issuer_domain_confirmed=domain,
-                evidence=f"归档页确认: {cand['url']} 含 {len(cand['pdf_urls'])} 份 PDF, {pdf_url} 验证为月报",
-                raw={"ranked": ranked, "locate": locate_ev, "probes": [
-                    {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
-                ]},
-                search_sources=real_sources,
-                search_queries=[],
-                # 把此页**与本基金名匹配度最高的** PDF 带回 run_discovery, 免它
-                # 再让 Gemini 解析一遍。
-                #
-                # Spec G 10.3: 这里原本回传 cand["pdf_urls"] 全量(含同页其他基金
-                # 的月报)。下游 probe_l1_official 只按 _NON_MONTHLY_HINTS 与"文件名
-                # 能否解析出 ym"过滤, 不做基金名匹配 -> 兄弟基金月报直接入库。
-                # 真实场景: yarracm.com/performance 同挂 Enhanced Income 与
-                # Australian Income 两支基金月报。
-                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
-            )
+        p["monthly_count"] = len(pairs)
+        if not pairs:
+            continue
+        return ArchivePointer(
+            archive_url=p["url"],
+            pagination_param=None,
+            # 只判出 1 个月 -> 视作"单份最新", 让上游继续走 wayback 补历史
+            no_archive=len(pairs) < 2,
+            # _dedup_links 已按 ym 升序, 末尾即最新月那份
+            latest_pdf_url=pairs[-1][1],
+            issuer_domain_confirmed=domain,
+            evidence=(f"归档页确认: {p['url']} 页内 {len(p['pdf_urls'])} 份 PDF, "
+                      f"判定 {len(pairs)} 份为本基金月报 "
+                      f"({pairs[0][0]}~{pairs[-1][0]}), 筛除 {len(rejected)} 份"
+                      + (f", 弃用 {dropped} 条不可采信回答" if dropped else "")),
+            raw={"ranked": ranked, "locate": locate_ev,
+                 "rejected": rejected[:20], "dropped": dropped,
+                 "probes": [
+                     {"url": q["url"], "pdf_count": len(q["pdf_urls"]),
+                      "monthly_count": q.get("monthly_count"),
+                      "error": q.get("error")}
+                     for q in probes
+                 ]},
+            search_sources=real_sources,
+            search_queries=[],
+            discovered_pdfs=list(p["pdf_urls"]),
+            discovered_links=pairs,
+        )
 
-    # ---- 步 6: 无强候选 -> single_pdfs 里挑首份能通过打样的当"最新单份" (no_archive=True) ----
-    for cand in single_pdfs:
-        first_pdf = cand["pdf_urls"][0]
-        ok, ex = confirm_pdf_is_monthly_report(first_pdf, fund_name, client=client)
-        if ok:
-            return ArchivePointer(
-                archive_url=None,
-                pagination_param=None,
-                no_archive=True,
-                latest_pdf_url=first_pdf,
-                issuer_domain_confirmed=domain,
-                evidence=f"单份最新: {first_pdf} (归档页未找到, 走 wayback 补历史)",
-                raw={"ranked": ranked, "locate": locate_ev, "probes": [
-                    {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
-                ]},
-                search_sources=real_sources,
-                search_queries=[],
-                # 单份场景下同页可能仍有其他 PDF (如 1-2 份), 只带回与本基金名
-                # 匹配度最高的 (Spec G 10.3, 理由同步 5)。
-                discovered_pdfs=_best_match_pdfs(cand["pdf_urls"], fund_name),
-            )
-
-    # ---- 步 6.5 (Spec C1): 无强候选 + single_pdfs 全灰 -> 自主导航 1 跳 ----
-    # 场景: Stake 归档页 hellostake.com/.../performance-updates-and-statements/... 抓下来
-    # 只含 8 份 PDS/TMD 静态 PDF (无月报), 而 <a href="/legal/monthly-performance-report">
-    # 明摆在页里, 点进去有 16 份月报 PDF. probe_urls 抽 0 PDF 走到这里.
+    # ---- 步 6.5 (Spec C1): 候选页都没产出月报 -> 自主导航 1 跳 ----
+    # 场景: Stake 归档入口页 hellostake.com/.../performance-updates-and-statements/...
+    # 抓下来只含 8 份 PDS/TMD (无月报), 而 <a href="/legal/monthly-performance-report">
+    # 明摆在页里, 点进去才是 16 份月报。
     from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
     nav_hops: List[Tuple[str, str]] = []
     visited: set = {p["url"] for p in probes}
-    # 选一个 "有 HTML 但无 PDF" 的探针作起跳点 (probes[0] 或最有 issuer 相关的)
-    nav_start = None
-    for p in probes:
-        if p.get("html_ok") and not p.get("pdf_urls"):
-            nav_start = p
+
+    # 起跳点顺序: 先试"抓到 HTML 但页内无 PDF"的候选页; 都有 PDF 却没一份判成本
+    # 基金月报时 (Yarra /performance 整页是兄弟基金月报) 也要跳, 取首个抓到 HTML
+    # 的; 最后回发行商主页重试 1 次。
+    nav_starts: List[str] = [
+        p["url"] for p in probes if p.get("html_ok") and not p.get("pdf_urls")
+    ] or [p["url"] for p in probes if p.get("html_ok")][:1]
+    if domain:
+        _home = domain if domain.startswith("http") else f"https://{domain}"
+        if _home not in visited:
+            nav_starts.append(_home)
+
+    for start_url in nav_starts:
+        if len(visited) >= MAX_TOTAL_FETCHES:
             break
-    if nav_start and len(visited) < MAX_TOTAL_FETCHES:
-        # 步 6.5.a: 重抓全量 HTML (probes 只留了 2000 字符 snippet, 不够挑链)
-        full_html = _fetch(nav_start["url"], timeout=FETCH_TIMEOUT)
-        if full_html:
-            next_url, next_html, next_pdfs = navigate_one_hop(
-                nav_start["url"], full_html, fund_name, domain, visited, client,
-            )
-            if next_pdfs:
-                next_pdfs = _rank_pdfs_by_name_match(next_pdfs, fund_name)
-                first_pdf = next_pdfs[0]
-                # slug 完全无关 -> 跳过打样, 节省一次 Gemini
-                if _pdf_slug_match_count(first_pdf, fund_name) > 0:
-                    ok, _ex = confirm_pdf_is_monthly_report(first_pdf, fund_name, client=client)
-                    if ok:
-                        nav_hops.append((nav_start["url"], next_url or ""))
-                        return ArchivePointer(
-                            archive_url=next_url,
-                            pagination_param=None,
-                            no_archive=False,
-                            latest_pdf_url=first_pdf,
-                            issuer_domain_confirmed=domain,
-                            evidence=f"导航命中: {nav_start['url']} -> {next_url} ({len(next_pdfs)} 份 PDF)",
-                            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
-                                {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
-                            ]},
-                            search_sources=real_sources, search_queries=[],
-                            # Spec G 10.3 补漏 (Task 4 审查发现): 这里原本回传
-                            # next_pdfs 全量 -- navigate_one_hop 抓的是整页 PDF,
-                            # 同样没做基金名过滤, 走同一条不判基金名的
-                            # probe_l1_official 消费路径, 与步 5/步 6 是同一类漏洞。
-                            discovered_pdfs=_best_match_pdfs(next_pdfs, fund_name),
-                        )
-            nav_hops.append((nav_start["url"], next_url or "(no_pick)"))
+        visited.add(start_url)
+        # probes 只留了 2000 字符 snippet, 不够挑链, 重抓全量 HTML
+        start_html = _fetch(start_url, timeout=FETCH_TIMEOUT)
+        if not start_html:
+            continue
+        next_url, _next_html, next_pdfs = navigate_one_hop(
+            start_url, start_html, fund_name, domain, visited, client,
+        )
+        nav_hops.append((start_url, next_url or "(no_pick)"))
+        if not next_pdfs:
+            continue
+        try:
+            pairs, rejected, dropped = disc_mod.classify_pdf_links(
+                next_pdfs, fund_name, client=client)
+        except disc_mod.ClassifyError:
+            continue
+        if not pairs:
+            continue
+        return ArchivePointer(
+            archive_url=next_url,
+            pagination_param=None,
+            no_archive=len(pairs) < 2,
+            latest_pdf_url=pairs[-1][1],
+            issuer_domain_confirmed=domain,
+            evidence=(f"导航命中: {start_url} -> {next_url}, 页内 "
+                      f"{len(next_pdfs)} 份 PDF, 判定 {len(pairs)} 份为本基金月报 "
+                      f"({pairs[0][0]}~{pairs[-1][0]})"),
+            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
+                 "rejected": rejected[:20], "dropped": dropped,
+                 "probes": [
+                     {"url": q["url"], "pdf_count": len(q["pdf_urls"]),
+                      "monthly_count": q.get("monthly_count"),
+                      "error": q.get("error")}
+                     for q in probes
+                 ]},
+            search_sources=real_sources, search_queries=[],
+            discovered_pdfs=list(next_pdfs),
+            discovered_links=pairs,
+        )
 
-        # 步 6.5.b: 首跳失败 -> 回主页 (issuer_domain 根) 重试 1 次
-        if domain and len(visited) < MAX_TOTAL_FETCHES:
-            home_url = domain if domain.startswith("http") else f"https://{domain}"
-            if home_url not in visited:
-                visited.add(home_url)
-                home_html = _fetch(home_url, timeout=FETCH_TIMEOUT)
-                if home_html:
-                    next_url2, _, next_pdfs2 = navigate_one_hop(
-                        home_url, home_html, fund_name, domain, visited, client,
-                    )
-                    if next_pdfs2:
-                        next_pdfs2 = _rank_pdfs_by_name_match(next_pdfs2, fund_name)
-                        first_pdf2 = next_pdfs2[0]
-                        if _pdf_slug_match_count(first_pdf2, fund_name) > 0:
-                            ok2, _ex2 = confirm_pdf_is_monthly_report(
-                                first_pdf2, fund_name, client=client,
-                            )
-                            if ok2:
-                                nav_hops.append((home_url, next_url2 or ""))
-                                return ArchivePointer(
-                                    archive_url=next_url2,
-                                    pagination_param=None,
-                                    no_archive=False,
-                                    latest_pdf_url=first_pdf2,
-                                    issuer_domain_confirmed=domain,
-                                    evidence=f"主页重试导航命中: {home_url} -> {next_url2} ({len(next_pdfs2)} 份 PDF)",
-                                    raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
-                                        {"url": p["url"], "pdf_count": len(p["pdf_urls"])} for p in probes
-                                    ]},
-                                    search_sources=real_sources, search_queries=[],
-                                    # Spec G 10.3 补漏 (Task 4 审查发现): 同上,
-                                    # 主页重试导航命中的 next_pdfs2 也需按基金名
-                                    # 匹配度筛, 不能原样透传整页给 discovered_pdfs。
-                                    discovered_pdfs=_best_match_pdfs(next_pdfs2, fund_name),
-                                )
-                    nav_hops.append((home_url, next_url2 or "(no_pick)"))
-
-    # ---- 步 7: 全没通过打样 -> 返 no_archive 让上游走 L2/L3 ----
+    # ---- 步 7: 全无命中 -> 返 no_archive 让上游走 L2/L3 ----
     return ArchivePointer(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,

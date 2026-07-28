@@ -3,7 +3,8 @@
 三层 fallback (集合差驱动, 概念抄 skills/lib/strategies.py):
 
   L1 官网归档页    discover2.find_archive_v2 按 engine (tavily/grok) 分派定位归档页,
-                    未定位到时降级 find_archive_via_search (纯 Tavily), 再 fetch, 再 Gemini 解析
+                    未定位到时降级 find_archive_via_search (纯 Tavily), 再 fetch,
+                    再 classify_pdf_links 判页内 PDF 链接清单
   L2 Wayback CDX  http://web.archive.org/cdx/search/cdx  (纯 requests, 20 行)
   L3 fundmonitors Full Fund Profile AJAX  (纯 requests, 40 行)
 
@@ -50,9 +51,12 @@ class ArchivePointer:
     raw: Dict[str, Any] = field(default_factory=dict)
     search_sources: List[str] = field(default_factory=list)  # 搜索引擎 (Tavily/Grok) 返回的真实 URL
     search_queries: List[str] = field(default_factory=list)
-    # v2 (discover2.find_archive_v2) 抓页时已直接看见的所有 PDF URL. v1 不填。
-    # run_discovery 若发现此字段非空, 优先用它反解 ym, 跳过再让 Gemini 解析归档页。
+    # v2 (discover2.find_archive_v2) 抓页时看见的所有 PDF URL (未筛). v1 不填。
     discovered_pdfs: List[str] = field(default_factory=list)
+    # v2 已用 classify_pdf_links 判定好的 [(ym, url)]. 非空时 probe_l1_official
+    # 直接采用, 不再重判一次 -- 定位归档页与列出月报本是同一次判断的两个用途,
+    # 重复调用只是白烧一次 API。
+    discovered_links: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -420,19 +424,7 @@ def find_archive_via_search(
     )
 
 
-_YM_RE = re.compile(r"^\d{4}-\d{2}$")
 _HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
-
-# 噪声过滤: 归档页里除月报外还常挂 PDS/TMD/FSG/研究报告等静态 PDF, 靠日期匹配后仍
-# 会混入 (如 "TMD-...-11-October-2023.pdf" 匹到 2023-10)。这些不是月度业绩报告,
-# 摄取阶段跑 extract 必然 not_found 或 measure 错。用文件名黑名单字面预筛。
-_NON_MONTHLY_HINTS = re.compile(
-    r"(pds|tmd|target[-_]market|fsg|financial[-_]services|whistle|"
-    r"research|lonsec|morningstar|zenith|genium|platform|"
-    r"fact[-_]sheet|application|additional[-_]information|"
-    r"policy|guide|dictionary|handbook)",
-    re.I,
-)
 
 
 def _extract_href_whitelist(html: str, base_url: str) -> set:
@@ -448,32 +440,144 @@ def _extract_href_whitelist(html: str, base_url: str) -> set:
     return out
 
 
-def _extract_pdf_links_by_regex(html: str, base_url: str) -> List[Tuple[str, str]]:
-    """代码正则直抠归档页 `<a href>` 里的 PDF 链接 -> (ym, url), 无长度截断.
+def extract_all_pdf_links(html: str, base_url: str) -> List[str]:
+    """归档页 HTML -> 页内**全部** PDF 直链绝对 URL (去重保序), 不做任何筛选.
 
-    parse_archive_page 原来无条件把 html 截到 80KB 才让 LLM 解析 -- 归档页头部
-    (导航/脚本/样式) 一旦超过这个长度 (Stake 归档页实测 149KB, 全部 34 个 PDF 链接
-    落在 8.3~14 万字节区间), LLM 一个链接都看不到, 返回 0 links。且固定截断长度
-    基金历史越长越注定失效 (10年~120份月报, 20年~240份, 提大截断上限只是治标)。
-    正则扫全文 (无长度上限, 开销可忽略), 命中直接用, parse_archive_page 只在正则
-    一无所获时才退回 LLM (兜底 JS 渲染后才注入的隐藏链接等场景)。
+    扫全文, 无长度截断 -- parse_archive_page 原先把 html 截到 80KB 才交给 LLM,
+    归档页头部 (导航/脚本/样式) 一旦超过这个长度 (Stake 归档页实测 149KB, 全部
+    34 个 PDF 链接落在 8.3~14 万字节区间) LLM 一个链接都看不到, 返回 0 links;
+    且固定截断长度对长历史基金注定失效 (10 年约 120 份月报, 20 年约 240 份)。
+
+    "哪些是本基金的月报" 的判断**不在这里** -- 见 classify_pdf_links。本函数
+    只负责如实列出页面上真实存在的链接, 是反捏造链条的第一环 (下游只能从这份
+    清单里按编号挑, 无法凭空产出 URL)。
     """
-    pairs: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    out: List[str] = []
     for href in _HREF_RE.findall(html):
         full = urljoin(base_url, href)
         if not full.lower().split("?", 1)[0].endswith(".pdf"):
             continue
-        fname = full.rsplit("/", 1)[-1]
-        if _NON_MONTHLY_HINTS.search(fname):
+        if full in seen:
             continue
-        # 只信文件名反解 ym, 不 fallback 到整段 URL -- 托管路径常带上传日期/年份目录
-        # (如 "/wp-content/uploads/2024/02/xxx.pdf" 是 2024-02 上传, 不是月报期数),
-        # 对全 URL 兜底会把无关域名的静态文件误判成月报 (实测: Stake 页混入
-        # finclear.com.au 的条款 PDF, 因路径含 "/2024/02/" 被误判为 2024-02)。
-        ym = _parse_ym_from_text(fname)
-        if ym and _valid_ym(ym):
-            pairs.append((ym, full))
-    return _dedup_links(pairs)
+        seen.add(full)
+        out.append(full)
+    return out
+
+
+class ClassifyError(RuntimeError):
+    """classify_pdf_links 整批判定失败 (模型不可达/回文不可解析).
+
+    刻意抛出而非静默跳过: 静默跳一批 = 该批覆盖的月份全部消失, 且会被上游当作
+    "页面上压根没有这些月" 记进 confirmed_gaps (exhausted_levels=no_link_found),
+    即把"我们没问成"谎报成"发行商没发布"。CLAUDE.md 一.3 对缺口零容忍。
+    """
+
+
+# 单次送模型的链接条数上限。240 份月报 (20 年) 一次全塞进去, 输出侧 240 条
+# {"i":N,"ym":"YYYY-MM"} 会撞 max_tokens 被截断 -- 截断即静默丢月份, 正是要
+# 消灭的失效模式。分批把每次输出压在几百 token 内。
+SELECT_BATCH = 60
+_SELECT_MAX_TOKENS = 4096
+_SELECT_ATTEMPTS = 2
+
+
+def classify_pdf_links(
+    urls: List[str],
+    fund_name: str,
+    *,
+    client: Optional[Client] = None,
+) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]], int]:
+    """PDF 链接清单 -> [(ym, url)] 月报清单. 判定交给 LLM, 映射与校验交给代码.
+
+    取代原先散在 7 处的"手写文件名规则"(黑名单 + fund_name token 打分 +
+    _parse_ym_from_text 反解)。那套规则两个方向都错, 且每处各写一份:
+      - 放过: "current-product-disclosure-statement-gryphon.pdf" (黑名单只有
+        缩写 "pds", 没有拼开的 "product disclosure statement")
+      - 拦住: "Monthly-Fact-Sheet-June-2026.pdf" (黑名单有 "fact_sheet", 但对
+        把月报就叫 fact sheet 的发行商, 这是静默丢掉全部真月报)
+      - 误收: "Yarra-Australian-Equities-Fund-30-June-2024.pdf" 反解出 2024-06
+        且不在黑名单, 会被当成本基金 2024-06 月报入库 (实为兄弟基金)
+    文件名本身信息是够的 -- 不可靠的是用固定规则去匹配它。
+
+    反捏造 (与 parse_archive_page 白名单同源, 更严): 模型只被允许回**编号**,
+    禁止输出 URL; 代码按编号从入参 urls 取回真实链接。模型给的编号越界或 ym
+    不合法一律丢弃并计入 dropped。ym 只是初判, 真正的月份闸在
+    extract.extract_from_pdf (读 PDF 正文核对 expected_ym)。
+
+    返回 (pairs, rejected, dropped):
+      pairs    -- _dedup_links 后的 [(ym, url)]
+      rejected -- [{"url": ..., "why": ...}] 模型判定"不是本基金月报"的条目, 供
+                  日志/evidence 展示 (不是错误, 是正常筛除)
+      dropped  -- 模型回答里代码拒绝采信的条数 (编号越界 / ym 非法)
+    整批不可判 (模型不可达或回文非 JSON) -> 抛 ClassifyError, 不静默返回空。
+    """
+    if not urls:
+        return ([], [], 0)
+    if not fund_name:
+        raise ValueError("classify_pdf_links 需要 fund_name 才能判断归属")
+    if client is None:
+        client = Client()
+
+    template = _load_prompt("select_monthly_reports.md")
+    pairs: List[Tuple[str, str]] = []
+    rejected: List[Dict[str, str]] = []
+    dropped = 0
+
+    for start in range(0, len(urls), SELECT_BATCH):
+        chunk = urls[start:start + SELECT_BATCH]
+        listing = "\n".join(f"{i}. {u}" for i, u in enumerate(chunk, 1))
+        prompt = (template
+                  .replace("{fund_name}", fund_name)
+                  .replace("{listing}", listing))
+        obj: Optional[Dict[str, Any]] = None
+        last_err = ""
+        for _attempt in range(_SELECT_ATTEMPTS):
+            try:
+                resp = client.messages(prompt, max_tokens=_SELECT_MAX_TOKENS)
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{type(e).__name__}: {e}"
+                continue
+            obj = _parse_json_response(resp.text)
+            if obj is not None:
+                break
+            last_err = "回文不含可解析 JSON"
+        if obj is None:
+            raise ClassifyError(
+                f"链接 {start + 1}~{start + len(chunk)} 判定失败 ({last_err}); "
+                f"不静默跳过, 否则这些月份会被谎报为发行商未发布"
+            )
+
+        for item in obj.get("reports") or []:
+            if not isinstance(item, dict):
+                dropped += 1
+                continue
+            try:
+                i = int(item.get("i"))
+            except (TypeError, ValueError):
+                dropped += 1
+                continue
+            if not 1 <= i <= len(chunk):
+                dropped += 1
+                continue
+            ym = str(item.get("ym") or "").strip()
+            if not _valid_ym(ym):
+                dropped += 1
+                continue
+            pairs.append((ym, chunk[i - 1]))
+
+        for item in obj.get("rejected") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                i = int(item.get("i"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= i <= len(chunk):
+                rejected.append({"url": chunk[i - 1],
+                                 "why": str(item.get("why") or "")})
+
+    return (_dedup_links(pairs), rejected, dropped)
 
 
 _PAGINATION_HINT_RE = re.compile(r"(load\s*more|next\s*page|archiveyear|[?&]page=)", re.I)
@@ -482,62 +586,30 @@ _PAGINATION_HINT_RE = re.compile(r"(load\s*more|next\s*page|archiveyear|[?&]page
 def parse_archive_page(
     html: str,
     *,
+    fund_name: str,
     client: Optional[Client] = None,
     base_url: str = "",
 ) -> Tuple[List[Tuple[str, str]], bool, str, int]:
-    """L1 第二步: 把已抓好的归档页解析出 PDF 链接.
+    """L1 第二步: 把已抓好的归档页解析出本基金的月报 PDF 链接.
 
-    优先代码正则直抠全文 (`_extract_pdf_links_by_regex`, 无长度截断限制) -- 命中
-    则直接返回, 跳过 LLM (省 token, 且不受下面 80KB 截断影响, 对长历史基金友好)。
-    正则一无所获才退回 LLM (兜底 JS 渲染后才注入链接 / 无 <a href> 结构等场景)。
+    两步都不猜: 代码列出页内全部 PDF 直链 (extract_all_pdf_links, 扫全文无截断),
+    LLM 只按编号判"哪几条是本基金月报、各是哪个月"(classify_pdf_links)。
 
-    白名单校 (Spec E.2.C, 仅 LLM 路径需要):
-      - ym 格式 YYYY-MM 强校
-      - url 必须在 html 的 <a href="..."> 白名单里 (代码校, LLM 造 URL 被丢)
+    原来这里有两条并行通路 (正则黑名单快路 + 失败退回 LLM 读 80KB HTML), 现在
+    合成一条: LLM 路只能返回 <a href> 白名单里的 URL, 而白名单恰好就是
+    extract_all_pdf_links 的产物, 所以那条通路能给出的东西是新通路的子集, 留着
+    只是多一份要各自维护的判断逻辑 (打地鼠的根源)。
 
     返回 (links, has_more_pages, next_page_hint, unparseable_count)。
-    代码正则路径的 has_more_pages 是启发式猜测 (页内是否有分页/load-more 字样),
-    不像 LLM 路径那样能读懂具体怎么翻页, next_page_hint 恒为空串。
+    has_more_pages 是启发式猜测 (页内是否有分页/load-more 字样), next_page_hint
+    恒为空串 -- 分页遍历本身当前是死代码, 另案处理。
+    unparseable_count 只计"模型回答里代码拒绝采信的条数", 不含被正常筛除的
+    PDS/TMD 等非月报文件。
     """
-    if base_url:
-        code_pairs = _extract_pdf_links_by_regex(html, base_url)
-        if code_pairs:
-            has_more = bool(_PAGINATION_HINT_RE.search(html))
-            return (code_pairs, has_more, "", 0)
-
-    if client is None:
-        client = Client()
-    prompt = _load_prompt("parse_archive.md") + "\n\n---PAGE---\n" + html[:80_000]
-    resp = client.messages(prompt, max_tokens=4096)
-    obj = _parse_json_response(resp.text) or {}
-    raw_links = obj.get("links") or []
-    whitelist = _extract_href_whitelist(html, base_url) if base_url else None
-    pairs: List[Tuple[str, str]] = []
-    dropped = 0
-    for item in raw_links:
-        if not isinstance(item, dict):
-            continue
-        ym = item.get("ym")
-        url = item.get("url")
-        if not ym or not url:
-            continue
-        ym_s = str(ym).strip()
-        url_s = str(url).strip()
-        if not _YM_RE.match(ym_s):
-            dropped += 1
-            continue
-        if whitelist is not None:
-            if url_s not in whitelist and url_s.lower() not in whitelist:
-                dropped += 1
-                continue
-        pairs.append((ym_s, url_s))
-    unparseable = int(obj.get("unparseable_count") or 0) + dropped
-    return (
-        _dedup_links(pairs),
-        bool(obj.get("has_more_pages")),
-        str(obj.get("next_page_hint") or ""),
-        unparseable,
-    )
+    urls = extract_all_pdf_links(html, base_url) if base_url else []
+    pairs, _rejected, dropped = classify_pdf_links(urls, fund_name, client=client)
+    has_more = bool(_PAGINATION_HINT_RE.search(html))
+    return (pairs, has_more, "", dropped)
 
 
 def probe_l1_official(
@@ -550,9 +622,9 @@ def probe_l1_official(
     max_pagination: int = 8,
     engine: str = "tavily",
 ) -> Tuple[List[Tuple[str, str]], ArchivePointer, int]:
-    """L1 完整流程: 找归档页 -> fetch -> Gemini 解析 -> 若分页则遍历.
+    """L1 完整流程: 找归档页 -> 列出页内 PDF 链接 -> classify_pdf_links 判月报.
 
-    优先走 v2 (discover2.find_archive_v2): Tavily 排序 + Scrapling 抓 + PDF 打样验证。
+    优先走 v2 (discover2.find_archive_v2): 搜索 + 排序 + 抓页 + 判链接清单。
     v2 未定位到归档且未定位到最新单份时, 回退 v1 (find_archive_via_search) 兜底。
 
     返回 (links, pointer, unparseable_total).
@@ -568,37 +640,19 @@ def probe_l1_official(
     if not pointer.archive_url and not pointer.latest_pdf_url:
         pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
 
-    # v2 快路: pointer.discovered_pdfs 非空说明抓页时已看见全部 PDF URL, 直接用文件名
-    # 反解 ym (URL slug 里带 "-May-2026" / "202603" 等), 免再让 Gemini 解析一遍归档页
-    # (Yarra 教训: 归档页 HTML 前 80k 字符 Gemini 判月份返 0 links)。反解失败的丢, 但保留
-    # 至少 latest_pdf_url 作为兜底 -- 只要有 1 份能反解出 ym 都强于让 Gemini 二解。
-    if pointer.discovered_pdfs:
-        # 噪声过滤 (模块级 _NON_MONTHLY_HINTS): 归档页里除月报外还常挂 PDS/TMD/FSG/
-        # 研究报告等静态 PDF, 靠日期匹配后仍会混入 (如 "TMD-...-11-October-2023.pdf"
-        # 匹到 2023-10)。这些不是月度业绩报告, 摄取阶段跑 extract 必然 not_found 或
-        # measure 错。用文件名黑名单字面预筛。
-        pairs: List[Tuple[str, str]] = []
-        for u in pointer.discovered_pdfs:
-            fname = u.rsplit("/", 1)[-1]
-            if _NON_MONTHLY_HINTS.search(fname):
-                continue
-            ym = _parse_ym_from_text(fname) or _parse_ym_from_text(u)
-            if ym and _valid_ym(ym):
-                pairs.append((ym, u))
-        if pairs:
-            return (_dedup_links(pairs), pointer, 0)
-        # 全反解失败 -> 单份兜底 (latest_pdf_url 已过 v2 PDF 打样, ym 由 extract 阶段的 PDF 文本决定)
-        if pointer.latest_pdf_url:
-            ym = _parse_ym_from_text(pointer.latest_pdf_url.rsplit("/", 1)[-1]) or ""
-            if ym and _valid_ym(ym):
-                return ([(ym, pointer.latest_pdf_url)], pointer, 0)
+    # v2 快路: find_archive_v2 定位归档页时已经对该页全部 PDF 链接跑过
+    # classify_pdf_links, 结果就在 discovered_links 里, 直接采用。
+    if pointer.discovered_links:
+        return (_dedup_links(list(pointer.discovered_links)), pointer, 0)
 
-    # 无 archive_url: 单份场景, 只有 latest_pdf_url 时直接返
+    # 无 archive_url: 单份场景 (v1 兜底只给出 latest_pdf_url)。同样交
+    # classify_pdf_links 判, 不再手写文件名反解 -- 一条链接一次调用, 代价可忽略,
+    # 换掉一处独立的判断逻辑。
     if not pointer.archive_url:
         if pointer.latest_pdf_url:
-            ym = _parse_ym_from_text(pointer.latest_pdf_url.rsplit("/", 1)[-1]) or ""
-            if ym and _valid_ym(ym):
-                return ([(ym, pointer.latest_pdf_url)], pointer, 0)
+            pairs, _rej, _dr = classify_pdf_links(
+                [pointer.latest_pdf_url], fund_name, client=client)
+            return (pairs, pointer, 0)
         return ([], pointer, 0)
 
     aggregate: List[Tuple[str, str]] = []
@@ -608,7 +662,8 @@ def probe_l1_official(
         html = _fetch(url) or _curl(url) or ""
         if not html:
             return ([], False, "", 0)
-        return parse_archive_page(html, client=client, base_url=url)
+        return parse_archive_page(html, fund_name=fund_name, client=client,
+                                  base_url=url)
 
     links, has_more, _hint, uc = _one_page(pointer.archive_url)
     aggregate.extend(links)
@@ -639,6 +694,8 @@ def probe_l2_wayback(
     issuer_domain: str,
     gap_set: Set[str],
     fund_name: str,
+    *,
+    client: Optional[Client] = None,
 ) -> List[Tuple[str, str]]:
     """L2: 用 CDX API 查 issuer_domain 快照, 从 original URL 提月份补 gap_set 中的洞.
 
@@ -647,22 +704,17 @@ def probe_l2_wayback(
     Spec G 10.2: CDX 查的是整个发行商域名下的全部 PDF。一家发行商旗下多支基金
     的文件同处一域, 若只按"文件名月份落在缺口内"筛选, 兄弟基金的月报会被当作
     本基金数据填进缺口。而本步专用于补缺口 -- CLAUDE.md 一.3 对缺口是零容忍、
-    禁填补的, 这里必须是全系统最严的地方, 不是最宽的。故加两道过滤:
-      (a) _NON_MONTHLY_HINTS: 排除 PDS/TMD/FSG/研究报告等非月度业绩文档
-      (b) _best_match_pdfs: 只留与 fund_name 匹配分并列最高的
-          -- 必须用**相对**判据。绝对判据 (_pdf_slug_match_count > 0) 与
-          Spec G 10.1 的根因同病, 挡不住兄弟基金:
-            目标 "Yarra Enhanced Income Fund" -> {yarra, enhanced, income}
-            yarra-enhanced-income-jun-2026.pdf   交集 3
-            yarra-australian-income-jun-2026.pdf 交集 2, 同样 > 0
-          故改为两趟: 先收集候选, 再按最高分筛, 最后套快照数上限。
+    禁填补的, 这里必须是全系统最严的地方, 不是最宽的。归属与月份判定统一走
+    classify_pdf_links (与 L1 同一处逻辑), 本函数只负责:
+      (a) 先用 _parse_ym_from_text 粗筛掉月份明显不在缺口内的快照, 把送模型的
+          清单从 CDX 的上千条压到几十条 (纯为省调用, 不作最终判据)
+      (b) 判定通过后按 ym 套 CDX_SNAPSHOTS_PER_MONTH 快照数上限
     """
     if not gap_set or not issuer_domain:
         return []
-    from .discover2 import _best_match_pdfs
     patterns = [f"{issuer_domain}/*", f"{issuer_domain}/wp-content/uploads/*"]
 
-    # ---- 第一趟: 收集通过文档类型与月份筛选的候选 ----
+    # ---- 第一趟: 粗筛月份落在缺口内的快照 ----
     cands: List[Tuple[str, str, str]] = []  # (ym, ts, original)
     for pat in patterns:
         # https 端更稳; http 通常也可, 但本机可能被拦
@@ -683,10 +735,6 @@ def probe_l2_wayback(
             if len(row) < 2:
                 continue
             ts, original = row[0], row[1]
-            fname = original.rsplit("/", 1)[-1]
-            # (a) 文档类型: PDS/TMD/FSG/研究报告等不是月度业绩报告
-            if _NON_MONTHLY_HINTS.search(fname):
-                continue
             ym = _parse_ym_from_text(original)
             if not ym or ym not in gap_set:
                 continue
@@ -695,12 +743,27 @@ def probe_l2_wayback(
     if not cands:
         return []
 
-    # ---- 第二趟: (b) 只留与 fund_name 匹配分并列最高的 ----
-    keep = set(_best_match_pdfs([o for _ym, _ts, o in cands], fund_name))
+    # ---- 第二趟: 归属+月份交 classify_pdf_links 判 (同一处逻辑, 无第二套规则) ----
+    # 同一份文件可能有多个快照 (ts 不同, original 相同), 按 original 去重后再问,
+    # 免同一条链接反复送模型。
+    uniq_urls: List[str] = []
+    _seen_u: Set[str] = set()
+    for _ym, _ts, original in cands:
+        if original not in _seen_u:
+            _seen_u.add(original)
+            uniq_urls.append(original)
+    try:
+        pairs, _rej, _dr = classify_pdf_links(uniq_urls, fund_name, client=client)
+    except ClassifyError:
+        # 补缺口是可选增益, 判不了就不补 (缺口继续如实留着), 不因此中断整轮
+        return []
+    keep = {url: ym for ym, url in pairs}
+
     snap_count: Dict[str, int] = {}
     hits: List[Tuple[str, str]] = []
-    for ym, ts, original in cands:
-        if original not in keep:
+    for _ym_guess, ts, original in cands:
+        ym = keep.get(original)
+        if not ym or ym not in gap_set:
             continue
         if snap_count.get(ym, 0) >= CDX_SNAPSHOTS_PER_MONTH:
             continue
@@ -814,10 +877,6 @@ def run_discovery(
     if not l1_links and _l15_seed:
         try:
             from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
-            from .discover2 import (
-                _rank_pdfs_by_name_match, _pdf_slug_match_count,
-                confirm_pdf_is_monthly_report,
-            )
             visited: Set[str] = {_l15_seed}
             nav_hops: List[Tuple[str, str]] = []
             # 抓归档页全 HTML (parse_archive_page 那步用过, 但没保存下来)
@@ -830,17 +889,12 @@ def run_discovery(
                 )
                 nav_hops.append((_l15_seed, next_url or "(no_pick)"))
                 if next_pdfs:
-                    next_pdfs = _rank_pdfs_by_name_match(next_pdfs, fund_name)
-                    # 尝试直接从文件名反解 ym (跳过 Gemini PDF 打样, 大批量场景省 tokens)
-                    # 噪声过滤复用模块级 _NON_MONTHLY_HINTS
-                    nav_pairs: List[Tuple[str, str]] = []
-                    for u in next_pdfs:
-                        fname = u.rsplit("/", 1)[-1]
-                        if _NON_MONTHLY_HINTS.search(fname):
-                            continue
-                        ym = _parse_ym_from_text(fname) or _parse_ym_from_text(u)
-                        if ym and _valid_ym(ym):
-                            nav_pairs.append((ym, u))
+                    # Spec G 10.3 曾在这里漏了基金名过滤 (直接 discovered_pdfs =
+                    # next_pdfs 整页透传, 兄弟基金月报会入库)。现在一律走
+                    # classify_pdf_links, 归属判断与月份判断在同一处, 不再有
+                    # "某条通路忘了过滤" 这种漏洞面。
+                    nav_pairs, _nav_rej, _nav_dr = classify_pdf_links(
+                        next_pdfs, fund_name, client=client)
                     if nav_pairs:
                         obtained.update(ym for ym, _ in nav_pairs)
                         aggregate.extend(nav_pairs)
@@ -849,12 +903,14 @@ def run_discovery(
                         # 更新 pointer 让下游知道真归档在哪
                         pointer.archive_url = next_url
                         pointer.discovered_pdfs = list(next_pdfs)
+                        pointer.discovered_links = list(nav_pairs)
                         pointer.raw["nav_hops"] = nav_hops
                     report.evidence_log.append({
                         "level": "L1_nav", "count": len(nav_pairs),
                         "from_url": pointer.archive_url if not nav_pairs else "(navigated)",
                         "to_url": next_url,
-                        "evidence": f"导航 1 跳, {len(next_pdfs)} 份 PDF, {len(nav_pairs)} 份反解 ym",
+                        "evidence": f"导航 1 跳, 页内 {len(next_pdfs)} 份 PDF, "
+                                    f"{len(nav_pairs)} 份判定为本基金月报",
                     })
                 else:
                     report.evidence_log.append({
@@ -879,7 +935,7 @@ def run_discovery(
         if gap_set and domain:
             # 去 scheme
             dom_clean = re.sub(r"^https?://", "", domain).rstrip("/")
-            l2_links = probe_l2_wayback(dom_clean, gap_set, fund_name)
+            l2_links = probe_l2_wayback(dom_clean, gap_set, fund_name, client=client)
             l2_new = [(ym, url) for ym, url in l2_links if ym not in obtained]
             if l2_new:
                 obtained.update(ym for ym, _ in l2_new)

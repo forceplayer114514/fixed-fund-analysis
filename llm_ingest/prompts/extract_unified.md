@@ -10,9 +10,9 @@
 4. **cum_ex_dist** — CSV 类, `date, unit_price_cum, unit_price_ex, distribution` 结构. 抄前月 cum → prev_text, 当月 ex → curr_text, 当月 distribution → dist_text (缺失填 null)。
 5. **not_found** — 上述都不满足, 或前月 NAV 缺失, 或只找到 gross/annualized/YTD. 严禁推算/backfill。
 
-# 月份闸 (硬约束)
+# 日期字段
 
-`ym` 必须等于目标月 YYYY-MM。`curr_date` 若给出, 前 7 字符必须等于 `ym` (即 `curr_date[:7] == ym`)。**抓错月份等于抓错数, 代码会以 ym/curr_date 校 expected_ym, 不匹配一律判废。**
+`ym` 填文档里这份数值实际对应的月份 (YYYY-MM), 如实抄, 不要因为担心跟目标月份对不上就自行判 not_found —— 月份是否匹配由代码校验, 不需要你判断。
 
 若原文无明确日期 (如表格只写 "May 2026"), `curr_date` 填 `YYYY-MM-01` 占位, `ym` 仍必填。
 

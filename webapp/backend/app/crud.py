@@ -1,11 +1,20 @@
 """数据库 CRUD 操作与 NAV 重计算。"""
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from app.models import Fund, MonthlyReturn, RbaCashRate, Anomaly, FundMetric
+
+# 须与 llm_ingest/cli.py::PDF_ROOT 保持一致 (同一份 PDF 缓存目录)。
+# DB 层 cascade (ORM relationship + confirmed_gaps/pending_review 的 FK
+# pragma, 见 database.py) 覆盖不到文件系统 -- 删 fund 不清这个目录的话,
+# 同 fund_id 重新添加时摄取流程会把残留旧 PDF 当缓存复用 (跳过重新下载),
+# 相当于新基金喂进了旧数据 (2026-07 发现)。
+PDF_ROOT = Path(__file__).resolve().parents[3] / "data" / "pdf_cache"
 
 
 def create_fund(session: Session, **kwargs) -> Fund:
@@ -28,8 +37,11 @@ def delete_fund(session: Session, fund_id: str) -> bool:
     fund = session.get(Fund, fund_id)
     if fund is None:
         return False
-    session.delete(fund)  # 级联删除子表
+    session.delete(fund)  # 级联删除子表 (DB 层, 见 PDF_ROOT 注释)
     session.commit()
+    pdf_dir = PDF_ROOT / fund_id
+    if pdf_dir.exists():
+        shutil.rmtree(pdf_dir, ignore_errors=True)
     return True
 
 

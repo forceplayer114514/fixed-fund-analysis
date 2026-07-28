@@ -21,7 +21,7 @@ from . import issuer_rules
 PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_unified.md"
 
 HTML_MAX_TOKENS = 3000
-HTML_INPUT_CAP = 80_000  # 与 discover.parse_archive_page 同截断
+HTML_INPUT_CAP = 80_000  # 本模块自身的 HTML 输入上限
 
 
 def load_prompt() -> str:
