@@ -465,6 +465,38 @@ def extract_all_pdf_links(html: str, base_url: str) -> List[str]:
     return out
 
 
+def _ym_backed_by_link_text(ym: str, date_text: Any, url: str) -> bool:
+    """核对模型给的月份是不是真从链接里读出来的, 而不是凑出来的.
+
+    2026-07-29 事故: 链接 ".../ambition-report-2025" 只有年份没有月份, 模型仍返回
+    ym=2025-01 -- 年份是真的, 月份 01 是它自己补的默认值。提示词已明令"读不出月份
+    不要猜", 但光靠提示词约束不住, 代码这边必须能验。
+
+    两道都在代码侧, 都不重新发明文件名解析:
+      1. date_text 必须**逐字**出现在链接里 (忽略大小写, 空格/下划线/连字符/加号/
+         %20 视作同一种分隔)。这是本项目已有的反捏造手法 (见 verify.check_quote_tokens
+         对 source_quote 的逐字校验) -- 模型说不出原文出处就不采信。
+      2. 把这段短短的 date_text 单独交 _parse_ym_from_text 解一遍, 必须解出同一个
+         ym。只有年份的 "2025" 解不出月份 (返回 None) -> 弃用; 月份被改写过 (如
+         date_text 写 "Sept_2025" 却报 2025-10) 也对不上 -> 弃用。
+         注意这里喂的是模型摘出来的短片段, 不是整段 URL -- _parse_ym_from_text
+         过去的误判 (托管路径里的上传日期 "/2024/02/") 来自整段 URL 的噪声,
+         短片段上它是可靠的。
+
+    date_text 缺失 -> False (老实说不知道 = 不采信)。
+    """
+    if not isinstance(date_text, str) or not date_text.strip():
+        return False
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[\s_\-+]|%20", "", s.lower())
+
+    dt = date_text.strip()
+    if _norm(dt) not in _norm(url):
+        return False
+    return _parse_ym_from_text(dt) == ym
+
+
 class ClassifyError(RuntimeError):
     """classify_pdf_links 整批判定失败 (模型不可达/回文不可解析).
 
@@ -500,10 +532,17 @@ def classify_pdf_links(
         且不在黑名单, 会被当成本基金 2024-06 月报入库 (实为兄弟基金)
     文件名本身信息是够的 -- 不可靠的是用固定规则去匹配它。
 
-    反捏造 (与 parse_archive_page 白名单同源, 更严): 模型只被允许回**编号**,
-    禁止输出 URL; 代码按编号从入参 urls 取回真实链接。模型给的编号越界或 ym
-    不合法一律丢弃并计入 dropped。ym 只是初判, 真正的月份闸在
-    extract.extract_from_pdf (读 PDF 正文核对 expected_ym)。
+    反捏造 (与 parse_archive_page 白名单同源, 更严), 三道都在代码侧:
+      - 模型只被允许回**编号**, 禁止输出 URL; 代码按编号从入参 urls 取回真实链接
+      - 编号越界 / ym 格式不合法 -> 弃用
+      - 模型还必须交出据以判月份的原文片段 date_text, 由
+        _ym_backed_by_link_text 核对它逐字出现在链接里且真能解出该 ym
+        (防"只有年份就自行补月份 01", 2026-07-29 事故)
+    弃用的都计入 dropped。ym 只是初判, 真正的月份闸在 extract.extract_from_pdf
+    (读 PDF 正文核对 expected_ym)。
+
+    入参 urls 必须是**真 PDF 直链**。混进普通网页链接会让模型把营销页当月报
+    (同一事故), 见 discover2._extract_monthlyish_page_links。
 
     返回 (pairs, rejected, dropped):
       pairs    -- _dedup_links 后的 [(ym, url)]
@@ -562,6 +601,9 @@ def classify_pdf_links(
                 continue
             ym = str(item.get("ym") or "").strip()
             if not _valid_ym(ym):
+                dropped += 1
+                continue
+            if not _ym_backed_by_link_text(ym, item.get("date_text"), chunk[i - 1]):
                 dropped += 1
                 continue
             pairs.append((ym, chunk[i - 1]))

@@ -67,8 +67,12 @@ class TestArchivePageDecidedByLinkListing:
         _stub_locate(monkeypatch, page)
         monkeypatch.setattr(d2, "probe_urls", lambda urls, **k: [{
             "url": page, "html_ok": True, "pdf_urls": [target, sibling],
-            "error": None,
+            "nav_urls": [], "error": None,
         }])
+        # 只判出 1 个月 -> 会继续找更完整的来源, 打桩住别真联网
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: "")
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
 
         ptr = d2.find_archive_v2(
             "Yarra Enhanced Income Fund", "Yarra Capital Management",
@@ -147,10 +151,127 @@ class TestArchivePageDecidedByLinkListing:
             return ([("2026-06", pdf)], [], 0)
 
         monkeypatch.setattr(disc_mod, "classify_pdf_links", _classify)
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: "")
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
 
         ptr = d2.find_archive_v2("F", "I", client=object())
         assert ptr.archive_url == good
         assert ptr.discovered_links == [("2026-06", pdf)]
+
+
+class TestNonPdfPageLinksNeverReachTheClassifier:
+    """2026-07-29 事故的两个根因回归。
+
+    Grok 那轮给的是 Stake 的 Zendesk 支持页。该页 0 条真 .pdf, 但页里有两条
+    "链接文字像月报"的普通网页:
+      https://hellostake.com/legal/monthly-performance-report   (真归档页本身)
+      https://hellostake.com/au/ambition-report-2025            (营销页)
+    旧实现把这两条混进 PDF 清单一起交判定, 于是:
+      (a) 营销页被判成月报 (模型从 "-2025" 看到年份自行补月份 01)
+      (b) "第一个非空即返回" 让这一条误判直接收工 -- 真归档页就在同一批候选里,
+          再也没机会被跳过去
+      (c) 那条网页当 PDF 下载, 必然失败; 还凭假的 2025-01 起点把 16 个月写成缺口
+    """
+
+    SUPPORT_HTML = (
+        '<a href="/legal/monthly-performance-report">Monthly performance report</a>'
+        '<a href="/au/ambition-report-2025">Ambition Report 2025</a>'
+        '<a href="/au/support/contact">Contact us</a>'
+    )
+
+    def test_two_extractors_are_separated(self):
+        base = "https://hellostake.com/au/support/x"
+        assert d2._extract_pdf_links(self.SUPPORT_HTML, base) == []
+        assert d2._extract_monthlyish_page_links(self.SUPPORT_HTML, base) == [
+            "https://hellostake.com/legal/monthly-performance-report",
+            "https://hellostake.com/au/ambition-report-2025",
+        ]
+
+    def test_probe_keeps_pdf_and_nav_candidates_apart(self, monkeypatch):
+        base = "https://hellostake.com/au/support/x"
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: self.SUPPORT_HTML)
+        p = d2._probe_one(base)
+        assert p["pdf_urls"] == [], "非 PDF 网页链接不得进 pdf_urls"
+        assert len(p["nav_urls"]) == 2
+
+    def test_support_page_hops_to_real_archive_instead_of_settling(self, monkeypatch):
+        """整条链路回归: 支持页 0 条 PDF -> 顺着"文字像月报"的中转链接跳过去 ->
+        真归档页的 16 份月报。"""
+        support = "https://hellostake.com/au/support/stake-accumulate/x/46806152848665"
+        archive = "https://hellostake.com/legal/monthly-performance-report"
+        monthlies = {
+            f"https://cdn/AccumulateReport_{m}.pdf": ym
+            for m, ym in (("March2025", "2025-03"), ("April25", "2025-04"),
+                          ("Sept_2025", "2025-09"), ("Jun26", "2026-06"))
+        }
+        archive_html = "".join(f'<a href="{u}">x</a>' for u in monthlies)
+
+        _stub_locate(monkeypatch, support)
+        monkeypatch.setattr(d2, "probe_urls", lambda urls, **k: [{
+            "url": support, "html_ok": True, "pdf_urls": [],
+            "nav_urls": [archive, "https://hellostake.com/au/ambition-report-2025"],
+            "error": None, "html_snippet": "",
+        }])
+        monkeypatch.setattr(d2, "_fetch",
+                            lambda u, **k: archive_html if u == archive else "<html/>")
+
+        ptr = d2.find_archive_v2(
+            "stake accumulate", "stake",
+            client=SelectStubClient(lambda u: monthlies.get(u)))
+
+        assert ptr.archive_url == archive, "该跳到真归档页, 而不是停在支持页"
+        assert ptr.no_archive is False
+        assert len(ptr.discovered_links) == 4
+
+
+class TestPicksSourceWithMostMonths:
+    def test_one_false_positive_does_not_beat_the_real_archive(self, monkeypatch):
+        """排序靠前的页只判出 1 个月时, 不能就此收工 -- 后面那页有 12 个月。"""
+        thin = "https://x.com/marketing"
+        rich = "https://x.com/monthly-reports"
+        thin_pdf = "https://cdn/brochure-Jan2025.pdf"
+        rich_pdfs = {f"https://cdn/report-{m:02d}-2025.pdf": f"2025-{m:02d}"
+                     for m in range(1, 13)}
+
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: [thin, rich])
+        monkeypatch.setattr(d2, "_pick_issuer_domain", lambda *a, **k: None)
+        monkeypatch.setattr(
+            d2, "rank_urls",
+            lambda urls, *a, **k: [{"url": u, "score": 9, "reason": ""} for u in urls])
+        monkeypatch.setattr(d2, "probe_urls", lambda urls, **k: [
+            {"url": thin, "html_ok": True, "pdf_urls": [thin_pdf], "nav_urls": [],
+             "error": None},
+            {"url": rich, "html_ok": True, "pdf_urls": list(rich_pdfs),
+             "nav_urls": [], "error": None},
+        ])
+
+        answers = dict(rich_pdfs)
+        answers[thin_pdf] = "2025-01"
+        ptr = d2.find_archive_v2("F", "I",
+                                 client=SelectStubClient(lambda u: answers.get(u)))
+
+        assert ptr.archive_url == rich
+        assert len(ptr.discovered_links) == 12
+
+    def test_single_month_source_still_used_when_nothing_better(self, monkeypatch):
+        page = "https://gcapinvest.com/our-lit"
+        only = "https://cdn/gci-inv-update-jun-2026.pdf"
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(d2, "probe_urls", lambda urls, **k: [{
+            "url": page, "html_ok": True, "pdf_urls": [only], "nav_urls": [],
+            "error": None,
+        }])
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: "")
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(
+            "Gryphon Capital Income Trust", "Gryphon",
+            client=SelectStubClient(lambda u: "2026-06" if u == only else None))
+
+        assert ptr.discovered_links == [("2026-06", only)]
+        assert ptr.no_archive is True   # 1 个月 -> 单份最新, 上游继续补历史
 
 
 class TestLocateCandidates:

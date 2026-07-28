@@ -316,6 +316,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         # ---- L2: 官网 discovery + 循环 (原 L1 通路降级为 L2) ----
         _job_update(jid, state="discovering_l2_pdf")
         links: List[tuple] = []
+        discovery_rep = None  # run_discovery 的报告, 摄取循环之后才用得上
         # Spec D: 单文件多月 HTML/CSV 场景 (Coolabah Plotly 类)
         # 预抓一次, 缓存到 payload_cache; 每月复用
         payload_cache: Dict[str, str] = {}  # url -> text (CSV)
@@ -434,27 +435,9 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         f"{_loc['engine_used']} ({_loc.get('fallback_reason', '')})",
                     )
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
-
-            # 归档页地址存回, 下次"更新数据"直接抓这一页, 不必再跑搜索引擎
-            _arch = rep.archive_pointer.archive_url if rep.archive_pointer else None
-            if links and _remember_archive_url(conn, req.fund_id, _arch):
-                _job_log(jid, f"归档页地址已记住: {_arch}")
-
-            # rep.gaps 是 discovery 阶段就确定"预期月份里压根没找到任何 PDF 链接"
-            # 的月份 (expected - obtained 集合差) -- 与下面 per-link 循环里的
-            # record_confirmed_gap (下载失败/抓取失败等, 只覆盖已有链接的月份)
-            # 是互斥的两类缺口, 谁都不会覆盖这些月份, 之前从未被记进
-            # confirmed_gaps, 违反 CLAUDE.md 零容忍规则 (2026-07 Stake 2025-09
-            # 缺口静默漏记事故)。若之后 L2 触发自动纠名, rename_fund_id 会把
-            # confirmed_gaps 整表迁到新 fund_id, 这里不用等纠名完成再记。
-            if links:
-                for _gap_ym in rep.gaps:
-                    store_mod.record_confirmed_gap(
-                        conn, fund_id=req.fund_id, missing_month=_gap_ym,
-                        exhausted_levels="no_link_found",
-                    )
-                if rep.gaps:
-                    _job_log(jid, f"discovery gaps 记入 confirmed_gaps: {len(rep.gaps)} 月")
+            # 记住归档页地址 与 记录 discovery 缺口 都挪到摄取循环之后 (见那里),
+            # 因为这两件事都只有在"这一轮真入库了月度数据"之后才站得住脚。
+            discovery_rep = rep
 
         if not links:
             conn.close()
@@ -656,6 +639,39 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             )
             stats[dec.action] = stats.get(dec.action, 0) + 1
             _job_log(jid, f"[{i}/{len(links)}] {ym} [{channel}] {dec.action} {dec.gate_summary}")
+
+        # ---- 摄取循环之后才做的两件事 (2026-07-29 事故) ----
+        # 那次: discovery 只判出 1 条链接 (且是误判的营销页), 却已经
+        #   (a) 把该营销页所在的支持页记成归档页 -> 下次更新直奔坏页, 永久卡住
+        #   (b) 凭这条误判链接的月份当序列起点, 把之后 16 个月写成 no_link_found
+        # 而这一轮实际入库 0 个月 (那条"链接"是网页, 下载必然失败)。
+        # 两件事都需要"这一轮真入库了月度数据"作前提: 没入到任何数据, 说明我们对
+        # 这支基金什么都还没确认, 既不该记住来源, 更不该断言哪些月份不存在
+        # (CLAUDE.md 一.3: 缺口零容忍, 而把"我们没弄成"写成"发行商没发布"是最坏的
+        # 一种缺口污染 -- 它看起来像已核实的结论)。
+        if discovery_rep is not None and stats.get("monthly", 0) > 0:
+            _arch = (discovery_rep.archive_pointer.archive_url
+                     if discovery_rep.archive_pointer else None)
+            if _remember_archive_url(conn, req.fund_id, _arch):
+                _job_log(jid, f"归档页地址已记住: {_arch}")
+
+            # discovery_rep.gaps 是"预期区间里压根没找到任何 PDF 链接"的月份
+            # (expected - obtained 集合差) -- 与循环里的 record_confirmed_gap
+            # (下载失败/提取失败等, 只覆盖有链接的月份) 是互斥的两类缺口, 谁都
+            # 不覆盖这些月份, 之前从未被记进 confirmed_gaps (2026-07 Stake
+            # 2025-09 缺口静默漏记事故)。若本 job 触发过自动纠名, rename_fund_id
+            # 已把 confirmed_gaps 整表迁到新 fund_id, req.fund_id 也已更新。
+            for _gap_ym in discovery_rep.gaps:
+                store_mod.record_confirmed_gap(
+                    conn, fund_id=req.fund_id, missing_month=_gap_ym,
+                    exhausted_levels="no_link_found",
+                )
+            if discovery_rep.gaps:
+                _job_log(jid, f"discovery gaps 记入 confirmed_gaps: "
+                              f"{len(discovery_rep.gaps)} 月")
+        elif discovery_rep is not None and discovery_rep.gaps:
+            _job_log(jid, f"本轮未入库任何月度数据, {len(discovery_rep.gaps)} 个"
+                          f"缺口不记入 confirmed_gaps (未经证实)")
 
         conn.close()
         _job_update(jid, stats=stats)

@@ -39,9 +39,13 @@ class SelectStubClient:
     这样测的是我们自己的映射与校验逻辑, 而不是把它整段 mock 掉。
 
     answer(url) -> "YYYY-MM" 表示"这条是本基金月报"; 返回 None 表示不是。
+    也可返回 ("YYYY-MM", date_text) 显式指定据以判月份的原文片段 —— 真模型必须
+    交出这个片段, 代码会核对它逐字在链接里且真能解出该 ym
+    (discover._ym_backed_by_link_text)。只给 ym 时, 桩用文件名当 date_text
+    (文件名当然逐字在链接里, 真实归档页文件名也确实自带日期)。
     """
 
-    def __init__(self, answer: Callable[[str], Optional[str]],
+    def __init__(self, answer: Callable[[str], Any],
                  *, raise_times: int = 0, raw_text: Optional[str] = None) -> None:
         self._answer = answer
         self._raise_times = raise_times
@@ -57,9 +61,13 @@ class SelectStubClient:
             return _Resp(self._raw_text)
         reports, rejected = [], []
         for num, url in _LISTING_ITEM_RE.findall(prompt):
-            ym = self._answer(url)
-            if ym:
-                reports.append({"i": int(num), "ym": ym})
-            else:
+            ans = self._answer(url)
+            if not ans:
                 rejected.append({"i": int(num), "why": "不是本基金月报"})
+                continue
+            if isinstance(ans, tuple):
+                ym, date_text = ans
+            else:
+                ym, date_text = ans, url.rsplit("/", 1)[-1].split("?", 1)[0]
+            reports.append({"i": int(num), "ym": ym, "date_text": date_text})
         return _Resp(json.dumps({"reports": reports, "rejected": rejected}))

@@ -58,12 +58,9 @@ _MONTHLY_HINTS = re.compile(
 
 
 def _extract_pdf_links(html: str, base_url: str) -> List[str]:
-    """抓页 HTML -> 候选 PDF 绝对 URL 列表 (去重保序).
+    """抓页 HTML -> `<a href="*.pdf">` 绝对 URL 列表 (去重保序).
 
-    双通路:
-      (a) `<a href="*.pdf">` 直接命中 -- 静态归档常用
-      (b) `<a href="/xxx">Monthly Report XYZ</a>` 文本含月报关键词 -- 有站把 PDF
-          藏在中转页 (点进去 302 到真 PDF), 保留候选让上游继续 fetch 判
+    与 discover.extract_all_pdf_links 同义, 保留本名供既有调用方 (navigate) 用。
     """
     seen: set = set()
     out: List[str] = []
@@ -72,14 +69,38 @@ def _extract_pdf_links(html: str, base_url: str) -> List[str]:
         if full not in seen:
             seen.add(full)
             out.append(full)
-    # 再补一轮: 链接文本命中月报关键词, 即使 href 不是 .pdf (有站 PDF 走 302 中转)
+    return out
+
+
+def _extract_monthlyish_page_links(html: str, base_url: str) -> List[str]:
+    """抓页 HTML -> 链接文字含月报关键词但**不是 .pdf** 的网页链接 (去重保序).
+
+    这些是"可能通往月报的中转页", 只能当导航起跳点, 绝不可混进 PDF 清单交
+    classify_pdf_links 判定 (2026-07-29 事故): Stake 那个 Zendesk 支持页抓下来
+    0 条 .pdf, 本函数这一路却给出两条普通网页 --
+      https://hellostake.com/legal/monthly-performance-report   (真归档页本身)
+      https://hellostake.com/au/ambition-report-2025            (营销页)
+    原来两路混在一个列表里返回, 判定函数把第二条当成月报 (模型从 "-2025" 里
+    看到年份, 自行补了月份 01, 尽管提示词明令读不出月份不要猜), 于是:
+      - 页面被判成归档页, 提前返回, 再也走不到导航兜底 -- 而真归档页就在同一
+        个列表里, 本该被跳过去
+      - 那条网页链接当 PDF 下载, 必然失败
+      - 凭这个假的 2025-01 起点把之后 16 个月写成确认缺口
+    分成两个函数, 判定只喂真 .pdf。
+
+    副作用 (如实记): 少数站把 PDF 藏在 302 中转链接后面, 原来靠混进 PDF 清单
+    碰运气命中。现在这类链接只作导航起跳, 由跳过去那页的真 .pdf 接手。真出现
+    "点进去直接 302 到 PDF" 的发行商时, 在这里加一次 HEAD 判 content-type 即可,
+    不要退回混列表的老做法。
+    """
+    seen: set = set()
+    out: List[str] = []
     for href, text in _HTML_LINK_RE.findall(html):
         if not _MONTHLY_HINTS.search(text or ""):
             continue
         full = urljoin(base_url, href)
-        if full.lower().endswith(".pdf") or full in seen:
+        if full.lower().split("?", 1)[0].endswith(".pdf") or full in seen:
             continue
-        # 避免登录/联系页噪声
         low = full.lower()
         if any(k in low for k in ("/login", "/contact", "/subscribe", "mailto:", "tel:")):
             continue
@@ -295,16 +316,24 @@ def locate_candidates(
 # ---- Step 2: 并发抓页 + 抽 PDF 链接 ----
 
 def _probe_one(url: str) -> Dict[str, Any]:
-    """抓一页, 返 {url, html_ok, pdf_urls, error}."""
+    """抓一页, 返 {url, html_ok, pdf_urls, nav_urls, error}.
+
+    pdf_urls 只含真 .pdf 直链 (交 classify_pdf_links 判); nav_urls 是链接文字像
+    月报但不是 PDF 的网页 (只作导航起跳点)。两者必须分开, 理由见
+    _extract_monthlyish_page_links。
+    """
     html = _fetch(url, timeout=FETCH_TIMEOUT)
     if not html:
-        return {"url": url, "html_ok": False, "pdf_urls": [], "error": "fetch_failed"}
+        return {"url": url, "html_ok": False, "pdf_urls": [], "nav_urls": [],
+                "error": "fetch_failed"}
     # URL 本身就是 .pdf: 直接算 PDF 候选
-    if url.lower().endswith(".pdf"):
-        return {"url": url, "html_ok": False, "pdf_urls": [url], "error": None}
-    pdf_urls = _extract_pdf_links(html, url)
-    return {"url": url, "html_ok": True, "pdf_urls": pdf_urls, "error": None,
-            "html_snippet": html[:2000]}
+    if url.lower().split("?", 1)[0].endswith(".pdf"):
+        return {"url": url, "html_ok": False, "pdf_urls": [url], "nav_urls": [],
+                "error": None}
+    return {"url": url, "html_ok": True,
+            "pdf_urls": _extract_pdf_links(html, url),
+            "nav_urls": _extract_monthlyish_page_links(html, url),
+            "error": None, "html_snippet": html[:2000]}
 
 
 def probe_urls(urls: List[str], *, concurrency: int = PROBE_CONCURRENCY) -> List[Dict[str, Any]]:
@@ -368,65 +397,106 @@ def find_archive_v2(
     # ---- 步 3: 并发抓 top-N, 抽 PDF 链接 ----
     probes = probe_urls(top_urls, concurrency=min(PROBE_CONCURRENCY, len(top_urls)))
 
-    # ---- 步 4: 按 ranked 顺序逐页判定, 首个产出本基金月报的页即归档页 ----
-    # 原来分三步: 按"页内 PDF 数量 >= 3"分强/弱候选 -> 按 fund_name token 打分
-    # 挑几份 -> 逐份下载整个 PDF 上传给模型打样"这是不是月报"。数量与打样都是
-    # 间接判据, 且各自带一套文件名规则:
-    #   - 数量: 只挂 1 份月报的页与只挂 1 份 PDS 的页无法区分
-    #   - 打样: 挑哪一份去打样又得靠文件名打分, 挑错整页误杀 (2026-07 Stake 事故
-    #     根因: PDS 文件名把基金全称拼全, 打分反而高于真月报, 排第一被打样判否)
-    # 现在一次问清: 这页全部 PDF 链接里哪几条是本基金月报、各是哪个月。答案非空
-    # 即归档页, 且清单已到手 -- 不必"先确认页面, 再另起一套规则筛该页文件"。
-    for p in probes:
-        if not p["pdf_urls"]:
-            continue
+    # ---- 步 4~6: 逐个来源判定, 取"判出月份最多"的那个当归档页 ----
+    #
+    # 原来分三步走 (按页内 PDF 数量分强/弱候选 -> 按 fund_name token 打分挑几份 ->
+    # 逐份下载整份 PDF 上传打样"这是不是月报"), 数量与打样都是间接判据, 且各自带
+    # 一套文件名规则; 挑错打样对象就整页误杀 (2026-07 Stake 事故)。现在一次问清:
+    # 这个来源的全部 PDF 链接里, 哪几条是本基金月报、各是哪个月。
+    #
+    # 判据是**月份数量最多**, 不是"第一个非空" (2026-07-29 事故): Grok 那轮给的是
+    # Stake 的 Zendesk 支持页, 该页 0 条真 .pdf, 但当时混进清单的网页链接里有一条
+    # 营销页 ambition-report-2025 被判成月报 (模型从 "-2025" 看到年份自行补了月份
+    # 01)。第一个非空即返回, 于是这一条误判就让整轮收工 -- 而真归档页
+    # /legal/monthly-performance-report 就在同一批候选里, 再也没机会被看到。
+    # 16 个月的来源显然强过 1 个月的来源, 月份数量是这里唯一可比的证据强度。
+    month_counts: Dict[str, int] = {}
+    probe_errors: Dict[str, str] = {}
+    best: Optional[Dict[str, Any]] = None
+
+    def _consider(src_url: str, pdf_urls: List[str], how: str) -> None:
+        """对一个来源的 PDF 清单跑判定, 比当前最优则替换."""
+        nonlocal best
+        if not pdf_urls:
+            return
         try:
             pairs, rejected, dropped = disc_mod.classify_pdf_links(
-                p["pdf_urls"], fund_name, client=client)
+                pdf_urls, fund_name, client=client)
         except disc_mod.ClassifyError as e:
-            # 单页判不了不致命 (后面还有候选页与导航兜底), 记进 probes 供 evidence
-            p["error"] = f"classify_failed: {e}"
-            continue
-        p["monthly_count"] = len(pairs)
+            # 单个来源判不了不致命 (还有其它候选与导航兜底), 记下供 evidence
+            probe_errors[src_url] = f"classify_failed: {e}"
+            return
+        month_counts[src_url] = len(pairs)
         if not pairs:
-            continue
+            return
+        if best is None or len(pairs) > len(best["pairs"]):
+            best = {"url": src_url, "pdf_urls": list(pdf_urls), "pairs": pairs,
+                    "rejected": rejected, "dropped": dropped, "how": how}
+
+    def _pointer(b: Dict[str, Any], nav_hops: List[Tuple[str, str]]) -> ArchivePointer:
+        pairs = b["pairs"]
         return ArchivePointer(
-            archive_url=p["url"],
+            archive_url=b["url"],
             pagination_param=None,
             # 只判出 1 个月 -> 视作"单份最新", 让上游继续走 wayback 补历史
             no_archive=len(pairs) < 2,
             # _dedup_links 已按 ym 升序, 末尾即最新月那份
             latest_pdf_url=pairs[-1][1],
             issuer_domain_confirmed=domain,
-            evidence=(f"归档页确认: {p['url']} 页内 {len(p['pdf_urls'])} 份 PDF, "
-                      f"判定 {len(pairs)} 份为本基金月报 "
-                      f"({pairs[0][0]}~{pairs[-1][0]}), 筛除 {len(rejected)} 份"
-                      + (f", 弃用 {dropped} 条不可采信回答" if dropped else "")),
-            raw={"ranked": ranked, "locate": locate_ev,
-                 "rejected": rejected[:20], "dropped": dropped,
+            evidence=(f"归档页确认 ({b['how']}): {b['url']} 页内 "
+                      f"{len(b['pdf_urls'])} 份 PDF, 判定 {len(pairs)} 份为本基金"
+                      f"月报 ({pairs[0][0]}~{pairs[-1][0]}), "
+                      f"筛除 {len(b['rejected'])} 份"
+                      + (f", 弃用 {b['dropped']} 条不可采信回答"
+                         if b["dropped"] else "")),
+            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
+                 "rejected": b["rejected"][:20], "dropped": b["dropped"],
+                 "month_counts": month_counts,
                  "probes": [
                      {"url": q["url"], "pdf_count": len(q["pdf_urls"]),
-                      "monthly_count": q.get("monthly_count"),
-                      "error": q.get("error")}
+                      "nav_count": len(q.get("nav_urls") or []),
+                      "monthly_count": month_counts.get(q["url"]),
+                      "error": q.get("error") or probe_errors.get(q["url"])}
                      for q in probes
                  ]},
-            search_sources=real_sources,
-            search_queries=[],
-            discovered_pdfs=list(p["pdf_urls"]),
+            search_sources=real_sources, search_queries=[],
+            discovered_pdfs=list(b["pdf_urls"]),
             discovered_links=pairs,
         )
 
-    # ---- 步 6.5 (Spec C1): 候选页都没产出月报 -> 自主导航 1 跳 ----
-    # 场景: Stake 归档入口页 hellostake.com/.../performance-updates-and-statements/...
-    # 抓下来只含 8 份 PDS/TMD (无月报), 而 <a href="/legal/monthly-performance-report">
-    # 明摆在页里, 点进去才是 16 份月报。
     from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
     nav_hops: List[Tuple[str, str]] = []
     visited: set = {p["url"] for p in probes}
 
-    # 起跳点顺序: 先试"抓到 HTML 但页内无 PDF"的候选页; 都有 PDF 却没一份判成本
-    # 基金月报时 (Yarra /performance 整页是兄弟基金月报) 也要跳, 取首个抓到 HTML
-    # 的; 最后回发行商主页重试 1 次。
+    # 步 4: 候选页自身的 PDF
+    for p in probes:
+        _consider(p["url"], p["pdf_urls"], "候选页")
+    if best is not None and len(best["pairs"]) >= 2:
+        return _pointer(best, nav_hops)
+
+    # 步 5: 候选页上"链接文字像月报"的网页 (中转页), 跳过去取该页真 PDF.
+    # 场景: Stake 支持页 0 条 .pdf, 但页里明摆着
+    # <a href="/legal/monthly-performance-report">, 点进去才是 16 份月报。
+    # 这些链接绝不能直接当 PDF 判 (见 _extract_monthlyish_page_links), 但作为
+    # 起跳点是最直接的一条线索 -- 比让模型再从整页内链里挑一次更省更稳。
+    seeds: List[str] = []
+    for p in probes:
+        for u in (p.get("nav_urls") or []):
+            if u not in visited and u not in seeds:
+                seeds.append(u)
+    for seed in seeds:
+        if len(visited) >= MAX_TOTAL_FETCHES:
+            break
+        visited.add(seed)
+        seed_html = _fetch(seed, timeout=FETCH_TIMEOUT)
+        if not seed_html:
+            continue
+        nav_hops.append(("(中转链接)", seed))
+        _consider(seed, _extract_pdf_links(seed_html, seed), "中转页")
+    if best is not None and len(best["pairs"]) >= 2:
+        return _pointer(best, nav_hops)
+
+    # 步 6 (Spec C1): 还是不行 -> 让模型从同域内链里挑 1 跳
     nav_starts: List[str] = [
         p["url"] for p in probes if p.get("html_ok") and not p.get("pdf_urls")
     ] or [p["url"] for p in probes if p.get("html_ok")][:1]
@@ -447,46 +517,28 @@ def find_archive_v2(
             start_url, start_html, fund_name, domain, visited, client,
         )
         nav_hops.append((start_url, next_url or "(no_pick)"))
-        if not next_pdfs:
-            continue
-        try:
-            pairs, rejected, dropped = disc_mod.classify_pdf_links(
-                next_pdfs, fund_name, client=client)
-        except disc_mod.ClassifyError:
-            continue
-        if not pairs:
-            continue
-        return ArchivePointer(
-            archive_url=next_url,
-            pagination_param=None,
-            no_archive=len(pairs) < 2,
-            latest_pdf_url=pairs[-1][1],
-            issuer_domain_confirmed=domain,
-            evidence=(f"导航命中: {start_url} -> {next_url}, 页内 "
-                      f"{len(next_pdfs)} 份 PDF, 判定 {len(pairs)} 份为本基金月报 "
-                      f"({pairs[0][0]}~{pairs[-1][0]})"),
-            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
-                 "rejected": rejected[:20], "dropped": dropped,
-                 "probes": [
-                     {"url": q["url"], "pdf_count": len(q["pdf_urls"]),
-                      "monthly_count": q.get("monthly_count"),
-                      "error": q.get("error")}
-                     for q in probes
-                 ]},
-            search_sources=real_sources, search_queries=[],
-            discovered_pdfs=list(next_pdfs),
-            discovered_links=pairs,
-        )
+        if next_url:
+            _consider(next_url, next_pdfs, f"导航 {start_url} ->")
+        if best is not None and len(best["pairs"]) >= 2:
+            return _pointer(best, nav_hops)
+
+    # 收尾: 只判出 1 个月的来源到这里才采用 (前面每一步都给了更强证据一次机会)
+    if best is not None:
+        return _pointer(best, nav_hops)
 
     # ---- 步 7: 全无命中 -> 返 no_archive 让上游走 L2/L3 ----
     return ArchivePointer(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,
-        evidence="top-N 探测 + 导航兜底均未发现月报 PDF, 走 L2/L3 兜底",
-        raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops, "probes": [
-            {"url": p["url"], "pdf_count": len(p["pdf_urls"]), "error": p.get("error")}
-            for p in probes
-        ]},
+        evidence="top-N 探测 + 中转页 + 导航兜底均未判出本基金月报, 走 L2/L3 兜底",
+        raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
+             "month_counts": month_counts, "probes": [
+                 {"url": p["url"], "pdf_count": len(p["pdf_urls"]),
+                  "nav_count": len(p.get("nav_urls") or []),
+                  "monthly_count": month_counts.get(p["url"]),
+                  "error": p.get("error") or probe_errors.get(p["url"])}
+                 for p in probes
+             ]},
         search_sources=real_sources,
         search_queries=[],
     )

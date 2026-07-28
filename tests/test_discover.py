@@ -250,6 +250,7 @@ class TestClassifyPdfLinks:
         client = SelectStubClient(
             lambda u: None,
             raw_text='{"reports":[{"i":1,"ym":"2025-06",'
+                     '"date_text":"June_2025",'
                      '"url":"https://evil.com/fabricated.pdf"}]}')
         pairs, _rej, _dr = classify_pdf_links([real], "Stake Accumulate", client=client)
         assert pairs == [("2025-06", real)]
@@ -284,10 +285,68 @@ class TestClassifyPdfLinks:
         assert len(client.prompts) == 2  # 重试一次后才放弃
 
     def test_transient_failure_recovers_on_retry(self):
-        client = SelectStubClient(lambda u: "2025-01", raise_times=1)
-        pairs, _rej, _dr = classify_pdf_links(["https://cdn/a.pdf"], "F", client=client)
-        assert pairs == [("2025-01", "https://cdn/a.pdf")]
+        u = "https://cdn/monthly-Jan2025.pdf"
+        client = SelectStubClient(lambda _u: "2025-01", raise_times=1)
+        pairs, _rej, _dr = classify_pdf_links([u], "F", client=client)
+        assert pairs == [("2025-01", u)]
 
+class TestMonthMustComeFromTheLink:
+    """2026-07-29 事故: 链接 ".../ambition-report-2025" 只有年份没有月份, 模型
+    仍返回 ym=2025-01 (年份真, 月份 01 是它自行补的默认值)。提示词已明令"读不出
+    月份不要猜", 约束不住 -- 代码侧必须能验。"""
+
+    def test_year_only_link_cannot_yield_a_month(self):
+        u = "https://hellostake.com/au/ambition-report-2025.pdf"
+        client = SelectStubClient(lambda _u: ("2025-01", "2025"))
+        pairs, _rej, dropped = classify_pdf_links([u], "stake accumulate",
+                                                  client=client)
+        assert pairs == [], "只有年份的链接不该产出月份"
+        assert dropped == 1
+
+    def test_date_text_not_present_in_link_is_dropped(self):
+        """模型说不出原文出处 (date_text 不在链接里) 就不采信 -- 与本项目
+        source_quote 逐字校验同一手法。"""
+        u = "https://cdn/report-2025.pdf"
+        client = SelectStubClient(lambda _u: ("2025-06", "June_2025"))
+        pairs, _rej, dropped = classify_pdf_links([u], "F", client=client)
+        assert pairs == []
+        assert dropped == 1
+
+    def test_date_text_that_parses_to_a_different_month_is_dropped(self):
+        u = "https://cdn/AccumulateReport_Sept_2025.pdf"
+        client = SelectStubClient(lambda _u: ("2025-10", "Sept_2025"))
+        pairs, _rej, dropped = classify_pdf_links([u], "F", client=client)
+        assert pairs == []
+        assert dropped == 1
+
+    def test_missing_date_text_is_dropped(self):
+        client = SelectStubClient(
+            lambda _u: None,
+            raw_text='{"reports":[{"i":1,"ym":"2025-06"}]}')
+        pairs, _rej, dropped = classify_pdf_links(
+            ["https://cdn/Accumulate_June_2025.pdf"], "F", client=client)
+        assert pairs == []
+        assert dropped == 1
+
+    @pytest.mark.parametrize("fname,date_text,ym", [
+        ("AccumulateReport_Jun26.pdf", "Jun26", "2026-06"),
+        ("Yarra-Fund-30-September-2025.pdf", "30-September-2025", "2025-09"),
+        ("AccumulateReport_Sept_2025.pdf", "Sept_2025", "2025-09"),
+        ("gci-update-202603.pdf", "202603", "2026-03"),
+        ("Accumulate report_March2025.pdf", "March2025", "2025-03"),
+        ("AccumulateReport_May26.pdf?branch=odyssey", "May26", "2026-05"),
+    ])
+    def test_real_filename_formats_all_survive_the_check(self, fname, date_text, ym):
+        """兜底校验不能反过来误杀真月报 -- 这几种都是真实归档页上的写法
+        (含驼峰/4 字母 Sept/两位年/紧凑数字/带查询串)。"""
+        u = f"https://cdn/{fname}"
+        client = SelectStubClient(lambda _u: (ym, date_text))
+        pairs, _rej, dropped = classify_pdf_links([u], "F", client=client)
+        assert pairs == [(ym, u)], f"{fname} 被误杀"
+        assert dropped == 0
+
+
+class TestClassifyPdfLinksMisc:
     def test_requires_fund_name(self):
         with pytest.raises(ValueError):
             classify_pdf_links(["https://cdn/a.pdf"], "", client=object())
