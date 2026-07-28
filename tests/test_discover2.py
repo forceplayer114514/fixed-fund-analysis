@@ -262,16 +262,155 @@ class TestPicksSourceWithMostMonths:
             "url": page, "html_ok": True, "pdf_urls": [only], "nav_urls": [],
             "error": None,
         }])
-        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: "")
-        from llm_ingest import navigate as nav_mod
-        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
-
         ptr = d2.find_archive_v2(
             "Gryphon Capital Income Trust", "Gryphon",
             client=SelectStubClient(lambda u: "2026-06" if u == only else None))
 
         assert ptr.discovered_links == [("2026-06", only)]
         assert ptr.no_archive is True   # 1 个月 -> 单份最新, 上游继续补历史
+
+
+class TestGrokNameVariants:
+    """2026-07-29: 两次并发 Grok 各用一个基金名写法。失败那轮传进去的是全小写、
+    无类型词的 "stake accumulate"; 几次成功的传的是 "Stake Accumulate Fund"。"""
+
+    def test_capitalizes_each_word(self):
+        a, b = d2._grok_name_variants("stake accumulate")
+        assert a == "Stake Accumulate"
+        assert b == "Stake Accumulate Fund"
+
+    def test_preserves_acronyms_typed_in_caps(self):
+        """不能用 str.title() -- 它会把 JCB 变成 Jcb。"""
+        a, b = d2._grok_name_variants("JCB Active Bond Fund")
+        assert a == "JCB Active Bond Fund"
+        assert b == "JCB Active Bond Fund"
+
+    def test_does_not_append_fund_after_a_type_word(self):
+        """否则 "Gryphon Capital Income Trust" 会变成 "...Trust Fund", 更糟。"""
+        for name in ("gryphon capital income trust", "Some ETF", "X Portfolio"):
+            a, b = d2._grok_name_variants(name)
+            assert b == a, f"{name!r} 不该被补 Fund, 得到 {b!r}"
+
+    def test_already_has_fund_makes_both_variants_identical(self):
+        a, b = d2._grok_name_variants("bentham global income fund")
+        assert a == b == "Bentham Global Income Fund"
+
+
+class TestGrokAskedTwiceConcurrently:
+    def _stub_answer(self, monkeypatch, by_name):
+        from llm_ingest import grok
+        seen = []
+
+        def _ask(name, issuer, asx):
+            seen.append(name)
+            url = by_name.get(name)
+            if isinstance(url, Exception):
+                raise url
+            return grok.ArchiveAnswer(issuer_domain="https://hellostake.com",
+                                      archive_url=url, sources=[], evidence="e")
+
+        monkeypatch.setattr(d2, "_grok_answer_archive", _ask)
+        return seen
+
+    def test_both_name_variants_are_asked(self, monkeypatch):
+        seen = self._stub_answer(monkeypatch, {
+            "Stake Accumulate": "https://a/1",
+            "Stake Accumulate Fund": "https://a/2",
+        })
+        _d, ranked, ev = d2.locate_candidates(
+            "stake accumulate", "stake", engine="grok", client=object())
+        assert sorted(seen) == ["Stake Accumulate", "Stake Accumulate Fund"]
+        assert ev["grok_name_variants"] == ["Stake Accumulate",
+                                            "Stake Accumulate Fund"]
+
+    def test_two_different_answers_both_become_candidates(self, monkeypatch):
+        """不一致时不投票, 两个都打开验证, 由 find_archive_v2 按月份数取胜者。"""
+        self._stub_answer(monkeypatch, {
+            "Stake Accumulate": "https://hellostake.com/au/support/x",
+            "Stake Accumulate Fund": "https://hellostake.com/legal/monthly",
+        })
+        _d, ranked, ev = d2.locate_candidates(
+            "stake accumulate", "stake", engine="grok", client=object())
+        assert [r["url"] for r in ranked] == [
+            "https://hellostake.com/au/support/x",
+            "https://hellostake.com/legal/monthly",
+        ]
+        assert ev["grok_agreed"] is False
+
+    def test_identical_answers_dedupe_to_one_candidate(self, monkeypatch):
+        same = "https://hellostake.com/legal/monthly"
+        self._stub_answer(monkeypatch, {"Stake Accumulate": same,
+                                        "Stake Accumulate Fund": same})
+        _d, ranked, ev = d2.locate_candidates(
+            "stake accumulate", "stake", engine="grok", client=object())
+        assert [r["url"] for r in ranked] == [same]
+        assert ev["grok_agreed"] is True
+
+    def test_one_failure_still_uses_the_other_answer(self, monkeypatch):
+        """原来只问一次, 一个 503 就整轮降级 Tavily。"""
+        from llm_ingest import grok
+        self._stub_answer(monkeypatch, {
+            "Stake Accumulate": grok.GrokError("HTTP 503"),
+            "Stake Accumulate Fund": "https://hellostake.com/legal/monthly",
+        })
+        monkeypatch.setattr(d2, "multi_query_search",
+                            lambda *a, **k: pytest.fail("不该降级 Tavily"))
+        _d, ranked, ev = d2.locate_candidates(
+            "stake accumulate", "stake", engine="grok", client=object())
+        assert [r["url"] for r in ranked] == ["https://hellostake.com/legal/monthly"]
+        assert ev["engine_used"] == "grok"
+
+    def test_both_failures_fall_back_to_tavily_visibly(self, monkeypatch):
+        from llm_ingest import grok
+        self._stub_answer(monkeypatch, {
+            "Stake Accumulate": grok.GrokError("HTTP 503"),
+            "Stake Accumulate Fund": grok.GrokError("HTTP 503"),
+        })
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: ["https://x/a"])
+        monkeypatch.setattr(d2, "rank_urls",
+                            lambda urls, *a, **k: [{"url": urls[0], "score": 1,
+                                                    "reason": ""}])
+        _d, ranked, ev = d2.locate_candidates(
+            "stake accumulate", "stake", engine="grok", client=object())
+        assert ranked and ev["engine_used"] == "tavily"
+        assert "503" in ev["fallback_reason"]
+
+
+class TestFetchRetryAndEarlyStop:
+    def test_probe_retries_fetch_once(self, monkeypatch):
+        """瞬时抓取失败不该让整页算空 -- Grok 路上候选只有一两个, 丢掉就降级导航。"""
+        calls = {"n": 0}
+
+        def _flaky(url, timeout=None):
+            calls["n"] += 1
+            return "" if calls["n"] == 1 else '<a href="/a.pdf">x</a>'
+
+        monkeypatch.setattr(d2, "_fetch", _flaky)
+        p = d2._probe_one("https://x.com/archive")
+        assert calls["n"] == 2
+        assert p["html_ok"] is True
+        assert p["pdf_urls"] == ["https://x.com/a.pdf"]
+
+    def test_one_month_is_enough_no_navigation(self, monkeypatch):
+        """归档页上确实只挂 1 份月报时 (GCI 实况) 就该收工。原来要求 >= 2 个月,
+        不到就跑导航 -- 导航更贵、成功率更低, 只该当托底。"""
+        page = "https://gcapinvest.com/our-lit"
+        only = "https://cdn/gci-inv-update-jun-2026.pdf"
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(d2, "probe_urls", lambda urls, **k: [{
+            "url": page, "html_ok": True, "pdf_urls": [only], "nav_urls": [],
+            "error": None,
+        }])
+        monkeypatch.setattr(d2, "_fetch",
+                            lambda *a, **k: pytest.fail("不该再抓页 (已收工)"))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop",
+                            lambda *a, **k: pytest.fail("不该跑导航 (已收工)"))
+
+        ptr = d2.find_archive_v2(
+            "Gryphon Capital Income Trust", "Gryphon",
+            client=SelectStubClient(lambda u: "2026-06" if u == only else None))
+        assert ptr.discovered_links == [("2026-06", only)]
 
 
 class TestLocateCandidates:

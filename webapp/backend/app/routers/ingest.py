@@ -112,6 +112,43 @@ def _rename_pdf_dir(old_dir: Path, new_dir: Path) -> None:
     old_dir.rmdir()
 
 
+def _log_discovery_detail(jid: str, rep: Any) -> None:
+    """把 discovery 每一步看到了什么写进 job 日志.
+
+    2026-07-29: 上一次偶发失败时日志只有 "run_discovery: issuer=..." 紧跟
+    "discovery: 1 links", 中间一片空白 -- 搜索引擎答了哪个地址、那页抓成功没有、
+    页内几条 PDF 链接、判出几个月、有没有走中转页/导航, 全都看不到, 只能靠事后
+    推断, 而两种完全不同的故障 (答案位填偏 vs 抓页瞬时失败) 在这段日志里长得
+    一模一样。排查一次偶发故障不该靠猜。
+    """
+    ptr = getattr(rep, "archive_pointer", None)
+    if ptr is None:
+        return
+    raw = ptr.raw or {}
+    loc = raw.get("locate") or {}
+
+    if loc.get("grok_name_variants"):
+        _job_log(jid, f"grok 两次输入名: {loc['grok_name_variants']}")
+    for i, att in enumerate(loc.get("grok_attempts") or [], 1):
+        if att.get("error"):
+            _job_log(jid, f"grok #{i}: 失败 {att['error']}")
+        else:
+            _job_log(jid, f"grok #{i}: {att.get('archive_url')}")
+    if loc.get("grok_attempts"):
+        _job_log(jid, f"grok 两次答案一致: {bool(loc.get('grok_agreed'))}")
+
+    for pr in raw.get("probes") or []:
+        _job_log(jid, f"候选页 {pr.get('url')}: "
+                      f"PDF 链接 {pr.get('pdf_count')} 条, "
+                      f"中转链接 {pr.get('nav_count')} 条, "
+                      f"判出 {pr.get('monthly_count')} 个月"
+                      + (f", 错误={pr['error']}" if pr.get("error") else ""))
+    for frm, to in raw.get("nav_hops") or []:
+        _job_log(jid, f"跳转: {frm} -> {to}")
+    if ptr.evidence:
+        _job_log(jid, f"定位结论: {ptr.evidence}")
+
+
 def _upsert_fund_preserving_existing(conn, store_mod, fund_id: str, fund_name: str,
                                      req: IngestRequest) -> None:
     """upsert_fund, 但保留已有 url_type 与 confirmed_url。
@@ -434,6 +471,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         f"engine fallback: {_loc['engine_requested']} -> "
                         f"{_loc['engine_used']} ({_loc.get('fallback_reason', '')})",
                     )
+            _log_discovery_detail(jid, rep)
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
             # 记住归档页地址 与 记录 discovery 缺口 都挪到摄取循环之后 (见那里),
             # 因为这两件事都只有在"这一轮真入库了月度数据"之后才站得住脚。

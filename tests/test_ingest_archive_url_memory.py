@@ -280,3 +280,59 @@ class TestUpdateFundPathUsesTheNewClassifier:
             ing._run_ingest_job(jid, _req())
 
         assert _cu(tmp_db) == found
+
+
+class TestDiscoveryDetailLogged:
+    """2026-07-29: 上一次偶发失败时日志只有 "run_discovery: issuer=..." 紧跟
+    "discovery: 1 links", 中间一片空白 —— 搜索引擎答了哪个地址、那页抓成功没有、
+    页内几条链接、判出几个月、有没有跳转, 全看不到。两种完全不同的故障
+    (答案位填偏 vs 抓页瞬时失败) 在那段日志里长得一模一样, 只能靠事后推断。
+    """
+
+    def test_log_contains_every_step(self):
+        from webapp.backend.app.routers import ingest as ing
+        from llm_ingest import discover as disc
+
+        ptr = disc.ArchivePointer(
+            archive_url="https://hellostake.com/legal/monthly-performance-report",
+            pagination_param=None, no_archive=False, latest_pdf_url=None,
+            issuer_domain_confirmed="https://hellostake.com",
+            evidence="归档页确认 (中转页): ... 判定 16 份为本基金月报",
+            raw={
+                "locate": {
+                    "grok_name_variants": ["Stake Accumulate",
+                                           "Stake Accumulate Fund"],
+                    "grok_attempts": [
+                        {"archive_url": "https://hellostake.com/au/support/x"},
+                        {"error": "GrokError: HTTP 503"},
+                    ],
+                    "grok_agreed": False,
+                },
+                "probes": [{"url": "https://hellostake.com/au/support/x",
+                            "pdf_count": 0, "nav_count": 2,
+                            "monthly_count": None, "error": None}],
+                "nav_hops": [("(中转链接)",
+                              "https://hellostake.com/legal/monthly-performance-report")],
+            },
+        )
+        rep = disc.DiscoveryReport(fund_id="f1", archive_pointer=ptr)
+
+        jid = ing._job_new("f1")
+        ing._log_discovery_detail(jid, rep)
+        log = "\n".join(ing._JOBS[jid]["log_tail"])
+
+        assert "Stake Accumulate Fund" in log        # 两次用的名字写法
+        assert "grok #1: https://hellostake.com/au/support/x" in log
+        assert "HTTP 503" in log                     # 失败那次也要看得见
+        assert "一致: False" in log
+        assert "PDF 链接 0 条" in log                 # 该页真的没有 PDF
+        assert "中转链接 2 条" in log
+        assert "跳转: (中转链接) -> https://hellostake.com/legal" in log
+        assert "定位结论:" in log
+
+    def test_no_pointer_is_noop(self):
+        from webapp.backend.app.routers import ingest as ing
+        from llm_ingest import discover as disc
+        jid = ing._job_new("f1")
+        ing._log_discovery_detail(jid, disc.DiscoveryReport(fund_id="f1"))
+        assert ing._JOBS[jid]["log_tail"] == []

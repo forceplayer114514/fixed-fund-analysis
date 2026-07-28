@@ -237,6 +237,68 @@ def _grok_answer_archive(fund_name: str, issuer: str, asx_code: Optional[str]):
     return answer_archive(fund_name, issuer, asx_code)
 
 
+def _capitalize_words(name: str) -> str:
+    """每个单词首字母大写, 其余字符原样不动.
+
+    不用 str.title(): 它会把首字母之后的都转小写, 把缩写型基金名毁掉
+    ("JCB Active Bond" -> "Jcb Active Bond", "GCI" -> "Gci"), 也会毁 APIR 码。
+    这里只动每个词的第一个字母。
+    """
+    out = []
+    for w in name.split():
+        out.append(w[0].upper() + w[1:] if w and w[0].isalpha() else w)
+    return " ".join(out)
+
+
+# 名字已经以这些类型词结尾时不再补 "Fund" -- 否则
+# "Gryphon Capital Income Trust" 会变成 "...Trust Fund", 比不补更糟。
+_FUND_TYPE_TAIL_RE = re.compile(
+    r"\b(fund|trust|etf|portfolio|scheme|series|class|reit|lic|lit)\b\s*$", re.I)
+
+
+def _grok_name_variants(fund_name: str) -> Tuple[str, str]:
+    """给两次并发 Grok 查询各准备一个基金名写法, 返 (变体A, 变体B).
+
+    2026-07-29 决定。两个变体都做首字母大写 -- 失败那轮传进去的是
+    "stake accumulate" (全小写、无类型词), 几次成功的传的是
+    "Stake Accumulate Fund"。不能断言这是那次的原因 (与"抓页瞬时失败"分不开),
+    但这是唯一一个改起来只要几行、且明显更像官方写法的输入变量。
+
+    变体 B 额外补类型词 "Fund" (原名已带类型词则不补), 让两次查询的输入真的
+    不同 -- 同一个提示词 + 同一个输入问两次, 失败原因也是同一个, 解耦有限。
+    名字本来就带类型词时两个变体相同, 退化成"同输入问两次"(仍有效: 实测同一
+    输入不同轮次的答案确实会变), 但解耦收益就没有了。
+    """
+    a = _capitalize_words(fund_name)
+    b = a if _FUND_TYPE_TAIL_RE.search(a) else f"{a} Fund"
+    return (a, b)
+
+
+def _grok_answer_archive_twice(
+    fund_name: str, issuer: str, asx_code: Optional[str],
+) -> Tuple[List[Any], List[str], List[str]]:
+    """并发问 Grok 两次 (两个基金名写法各一次).
+
+    返 (成功的答案列表, 失败原因列表, 实际用的名字写法列表)。
+    并发而非串行: 单次实测约 10s, 串行会把 discovery 的墙上时间加倍。
+    """
+    variants = list(_grok_name_variants(fund_name))
+    answers: List[Any] = [None] * len(variants)
+    errors: List[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(variants)) as ex:
+        futures = {
+            ex.submit(_grok_answer_archive, name, issuer, asx_code): i
+            for i, name in enumerate(variants)
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            i = futures[fut]
+            try:
+                answers[i] = fut.result()
+            except Exception as e:  # noqa: BLE001 (GrokError 及网络异常)
+                errors.append(f"{variants[i]}: {type(e).__name__}: {e}")
+    return ([a for a in answers if a is not None], errors, variants)
+
+
 def _locate_via_tavily(
     fund_name: str,
     issuer: str,
@@ -274,8 +336,20 @@ def locate_candidates(
     evidence 供 evidence_log 记录: engine_requested / engine_used /
     fallback_reason / sources。
 
-    engine="grok" 且 Grok 失败时自动降级 Tavily, 但**降级必须可见** --
-    evidence 里记 engine_used 与 fallback_reason, 上层再写进 job 日志。
+    engine="grok" 时**并发问 2 次**, 两次答案去重后都当候选 (2026-07-29 决定):
+    Grok 单次命中率高但不是 1, 且它的答案位允许在"没有专门归档页"时填一个链到
+    报告的普通页面 (见 prompts/grok_archive.md 的规则), 实测确实出现过填客服帮助
+    页那一轮。两次并发问, 墙上时间仍是一次的量 (实测约 10s), 只多花一次 API;
+    且归档页地址会被记住 (ingest._remember_archive_url), 这笔钱每支基金只花一次。
+
+    两次一致 -> 去重后就是 1 个候选; 不一致 -> 2 个候选都打开验证, 由
+    find_archive_v2 按"判出月份最多"取胜者。注意两次失败并不独立 (同提示词/同
+    基金名/同模型, 会一起偏), 所以这只是提速与容错, 真正的判据始终是"打开那页
+    看它到底有没有本基金的月报"。
+
+    一次失败另一次成功 -> 用成功那次 (原来只问一次, 一个 503 就整轮降级 Tavily)。
+    两次都失败才降级 Tavily, 且**降级必须可见** -- evidence 里记 engine_used 与
+    fallback_reason, 上层再写进 job 日志。
     (Spec G 4.5: 旧代码注释禁止 SearXNG->Tavily 自动降级, 顾虑是"静默烧额度且
     故障不可见"; 这里的降级不静默, 且 Grok 的 503 是 15-20% 的高频瞬时故障,
     不降级会让相应比例的摄取直接失败。)
@@ -288,21 +362,36 @@ def locate_candidates(
     }
 
     if engine == "grok":
-        try:
-            ans = _grok_answer_archive(fund_name, issuer, asx_code)
-        except Exception as e:  # noqa: BLE001  (GrokError 及网络异常一并降级)
-            ev["engine_used"] = "tavily"
-            ev["fallback_reason"] = f"{type(e).__name__}: {e}"
-        else:
-            ev["sources"] = list(ans.sources)
-            ev["grok_evidence"] = ans.evidence
-            if ans.archive_url:
-                ranked = [{
-                    "url": ans.archive_url, "score": 100, "reason": "grok_answer",
-                }]
-                return (ans.issuer_domain or issuer_domain, ranked, ev)
-            ev["engine_used"] = "tavily"
-            ev["fallback_reason"] = "grok_no_archive_url"
+        answers, errors, name_variants = _grok_answer_archive_twice(
+            fund_name, issuer, asx_code)
+        ev["grok_name_variants"] = name_variants
+        ev["grok_attempts"] = [
+            {"archive_url": a.archive_url, "issuer_domain": a.issuer_domain,
+             "evidence": a.evidence} for a in answers
+        ] + [{"error": e} for e in errors]
+        ev["grok_agreed"] = (
+            len(answers) == 2
+            and answers[0].archive_url is not None
+            and answers[0].archive_url == answers[1].archive_url
+        )
+        for a in answers:
+            ev["sources"] = list(ev["sources"]) + list(a.sources)
+            if a.evidence and not ev.get("grok_evidence"):
+                ev["grok_evidence"] = a.evidence
+        # 去重保序: 两次答案相同就只剩一个候选
+        cand_urls: List[str] = []
+        for a in answers:
+            if a.archive_url and a.archive_url not in cand_urls:
+                cand_urls.append(a.archive_url)
+        if cand_urls:
+            ranked = [{"url": u, "score": 100 - i, "reason": "grok_answer"}
+                      for i, u in enumerate(cand_urls)]
+            grok_domain = next((a.issuer_domain for a in answers if a.issuer_domain),
+                               None)
+            return (grok_domain or issuer_domain, ranked, ev)
+        ev["engine_used"] = "tavily"
+        ev["fallback_reason"] = (
+            "; ".join(errors) if errors else "grok_no_archive_url")
 
     domain, ranked, sources = _locate_via_tavily(
         fund_name, issuer, issuer_domain, client)
@@ -322,10 +411,16 @@ def _probe_one(url: str) -> Dict[str, Any]:
     月报但不是 PDF 的网页 (只作导航起跳点)。两者必须分开, 理由见
     _extract_monthlyish_page_links。
     """
+    # 抓失败重试一次 (2026-07-29): 走 Grok 时候选可能只有一两个, 这一次瞬时失败
+    # 就等于把最好的线索整条扔掉 -- 该页被当成"空页", 整轮降级去跑导航兜底, 而
+    # 导航更贵、成功率更低。日志里也看不出是抓失败还是页面真没东西 (排查一次
+    # 偶发故障要靠猜, 见 error 字段现在会写进 job 日志)。
     html = _fetch(url, timeout=FETCH_TIMEOUT)
     if not html:
+        html = _fetch(url, timeout=FETCH_TIMEOUT)
+    if not html:
         return {"url": url, "html_ok": False, "pdf_urls": [], "nav_urls": [],
-                "error": "fetch_failed"}
+                "error": "fetch_failed(重试后仍失败)"}
     # URL 本身就是 .pdf: 直接算 PDF 候选
     if url.lower().split("?", 1)[0].endswith(".pdf"):
         return {"url": url, "html_ok": False, "pdf_urls": [url], "nav_urls": [],
@@ -468,10 +563,15 @@ def find_archive_v2(
     nav_hops: List[Tuple[str, str]] = []
     visited: set = {p["url"] for p in probes}
 
-    # 步 4: 候选页自身的 PDF
+    # 步 4: 候选页自身的 PDF (Grok 两次答案去重后的 1~2 个候选; Tavily 为 top-N)
     for p in probes:
         _consider(p["url"], p["pdf_urls"], "候选页")
-    if best is not None and len(best["pairs"]) >= 2:
+    # 判出月份最多的候选即归档页, 有 1 个月就收工。
+    # 原来这里要求 >= 2 个月才收工, 不到 2 个月就继续跑中转页 + 导航 -- 那是我
+    # 自己加的保险, 代价是像 GCI 那种归档页上确实只挂 1 份月报的基金每次都白跑
+    # 一遍导航 (导航更贵、成功率更低, 只该当托底)。而真正修好 2026-07-29 那次
+    # 误判的是"非 PDF 网页不进判定清单"与"月份必须有原文出处"两条, 不是这条。
+    if best is not None:
         return _pointer(best, nav_hops)
 
     # 步 5: 候选页上"链接文字像月报"的网页 (中转页), 跳过去取该页真 PDF.
@@ -493,7 +593,7 @@ def find_archive_v2(
             continue
         nav_hops.append(("(中转链接)", seed))
         _consider(seed, _extract_pdf_links(seed_html, seed), "中转页")
-    if best is not None and len(best["pairs"]) >= 2:
+    if best is not None:
         return _pointer(best, nav_hops)
 
     # 步 6 (Spec C1): 还是不行 -> 让模型从同域内链里挑 1 跳
@@ -519,7 +619,7 @@ def find_archive_v2(
         nav_hops.append((start_url, next_url or "(no_pick)"))
         if next_url:
             _consider(next_url, next_pdfs, f"导航 {start_url} ->")
-        if best is not None and len(best["pairs"]) >= 2:
+        if best is not None:
             return _pointer(best, nav_hops)
 
     # 收尾: 只判出 1 个月的来源到这里才采用 (前面每一步都给了更强证据一次机会)
