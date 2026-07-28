@@ -1,234 +1,78 @@
-### Task 1: 项目脚手架
+## Task 1: 把 SEARCH_BACKEND 默认值从已死的 searxng 翻成 tavily
+
+**背景（Spec G 2.8）：** `SEARCH_BACKEND` 在 `.env`、后端配置、shell 环境里**都没设置过**，而代码默认值是 `"searxng"`，SearXNG 服务已死（`localhost:8081` 不通，无 docker 进程）。因此当前每次搜索都抛 `TavilyError` 并静默降级到 sub2api web_search（命中率 53%、会幻觉 URL）。**Tavily 事实上根本没在跑。** 不先修这一条，后面所有 Tavily 相关测试测的都是 sub2api。
 
 **Files:**
-- Create: `webapp/frontend/package.json`
-- Create: `webapp/frontend/tsconfig.json`
-- Create: `webapp/frontend/tsconfig.app.json`
-- Create: `webapp/frontend/tsconfig.node.json`
-- Create: `webapp/frontend/vite.config.ts`
-- Create: `webapp/frontend/tailwind.config.js`
-- Create: `webapp/frontend/postcss.config.js`
-- Create: `webapp/frontend/index.html`
-- Create: `webapp/frontend/src/main.tsx`
-- Create: `webapp/frontend/src/vite-env.d.ts`
-- Create: `webapp/frontend/src/index.css`
+- Modify: `llm_ingest/tavily.py:163`
+- Test: `tests/test_tavily.py:98-107`
 
 **Interfaces:**
-- Produces: 可运行的 Vite dev server，`pnpm run dev` 可启动
+- Consumes: 无
+- Produces: `tavily_search()` 默认后端为 Tavily（供 Task 3/5/9/10 的测试依赖）
 
-- [ ] **Step 1: 初始化项目与安装依赖**
+- [ ] **Step 1: 改写现有的默认后端测试为期望 tavily**
+
+把 `tests/test_tavily.py` 第 99-107 行整个测试函数替换为：
+
+```python
+    def test_default_backend_is_tavily(self, monkeypatch):
+        """未设 SEARCH_BACKEND 时必须走 Tavily。
+
+        Spec G 2.8: 旧默认值 "searxng" 指向已死服务 (localhost:8081 不通),
+        导致每次搜索都抛 TavilyError 静默降级到 sub2api web_search。
+        """
+        monkeypatch.delenv("SEARCH_BACKEND", raising=False)
+        mock_searxng = MagicMock(return_value=[])
+        mock_tavily = MagicMock(return_value=[])
+        monkeypatch.setattr(tavily_mod, "_searxng_impl", mock_searxng)
+        monkeypatch.setattr(tavily_mod, "_tavily_impl", mock_tavily)
+        tavily_search("q")
+        mock_tavily.assert_called_once()
+        mock_searxng.assert_not_called()
+```
+
+- [ ] **Step 2: 跑测试确认它失败（RED）**
 
 ```bash
-cd /Users/chong/Desktop/fixed_fund_analysis
-mkdir -p webapp/frontend && cd webapp/frontend
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/test_tavily.py::TestTavilySearchDispatch::test_default_backend_is_tavily','-v']))"
 ```
 
-创建 `package.json`:
+预期：FAIL —— `AssertionError: Expected '_tavily_impl' to have been called once. Called 0 times.`
 
-```json
-{
-  "name": "fixed-fund-frontend",
-  "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.0",
-    "zustand": "^4.5.0",
-    "echarts": "^5.5.0",
-    "echarts-for-react": "^3.0.2"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "autoprefixer": "^10.4.19",
-    "postcss": "^8.4.38",
-    "tailwindcss": "^3.4.4",
-    "typescript": "^5.5.0",
-    "vite": "^5.4.0"
-  }
-}
+- [ ] **Step 3: 改默认值**
+
+`llm_ingest/tavily.py:163`，把
+
+```python
+    backend = os.environ.get("SEARCH_BACKEND", "searxng").strip().lower()
 ```
 
-- [ ] **Step 2: 创建 Vite 配置**
+改为
 
-`vite.config.ts`:
-```typescript
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/health': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
-  },
-})
+```python
+    # 默认 tavily: SearXNG 服务已下线 (Spec G 2.8), 旧默认值 "searxng" 会让
+    # 每次搜索都抛 TavilyError 并静默降级到 sub2api web_search, Tavily 形同虚设。
+    backend = os.environ.get("SEARCH_BACKEND", "tavily").strip().lower()
 ```
 
-- [ ] **Step 3: 创建 Tailwind 配置**
+同时把该函数 docstring 里的 `(默认 searxng)` 改成 `(默认 tavily)`。
 
-`tailwind.config.js`:
-```javascript
-/** @type {import('tailwindcss').Config} */
-export default {
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
-  theme: {
-    extend: {},
-  },
-  plugins: [],
-}
-```
-
-`postcss.config.js`:
-```javascript
-export default {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {},
-  },
-}
-```
-
-- [ ] **Step 4: 创建 TypeScript 配置**
-
-`tsconfig.json`:
-```json
-{
-  "files": [],
-  "references": [
-    { "path": "./tsconfig.app.json" },
-    { "path": "./tsconfig.node.json" }
-  ]
-}
-```
-
-`tsconfig.app.json`:
-```json
-{
-  "compilerOptions": {
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "jsx": "react-jsx",
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
-  },
-  "include": ["src"]
-}
-```
-
-`tsconfig.node.json`:
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2023"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
-    "strict": true
-  },
-  "include": ["vite.config.ts"]
-}
-```
-
-- [ ] **Step 5: 创建入口文件**
-
-`index.html`:
-```html
-<!DOCTYPE html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>固定收益基金分析</title>
-  </head>
-  <body class="bg-gray-50">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>
-```
-
-`src/main.tsx`:
-```typescript
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
-import App from './App'
-import './index.css'
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </React.StrictMode>,
-)
-```
-
-`src/index.css`:
-```css
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-}
-```
-
-`src/vite-env.d.ts`:
-```typescript
-/// <reference types="vite/client" />
-```
-
-`src/App.tsx`（最小版本，后续 Task 3 完善）:
-```typescript
-function App() {
-  return <div className="p-4 text-lg">固定收益基金分析</div>
-}
-export default App
-```
-
-- [ ] **Step 6: 安装依赖并验证**
+- [ ] **Step 4: 跑测试确认通过（GREEN）**
 
 ```bash
-cd /Users/chong/Desktop/fixed_fund_analysis/webapp/frontend
-npm install
-npx tsc -b --noEmit 2>&1 || true  # 预计有暂时错误因为组件尚未实现
-echo "Scaffold complete"
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/test_tavily.py','-v']))"
+```
+
+预期：全部 PASS。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add llm_ingest/tavily.py tests/test_tavily.py
+git commit -m "fix(search): SEARCH_BACKEND 默认值改 tavily, 修复静默降级 sub2api
+
+SearXNG 服务已下线且该变量全仓库未设置, 旧默认值 searxng 导致每次搜索
+都抛 TavilyError 降级到命中率 53% 且会幻觉 URL 的 sub2api web_search。"
 ```
 
 ---

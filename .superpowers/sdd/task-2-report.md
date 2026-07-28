@@ -1,151 +1,96 @@
-# Task 2 Report: 数据库模型（6张表）
+# Task 2 报告：`llm_ingest/tavily.py` 改名为 `llm_ingest/search.py`
 
-## Status: DONE_WITH_CONCERNS
+## 实现内容
 
-> DONE on all functional requirements. The "WITH_CONCERNS" flag is solely for a
-> necessary, semantically-equivalent adaptation to the available Python runtime
-> (see "Adaptation" below). All tests pass; the model definitions are functionally
-> identical to the brief.
+纯改名，未改动任何业务逻辑：
 
-## What I Implemented
+1. `git mv llm_ingest/tavily.py llm_ingest/search.py`（保留 git 历史）
+2. `git mv tests/test_tavily.py tests/test_search.py`（保留 git 历史）
+3. 更新 3 处生产 import：
+   - `llm_ingest/discover.py:31`：`from .tavily import ...` → `from .search import ...`
+   - `llm_ingest/discover2.py:45`：同上
+   - `llm_ingest/fundmonitors.py:315`（`find_fundid_via_tavily` 函数体内）：同上
+4. 更新 `tests/test_search.py` 顶部 import：`llm_ingest.tavily` → `llm_ingest.search`，
+   `from llm_ingest import tavily as tavily_mod` → `from llm_ingest import search as tavily_mod`。
+5. 顺带修复测试文件 docstring 里残留的旧路径引用（`llm_ingest/tavily.py 搜索后端切换...` →
+   `llm_ingest/search.py 搜索后端切换...`），保持文档与实际路径一致。
+6. 按任务简报里 Task 1 review 反馈，重写了 `search.py` 模块头部 docstring：
+   原文声称"默认后端 SearXNG, 可切回 Tavily"，与 Task 1（commit b73ed5f）已把
+   `SEARCH_BACKEND` 默认值改回 `tavily` 的运行时行为矛盾。改为如实描述：默认
+   Tavily，SearXNG 服务已下线但分支代码原样保留到阶段三删除，用
+   `SEARCH_BACKEND` 环境变量手动切换。**只改了文字描述，未改任何可执行代码**。
+7. `tools/rotate_proxy.py:6` 注释里也有一处 `llm_ingest/tavily.py` 的旧路径引用
+   （grep 全仓库扫描时发现，不在任务简报列出的 3 个生产 import 点范围内，但
+   属于"全仓库无残留引用"的检查项），同步改为 `llm_ingest/search.py`。
 
-Overwrote the empty `webapp/backend/app/models.py` placeholder (left by Task 1)
-with the full 6-table SQLAlchemy 2.0 ORM, and created
-`webapp/backend/tests/test_models.py` (verbatim from the brief).
+**符号名一律未改**：`TavilyError`、`TavilyResult`、`tavily_search()`、
+`multi_query_search()`、`AGGREGATOR_DOMAINS` 保持原名，只是模块路径变了。
 
-The 6 models, all inheriting `Base` (from `app.database`):
+## 测试
 
-1. **`Fund`** (`funds`) - PK `fund_id` (TEXT/String); `fund_name` UNIQUE NOT NULL;
-   `apir_code` UNIQUE NULLABLE (supports Stake-like funds with no APIR);
-   `confirmed_url`, `fetch_method`, `url_type` NOT NULL; `max_pdf_pages`,
-   `verified_at`, `created_at` (server_default `(datetime('now'))`).
-   `relationship`s: `monthly_returns`, `anomalies` (lists), `metrics`
-   (one-to-one, `uselist=False`), all `cascade="all, delete-orphan"`.
-2. **`MonthlyReturn`** (`monthly_returns`) - autoincrement PK; FK `fund_id`
-   `ondelete="CASCADE"`; composite `UniqueConstraint("fund_id","date", name="uq_fund_date")`;
-   `date`, `net_return`, `nav` NOT NULL; `commentary_truth` nullable.
-3. **`Anomaly`** (`anomalies`) - autoincrement PK; FK `fund_id` `ondelete="CASCADE"`;
-   `date, value, z_score, threshold_sigma, mean, stdev` NOT NULL.
-4. **`RbaCashRate`** (`rba_cash_rates`) - PK `date_period` (YYYY-MM); `rate` NOT NULL;
-   `updated_at` server_default. (No FK to funds - independent dimension table.)
-5. **`FundMetric`** (`fund_metrics`) - PK = FK `fund_id` `ondelete="CASCADE"`; full
-   5-dimension metric set (进攻/防守/性价比/体感/真实性辅助) with `orig_`/`un_` pairs,
-   `unsmoothing_coefficient_phi`, `is_geltner_applied`, `history_months`,
-   `is_short_history_warning`, `ljung_box_q`, `is_q_significant`, `updated_at`.
-6. **`AiReport`** (`ai_reports`) - autoincrement PK; `fund_ids` (Text, denormalized
-   list - no FK to funds per brief), `date_period`, `report_type`, `content`,
-   `created_at`.
+### `tests/test_search.py`（重命名后的测试文件单独跑）
 
-## Adaptation (the concern)
-
-The brief's model code uses PEP 604 union syntax (`str | None`, `int | None`,
-`FundMetric | None`). This is Python 3.10+ syntax. The only interpreter available
-on this machine is **Python 3.9.6** (macOS Command-Line Tools system Python);
-no `python3.10+`, no Homebrew Python, no project venv exists. With
-`from __future__ import annotations` the annotations become strings, but
-SQLAlchemy 2.0.51 actively resolves them and raises
-`MappedAnnotationError: Could not resolve all types within mapped annotation`.
-Without the future import, the class body raises
-`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`.
-
-To make the brief's code run on Python 3.9 I made the minimal, semantically-
-identical change: `X | None` -> `Optional[X]` (from `typing`), and kept
-`from __future__ import annotations` for uniform forward-ref resolution.
-Specifically: `apir_code`, `max_pdf_pages`, `verified_at`, `created_at` (Fund),
-`commentary_truth` (MonthlyReturn), `updated_at` (RbaCashRate, FundMetric),
-`created_at` (AiReport), and `metrics: Mapped[Optional["FundMetric"]]`.
-
-**No field names, column types, nullability, constraints, FKs, cascade rules, or
-relationships were changed.** The model layer is functionally identical to the
-brief. If a later task upgrades the runtime to Python 3.10+, the `Optional[X]`
-forms can be reverted to `X | None` with zero behavioral difference.
-
-This deviation was flagged in the report rather than silently applied, per
-project rule §六 (防范大模型自主决定并悄悄应用 changes to base data/logic).
-
-## TDD Evidence
-
-### RED (Step 2)
-
-Command:
 ```
-cd webapp/backend && python3 -m pytest tests/test_models.py -v
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/test_search.py', '-v']))"
 ```
-Failing output (collection error):
+
+结果：17 passed, 1 warning（0.07s）— 全部通过，无失败。
+
+### 全量测试套件（`tests/`）
+
 ```
-ImportError while importing test module 'tests/test_models.py'.
-tests/test_models.py:5: in <module>
-    from app.models import Fund, MonthlyReturn, Anomaly, RbaCashRate, FundMetric, AiReport
-E   ImportError: cannot import name 'Fund' from 'app.models' (.../app/models.py)
-=========================== short test summary info ============================
-ERROR tests/test_models.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/','-q','--no-header']))"
 ```
-Why expected: Task 1 left `app/models.py` as a 0-byte placeholder so
-`conftest.py`'s `from app import models` would not ImportError. The module
-exists but defines no `Fund`, so the test's `from app.models import Fund` fails.
-This is the correct RED (the brief's literal "ModuleNotFoundError" wording does
-not apply because the module file exists; the task context predicted this exact
-error).
 
-### GREEN (Step 4)
+结果：**2 failed, 352 passed**（176.16s）。失败的两个测试：
 
-Command:
-```
-cd webapp/backend && python3 -m pytest tests/test_models.py tests/test_database.py -v
-```
-Passing output:
-```
-tests/test_models.py::test_insert_fund_and_returns PASSED                [ 14%]
-tests/test_models.py::test_fund_name_unique_constraint PASSED            [ 28%]
-tests/test_models.py::test_apir_code_nullable PASSED                     [ 42%]
-tests/test_models.py::test_monthly_return_unique_date_per_fund PASSED    [ 57%]
-tests/test_models.py::test_cascade_delete_fund_removes_children PASSED   [ 71%]
-tests/test_models.py::test_rba_cash_rate_upsert_style PASSED             [ 85%]
-tests/test_database.py::test_init_db_creates_all_tables PASSED           [100%]
-======================== 7 passed, 7 warnings in 0.03s =========================
-```
-The 7 warnings are all `PytestUnknownMarkWarning` for the unregistered
-`@pytest.mark.unit` marker - harmless and expected per the task context.
+- `tests/test_extract_html.py::test_plotly_shrink_hovertext_anchor_takes_narrow_window`
+- `tests/test_spec_b_wipe_script.py::test_dry_run_lists_targets`
 
-`test_database.py` turned GREEN as a side effect: defining `Fund` means
-`init_db()` now creates the `funds` table, satisfying its assertion. Full suite
-(`python3 -m pytest tests/ -v`) confirms 7/7 passing with no regressions.
+**验证为改名前既存失败，与本次改动无关**：用 `git stash` 把本次改动全部
+暂存回退后，单独重跑这两个测试，结果完全一致（同样 2 failed，报错信息一字
+不差）。`git stash pop` 恢复后确认改动完整无误。这两个测试都不涉及
+`tavily`/`search` 模块（grep 确认测试文件内容无相关字符串），跟本任务无关，
+不在本任务修复范围内。
 
-## Files Changed
+**结论**：改名前后通过数一致（352 passed），无新增失败，符合简报 Step 5
+预期。
 
-- `webapp/backend/app/models.py` - overwrote empty placeholder with 6-model ORM
-  (modified, +~105 lines).
-- `webapp/backend/tests/test_models.py` - new file, verbatim from brief
-  (added, +~107 lines).
+## 变更文件清单
 
-Both committed in `9a7570d`.
+- `llm_ingest/tavily.py` → `llm_ingest/search.py`（git mv，模块头部 docstring 重写第 1-9 行）
+- `tests/test_tavily.py` → `tests/test_search.py`（git mv，import 与 docstring 首行更新）
+- `llm_ingest/discover.py`（1 行 import 改动）
+- `llm_ingest/discover2.py`（1 行 import 改动）
+- `llm_ingest/fundmonitors.py`（1 行 import 改动，`find_fundid_via_tavily` 函数体内）
+- `tools/rotate_proxy.py`（1 处注释路径引用改动，非任务简报列出但全仓库扫描发现）
 
-## Self-Review Findings
+## 自查（Self-Review）
 
-- **Completeness:** All 6 models present with correct fields, PKs, FKs
-  (`ondelete="CASCADE"`), the composite UNIQUE on `(fund_id, date)`,
-  `fund_name` UNIQUE, `apir_code` nullable+UNIQUE, and cascade relationships.
-  `FundMetric` is one-to-one (`uselist=False`). `AiReport` has no FK to funds
-  (denormalized `fund_ids` Text) - matches the brief.
-- **Quality:** Clean, SQLAlchemy 2.0 style (`Mapped`/`mapped_column`/
-  `relationship`/`DeclarativeBase`), Chinese comments preserved, dimension
-  section comments kept verbatim.
-- **Discipline (YAGNI):** No models or fields beyond the brief. The only
-  addition is `from __future__ import annotations` + `from typing import Optional`
-  (justified above).
-- **Testing:** 6/6 model tests pass; `test_database.py` still passes; output
-  pristine (only the unregistered-mark warning).
+- **完整性**：3 处生产 import 已全部改；全仓库 grep
+  `llm_ingest.tavily|from .tavily|import tavily|llm_ingest/tavily`（含 .py 与非
+  .py 文件）确认无残留代码引用，仅剩 `docs/superpowers/specs/`、
+  `docs/superpowers/plans/`、`.superpowers/sdd/task-1-*.md`、
+  `.superpowers/sdd/task-2-brief.md`、`.superpowers/sdd/review-*.diff` 里的历史
+  文档/计划/评审记录提及旧路径——这些是对已完成或计划步骤的历史描述，
+  不应回改（尤其 diff 文件是不可变的评审快照），故未动。
+- **git 历史保留**：`git mv` 完成，`git log --follow` 可追溯到改名前的
+  `tavily.py` 提交历史（rename 相似度检测在 log/show 时按内容计算，与暂存区
+  展示为 A/D 而非 R 无关，不影响历史追溯）。
+- **纪律**：未触碰任何计算/请求逻辑；`_tavily_impl`、`_searxng_impl`、
+  `tavily_search` 分派逻辑、`AGGREGATOR_DOMAINS` 列表内容均逐行核对未改。
+  未提交 `.superpowers/sdd/progress.md`、`task-1-brief.md`、`task-1-report.md`
+  的现有未暂存改动（这些在我开始本任务前就已是脏状态，不属于本任务范围，
+  参考 Task 1 提交 b73ed5f 的先例——该提交也只包含代码+测试文件，不含
+  `.superpowers/sdd/` 下的计划文档）。
+- **测试有效性**：`test_search.py` 的 17 个用例覆盖 `_host_blocked`、
+  `_searxng_impl`、`tavily_search` 后端分派（默认值/环境变量切换）、
+  `_tavily_impl` 未改动行为，均为改名前既有测试，改名后原样通过，证明
+  行为零回归。
 
-## Concerns
+## 关注点
 
-1. **Python 3.9 adaptation** (detailed above): `Optional[X]` substituted for the
-   brief's `X | None`. Functionally identical; flag for awareness and in case a
-   later task standardizes on Python 3.10+.
-2. **No `pytest.ini`/`pyproject.toml` mark registration:** the
-   `@pytest.mark.unit` warnings persist. Not introduced by this task (Task 1's
-   `test_database.py` already uses the same marker). Registering the mark is out
-   of scope for Task 2 but could be a small follow-up.
-3. **`AiReport` is imported but unused** in `test_models.py` - this is verbatim
-   from the brief (the import itself exercises that the class exists). No test
-   currently asserts AiReport behavior; acceptable per the brief.
+无阻塞性问题。仅供参考：仓库里另外两个未追踪文件
+`data/fund_analysis.db.spec_b_backup_20260717_135816`、
+`data/fund_analysis.db.spec_b_task8_backup_20260717_134451`
+与本任务无关（早于本次会话就存在于 git status 中），未做任何处理。

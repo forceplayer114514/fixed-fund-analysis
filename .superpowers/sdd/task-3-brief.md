@@ -1,117 +1,128 @@
-### Task 3: 基础计算函数（年化收益、波动率、最大回撤）
+## Task 3: 【漏洞 10.6】删除「搜索结果里的 .pdf 直接当月报」捷径
+
+**背景（Spec G 10.6）：** `find_archive_via_search`（v1 兜底）在无 `archive_url` 且无 `latest_pdf_url` 时，直接扫搜索结果，**取第一个以 `.pdf` 结尾的 URL 当月报** —— 不抓页面、不校验域名归属、不做内容打样。
+
+实证：Tavily 搜 "Gryphon Capital Income Trust"，排首位的是
+`https://www.pricefinancial.com.au/wp-content/uploads/2024/05/Gryphon-GCI-Mar-Factsheet.pdf`
+—— `pricefinancial.com.au` 是第三方理财顾问站，非发行方，仅转贴该基金资料。该例因文件名无年份、ym 解析失败而侥幸未入库；换成 `GCI-Jun-2026.pdf` 式命名即会入库。
+
+**规矩统一为：搜索层只回答"哪一页"，PDF 链接一律只能来自真实抓取的页面 HTML。**
+
+**已知代价（已确认接受）：** 少数原靠此捷径摸到一份月报的基金将变为该级别 0 链接、继续降级（Wayback → 本地缓存）。0 链接是可见失败会记入 `confirmed_gaps` 交人工；第三方转贴入库是不可见错误、静默污染。
 
 **Files:**
-- Create: `webapp/backend/app/calculations.py`
-- Create: `webapp/backend/tests/test_calculations.py`
+- Modify: `llm_ingest/discover.py:423-427`
+- Test: `tests/test_discover.py`（新增测试类）
 
 **Interfaces:**
-- Produces: `calculate_annualized_return(compounded_return: float, n_months: int, fund_name: str = "Unknown") -> float`、`calculate_annualized_volatility(returns: list[float], fund_name: str = "Unknown") -> float`、`calculate_max_drawdown(nav_series: list[float], fund_name: str = "Unknown") -> float`。行为与现有 `scripts/metrics.py` 完全一致（数值断言复用 `tests/test_metrics.py`）。
+- Consumes: Task 2 的 `from .search import ...`
+- Produces: `find_archive_via_search()` 不再从搜索结果直接取 PDF；其余返回结构不变
 
-- [ ] **Step 1: 写失败测试 tests/test_calculations.py**
+- [ ] **Step 1: 写复现测试（RED）**
 
-```python
-"""基础计算函数测试，断言复用 tests/test_metrics.py 以保证移植精度。"""
-import pytest
-import math
-
-from app.calculations import (
-    calculate_annualized_return,
-    calculate_annualized_volatility,
-    calculate_max_drawdown,
-)
-
-
-@pytest.mark.unit
-def test_calculate_annualized_return():
-    assert calculate_annualized_return(1.1025, 6, "TestFund") == pytest.approx(0.21550625)
-    with pytest.raises(ValueError) as excinfo:
-        calculate_annualized_return(1.05, 0, "TestFund")
-    assert "[TestFund]" in str(excinfo.value) and "n_months=0" in str(excinfo.value)
-
-
-@pytest.mark.unit
-def test_calculate_annualized_volatility():
-    assert calculate_annualized_volatility([0.01, 0.02, 0.03], "TestFund") == pytest.approx(0.03464101615)
-    assert calculate_annualized_volatility([0.01], "TestFund") == 0.0
-    assert calculate_annualized_volatility([], "TestFund") == 0.0
-
-
-@pytest.mark.unit
-def test_calculate_max_drawdown():
-    assert calculate_max_drawdown([100.0, 105.0, 94.5, 91.35, 110.0], "TestFund") == pytest.approx(-0.13)
-    with pytest.raises(ValueError) as excinfo:
-        calculate_max_drawdown([0.0, 10.0], "TestFund")
-    assert "peak=0.0" in str(excinfo.value)
-    assert calculate_max_drawdown([], "TestFund") == 0.0
-```
-
-- [ ] **Step 2: 运行测试验证失败**
-
-Run: `cd webapp/backend && python -m pytest tests/test_calculations.py -v`
-Expected: FAIL（`ModuleNotFoundError: No module named 'app.calculations'`）
-
-- [ ] **Step 3: 实现 app/calculations.py（基础部分）**
+在 `tests/test_discover.py` 末尾追加：
 
 ```python
-"""5维核心指标纯计算函数。无数据库依赖、无网络IO，仅接受 list[float]。
+class TestSearchLayerDoesNotYieldPdfLinks:
+    """Spec G 10.6: 搜索层只回答"哪一页", PDF 链接只能来自真实抓取的页面 HTML。
 
-移植自 scripts/metrics.py 并扩展为5维体系。所有函数保持与原实现数值一致。
-"""
-from __future__ import annotations
+    历史漏洞: v1 兜底直接扫搜索结果取第一个 .pdf 当月报, 不抓页不验域名。
+    实证 Tavily 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au
+    转贴的 factsheet。
+    """
 
+    def test_third_party_pdf_in_search_results_is_not_adopted(self, monkeypatch):
+        from llm_ingest import discover as disc
 
-def calculate_annualized_return(compounded_return: float, n_months: int,
-                                fund_name: str = "Unknown") -> float:
-    """复利年化收益率：(compounded_return) ** (12/n) - 1。"""
-    if n_months <= 0:
-        raise ValueError(f"[{fund_name}] n_months={n_months}, 无法计算年化收益率，时间序列月份数必须为正数")
-    return (compounded_return ** (12.0 / n_months)) - 1.0
+        third_party_pdf = (
+            "https://www.pricefinancial.com.au/wp-content/uploads/"
+            "2024/05/Gryphon-GCI-Jun-2026.pdf"
+        )
+        sources = [third_party_pdf, "https://gcapinvest.com/our-lit"]
 
+        monkeypatch.setattr(disc, "multi_query_search", lambda *a, **k: sources)
 
-def calculate_annualized_volatility(returns: list[float],
-                                    fund_name: str = "Unknown") -> float:
-    """年化波动率：月度收益标准差 * sqrt(12)。"""
-    n = len(returns)
-    if n < 2:
-        return 0.0
-    mean_r = sum(returns) / n
-    denominator = n - 1
-    if denominator <= 0:
-        raise ValueError(f"[{fund_name}] denominator={denominator} (n_months - 1), 无法计算年化波动率")
-    variance = sum((r - mean_r) ** 2 for r in returns) / denominator
-    return (variance * 12.0) ** 0.5
+        # 阶段 B 的 Gemini 判 JSON 返回空 -> 走兜底分支
+        class _FakeResp:
+            text = "{}"
 
+        class _FakeClient:
+            def messages(self, *a, **k):
+                return _FakeResp()
 
-def calculate_max_drawdown(nav_series: list[float],
-                           fund_name: str = "Unknown") -> float:
-    """绝对最大回撤：基于累计NAV序列，返回最深回撤比例（负数）。"""
-    if not nav_series:
-        return 0.0
-    max_dd = 0.0
-    peak = nav_series[0]
-    for nav in nav_series:
-        if nav > peak:
-            peak = nav
-        if peak < 1e-4:
-            raise ValueError(f"[{fund_name}] peak={peak} (低于 1e-4)，无法计算最大回撤，请检查该基金的 NAV 数据是否异常")
-        dd = (nav - peak) / peak
-        if dd < max_dd:
-            max_dd = dd
-    return max_dd
+        ptr = disc.find_archive_via_search(
+            "Gryphon Capital Income Trust", "Gryphon Capital",
+            client=_FakeClient(),
+        )
+
+        assert ptr.latest_pdf_url != third_party_pdf, (
+            "搜索结果里的第三方 PDF 被直接当成月报采纳了 -- "
+            "PDF 链接只能来自真实抓取的页面 HTML"
+        )
 ```
 
-- [ ] **Step 4: 运行测试验证通过**
-
-Run: `cd webapp/backend && python -m pytest tests/test_calculations.py -v`
-Expected: 3 passed
-
-- [ ] **Step 5: 提交**
+- [ ] **Step 2: 跑测试确认失败（RED）**
 
 ```bash
-git add webapp/backend/app/calculations.py webapp/backend/tests/test_calculations.py
-git commit -m "feat(backend): add basic calculation functions (annualized return, volatility, max drawdown)
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/test_discover.py::TestSearchLayerDoesNotYieldPdfLinks','-v']))"
+```
 
-Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+预期：FAIL —— 断言消息为「搜索结果里的第三方 PDF 被直接当成月报采纳了」。
+
+- [ ] **Step 3: 删除 PDF 捷径分支**
+
+`llm_ingest/discover.py`，把 422-447 行这段：
+
+```python
+    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的
+    if not archive_url and not latest_pdf_url and real_sources:
+        # 优先 PDF
+        for s in real_sources:
+            if s.lower().endswith(".pdf"):
+                latest_pdf_url = s
+                break
+        # 其次 domain 下, path 匹配基金关键词的
+        if not latest_pdf_url and final_domain:
+```
+
+改为（**删掉「优先 PDF」那个 for 循环，并把下一段的 `if not latest_pdf_url and final_domain:` 改成 `if final_domain:`**）：
+
+```python
+    # 兜底: 无 archive/latest 但有 sources, 挑相关度最高的**页面**。
+    #
+    # Spec G 10.6: 这里曾有一段"优先 PDF"捷径 -- 直接扫 real_sources 取第一个
+    # 以 .pdf 结尾的 URL 当月报, 不抓页、不验域名归属、不做内容打样。实证 Tavily
+    # 搜 GCI 时首位结果是第三方理财顾问站 pricefinancial.com.au 转贴的 factsheet,
+    # 一旦其文件名能解析出 ym 就会被当作官方月报入库。已删除。
+    #
+    # 统一规矩: 搜索层只回答"哪一页", PDF 链接一律只能来自真实抓取的页面 HTML
+    # (由 discover2.probe_urls 从 <a href> 正则抽取)。
+    if not archive_url and not latest_pdf_url and real_sources:
+        if final_domain:
+```
+
+（该 `if` 块内部的 `fund_tokens` / `best_score` / `best_url` 逻辑与结尾的
+`if best_url: latest_pdf_url = best_url` 保持原样不动 —— 它挑的是同域下的页面，不是搜索结果里的 PDF。）
+
+- [ ] **Step 4: 跑测试确认通过（GREEN）**
+
+```bash
+python3 -c "import pytest,sys; sys.exit(pytest.main(['tests/test_discover.py','-v']))"
+```
+
+预期：新测试 PASS，`test_discover.py` 其余测试无新增失败。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add llm_ingest/discover.py tests/test_discover.py
+git commit -m "fix(discover): 删除搜索结果直接当 PDF 的捷径 (Spec G 10.6)
+
+v1 兜底原会扫搜索结果取第一个 .pdf 当月报, 不抓页不验域名不打样。
+实证 Tavily 搜 GCI 首位结果是第三方站 pricefinancial.com.au 转贴的
+factsheet, 文件名一旦能解析出 ym 即会被当官方月报入库。
+
+统一规矩: 搜索层只回答哪一页, PDF 链接只能来自真实抓取的页面 HTML。"
 ```
 
 ---
