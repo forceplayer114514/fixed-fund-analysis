@@ -643,6 +643,9 @@ class TestWaybackNarrowing:
         return json.dumps(rows)
 
     def test_sibling_fund_pdf_not_used_to_fill_gap(self, monkeypatch):
+        """probe_l2_wayback 内部走 classify_pdf_links, 不传 client 就会用真
+        Client() 打真网络 -- 这里必须打桩, 否则测试结果取决于外部 API 是否可达
+        (2026-07-29 发现: 合并后曾偶发超时/失败)。"""
         from llm_ingest import discover as disc
 
         target = "https://yarracm.com/docs/yarra-enhanced-income-jun-2026.pdf"
@@ -654,6 +657,8 @@ class TestWaybackNarrowing:
 
         hits = disc.probe_l2_wayback(
             "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+            client=SelectStubClient(
+                lambda u: ("2026-06", "jun-2026") if u == target else None),
         )
         urls = [u for _ym, u in hits]
 
@@ -672,6 +677,7 @@ class TestWaybackNarrowing:
 
         hits = disc.probe_l2_wayback(
             "yarracm.com", {"2026-06"}, "Yarra Enhanced Income Fund",
+            client=SelectStubClient(lambda u: None),
         )
 
         assert hits == [], "PDS 不是月度业绩报告, 不得用来填缺口"
