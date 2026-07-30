@@ -77,6 +77,35 @@ def test_delete_fund_cascades_pending_review_and_confirmed_gaps_with_fk_pragma()
 
 
 @pytest.mark.unit
+def test_delete_fund_removes_pdf_cache_dir(db_session, tmp_path, monkeypatch):
+    """delete_fund 须清掉磁盘 PDF 缓存目录, 否则同 fund_id 重新添加时摄取
+    流程会把残留旧 PDF 当缓存复用 (2026-07 发现, 见 crud.py::PDF_ROOT 注释)。
+    """
+    import app.crud as crud_mod
+    monkeypatch.setattr(crud_mod, "PDF_ROOT", tmp_path)
+
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    fund_dir = tmp_path / "f1"
+    fund_dir.mkdir()
+    (fund_dir / "2026-05.pdf").write_bytes(b"stub")
+
+    assert delete_fund(db_session, "f1") is True
+    assert not fund_dir.exists()
+
+
+@pytest.mark.unit
+def test_delete_fund_no_pdf_cache_dir_is_noop(db_session, tmp_path, monkeypatch):
+    """没有对应 PDF 缓存目录时 (从没摄取过就删) 不报错。"""
+    import app.crud as crud_mod
+    monkeypatch.setattr(crud_mod, "PDF_ROOT", tmp_path)
+
+    create_fund(db_session, fund_id="f1", fund_name="Fund One",
+                confirmed_url="http://x", fetch_method="pdf", url_type="pdf")
+    assert delete_fund(db_session, "f1") is True
+
+
+@pytest.mark.unit
 def test_upsert_monthly_return_recompute_nav(db_session):
     """upsert 后 NAV 自动重算：3个月收益 [0.01, 0.02, 0.03] -> NAV [1.01, 1.0302, 1.061306]。"""
     create_fund(db_session, fund_id="f1", fund_name="Fund One",

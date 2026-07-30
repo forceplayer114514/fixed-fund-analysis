@@ -12,11 +12,13 @@ job 用 threading (BackgroundTasks 会阻塞后续请求处理).
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -87,29 +89,120 @@ def _rendered_pdf_filename(url: str) -> str:
     return f"_rendered_{h}.pdf"
 
 
-def _upsert_fund_preserving_url_type(conn, store_mod, fund_id: str, fund_name: str,
-                                     req: IngestRequest) -> None:
-    """upsert_fund, 但保留已有 url_type (不被 upsert_fund 默认 'archive' 覆盖
-    Coolabah 类 performance_report_html/csv)。
-
-    start_ingest (请求处理同步代码, 让新行立刻对 GET /api/funds 可见, 否则
-    表格状态列的角标找不到归属行) 和 _run_ingest_job (worker 线程, 补全
-    confirmed_url/apir_code 等) 两处都要用, 抽出来避免各写一份 preserve 逻辑。
+def _rename_pdf_dir(old_dir: Path, new_dir: Path) -> None:
+    """自动纠名把 old_dir 併入 new_dir. new_dir 不存在时直接 rename (原语义);
+    已存在且非空时 (2026-07 发现: 同一 fund_id 早年摄取或 git 追踪的历史缓存
+    残留恰好占了目标目录名) 逐文件搬, 同名文件保留 new_dir 里已有的那份 --
+    它已经是在这个 fund_id 下确认过的缓存, 比来源不明的 old_dir 同名文件更
+    可信。原来直接 old_dir.rename(new_dir) 遇目标非空目录会抛
+    OSError: Directory not empty, 整个摄取 job 崩溃。
     """
-    cu = req.confirmed_url or req.issuer_domain or ""
+    if not new_dir.exists():
+        old_dir.rename(new_dir)
+        return
+    for item in old_dir.iterdir():
+        dest = new_dir / item.name
+        if dest.exists():
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+        else:
+            shutil.move(str(item), str(dest))
+    old_dir.rmdir()
+
+
+def _log_discovery_detail(jid: str, rep: Any) -> None:
+    """把 discovery 每一步看到了什么写进 job 日志.
+
+    2026-07-29: 上一次偶发失败时日志只有 "run_discovery: issuer=..." 紧跟
+    "discovery: 1 links", 中间一片空白 -- 搜索引擎答了哪个地址、那页抓成功没有、
+    页内几条 PDF 链接、判出几个月、有没有走中转页/导航, 全都看不到, 只能靠事后
+    推断, 而两种完全不同的故障 (答案位填偏 vs 抓页瞬时失败) 在这段日志里长得
+    一模一样。排查一次偶发故障不该靠猜。
+    """
+    ptr = getattr(rep, "archive_pointer", None)
+    if ptr is None:
+        return
+    raw = ptr.raw or {}
+    loc = raw.get("locate") or {}
+
+    if loc.get("grok_name_variants"):
+        _job_log(jid, f"grok 两次输入名: {loc['grok_name_variants']}")
+    for i, att in enumerate(loc.get("grok_attempts") or [], 1):
+        if att.get("error"):
+            _job_log(jid, f"grok #{i}: 失败 {att['error']}")
+        else:
+            _job_log(jid, f"grok #{i}: {att.get('archive_url')}")
+    if loc.get("grok_attempts"):
+        _job_log(jid, f"grok 两次答案一致: {bool(loc.get('grok_agreed'))}")
+
+    for pr in raw.get("probes") or []:
+        _job_log(jid, f"候选页 {pr.get('url')}: "
+                      f"PDF 链接 {pr.get('pdf_count')} 条, "
+                      f"中转链接 {pr.get('nav_count')} 条, "
+                      f"判出 {pr.get('monthly_count')} 个月"
+                      + (f", 错误={pr['error']}" if pr.get("error") else ""))
+    for frm, to in raw.get("nav_hops") or []:
+        _job_log(jid, f"跳转: {frm} -> {to}")
+    if ptr.evidence:
+        _job_log(jid, f"定位结论: {ptr.evidence}")
+
+
+def _upsert_fund_preserving_existing(conn, store_mod, fund_id: str, fund_name: str,
+                                     req: IngestRequest) -> None:
+    """upsert_fund, 但保留已有 url_type 与 confirmed_url。
+
+    upsert_fund 的 ON CONFLICT 对这两列都是无条件 `= excluded.*` 覆盖, 所以这里
+    必须先读回来再传, 否则:
+      - url_type: Coolabah 类 performance_report_html/csv 被默认值 'archive' 覆盖
+      - confirmed_url: 上一轮 discovery 存回的归档页地址 (见 _remember_archive_url)
+        会被这次请求里空着的同名字段清掉, 每次更新又得从零重搜一遍
+
+    confirmed_url 不再拿 issuer_domain 兜底。这个字段的语义是"已确认的归档页",
+    塞一个域名根进去会让"更新数据"那条通路直接去解析发行商首页 -- 首页当然没有
+    月报 PDF, 于是 0 links 硬失败。issuer_domain 是搜索用的线索, 本来就单独传给
+    run_discovery, 不该顶替归档页地址。
+
+    start_ingest (请求处理同步代码, 让新行立刻对 GET /api/funds 可见, 否则表格
+    状态列的角标找不到归属行) 和 _run_ingest_job (worker 线程) 两处都要用。
+    """
     existing_row = conn.execute(
-        "SELECT url_type FROM funds WHERE fund_id=?", (fund_id,)
+        "SELECT url_type, confirmed_url FROM funds WHERE fund_id=?", (fund_id,)
     ).fetchone()
     preserve_url_type = (existing_row[0] if existing_row else None) or "archive"
+    preserve_cu = (existing_row[1] if existing_row else None) or ""
     store_mod.upsert_fund(
         conn,
         fund_id=fund_id,
         fund_name=fund_name,
-        confirmed_url=cu,
+        confirmed_url=req.confirmed_url or preserve_cu,
         url_type=preserve_url_type,
         apir_code=req.apir_code,
         max_pdf_pages=req.max_pdf_pages,
     )
+
+
+def _remember_archive_url(conn, fund_id: str, archive_url: Optional[str]) -> bool:
+    """把 discovery 找到的归档页地址存回 funds.confirmed_url.
+
+    存回后, 下次"更新数据"直接抓这一页 + 判一次链接清单即可, 不必再跑一轮搜索
+    引擎 -- 既省钱, 也去掉"这次 Grok 会不会给到另一个页面"这个不确定性 (同一支
+    基金两次更新落到不同页面, 缺口记录会来回变)。
+
+    只在当前值为空时写, 不覆盖用户在前端明确填过的地址。
+    """
+    if not archive_url:
+        return False
+    row = conn.execute(
+        "SELECT confirmed_url FROM funds WHERE fund_id=?", (fund_id,)
+    ).fetchone()
+    if row is None or (row[0] or "").strip():
+        return False
+    conn.execute("UPDATE funds SET confirmed_url=? WHERE fund_id=?",
+                 (archive_url, fund_id))
+    conn.commit()
+    return True
 
 
 def _import_llm_ingest_store():
@@ -193,7 +286,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             _mig_b.apply(conn)
         except Exception:  # noqa: BLE001
             pass
-        _upsert_fund_preserving_url_type(conn, store_mod, req.fund_id, req.fund_name, req)
+        _upsert_fund_preserving_existing(conn, store_mod, req.fund_id, req.fund_name, req)
         _job_log(jid, f"upsert_fund: {req.fund_id}")
 
         # ---- L1: fundmonitors 主源 (Spec B 反转优先级) ----
@@ -237,11 +330,10 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         old_id = req.fund_id
                         req = req.model_copy(update={"fund_id": new_id, "fund_name": page_fund_name})
                         _job_update(jid, fund_id=new_id)
-                        from pathlib import Path as _Path
-                        old_dir = _Path(llm_cli.PDF_ROOT) / old_id
-                        new_dir = _Path(llm_cli.PDF_ROOT) / new_id
+                        old_dir = Path(llm_cli.PDF_ROOT) / old_id
+                        new_dir = Path(llm_cli.PDF_ROOT) / new_id
                         if old_dir.exists():
-                            old_dir.rename(new_dir)
+                            _rename_pdf_dir(old_dir, new_dir)
                         _job_log(jid, f"renamed: {old_id} -> {new_id}")
                     else:
                         _job_log(jid, f"rename_skipped: {new_id} 已被占用")
@@ -261,6 +353,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
         # ---- L2: 官网 discovery + 循环 (原 L1 通路降级为 L2) ----
         _job_update(jid, state="discovering_l2_pdf")
         links: List[tuple] = []
+        discovery_rep = None  # run_discovery 的报告, 摄取循环之后才用得上
         # Spec D: 单文件多月 HTML/CSV 场景 (Coolabah Plotly 类)
         # 预抓一次, 缓存到 payload_cache; 每月复用
         payload_cache: Dict[str, str] = {}  # url -> text (CSV)
@@ -331,10 +424,32 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 html = disc_mod._fetch(req.confirmed_url)
                 if not html:
                     raise ValueError(f"无法抓取归档页 {req.confirmed_url}")
-                parsed_links, has_more, hint, unp = disc_mod.parse_archive_page(html)
+                # base_url 必传: 缺了它页内相对 href 无法还原成绝对地址, 链接清单
+                # 直接为空。原来这里就没传 (2026-07 发现), 于是"更新数据"这条通路
+                # 恒走旧的 LLM 读 80KB HTML 分支, 且 whitelist=None 连"LLM 不许编
+                # URL" 的校验都被跳过 -- Stake 归档页 149KB, PDF 链接全在 8.3 万
+                # 字节之后, 截断后模型一个都看不到, 每次更新必返 0 links。
+                parsed_links, has_more, hint, unp = disc_mod.parse_archive_page(
+                    html, fund_name=req.fund_name, base_url=req.confirmed_url)
                 links = [(str(ym), str(url)) for ym, url in parsed_links]
                 _job_log(jid, f"parse_archive: {len(links)} links, unparseable={unp}, more_pages={has_more}")
-        else:
+                if not links:
+                    # 存的归档页失效 (发行商改版/换路径/该页本就不是归档) -> 回退
+                    # 重新搜索, 而不是硬失败。confirmed_url 多数是上一轮 discovery
+                    # 自己存回来的 (见 _remember_archive_url), 它过期是正常事件,
+                    # 不该让"更新数据"从此永久失败; 顺带让历史遗留的坏值自愈。
+                    _job_log(jid, "归档页无月报链接, 回退 run_discovery 重新定位")
+                    conn.execute(
+                        "UPDATE funds SET confirmed_url='' WHERE fund_id=?",
+                        (req.fund_id,))
+                    conn.commit()
+                    req = req.model_copy(update={"confirmed_url": None})
+
+        # 原来这里是上面那个 if 的 else 分支。改成独立条件, 才能接住"存的归档页
+        # 已失效 -> 清掉 confirmed_url -> 本轮就重新搜索"这条自愈路径 (else 分支
+        # 在同一轮里永远不会被执行到)。single_file_multi_month (Coolabah 类) 不
+        # 清 confirmed_url, 因此不会误入这里。
+        if not req.confirmed_url and not links:
             issuer_for_search = req.issuer or req.fund_name
             _job_log(jid, f"run_discovery: issuer={issuer_for_search}")
             rep = disc_mod.run_discovery(
@@ -356,23 +471,11 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                         f"engine fallback: {_loc['engine_requested']} -> "
                         f"{_loc['engine_used']} ({_loc.get('fallback_reason', '')})",
                     )
+            _log_discovery_detail(jid, rep)
             _job_log(jid, f"discovery: {len(links)} links, gaps={len(rep.gaps)}")
-
-            # rep.gaps 是 discovery 阶段就确定"预期月份里压根没找到任何 PDF 链接"
-            # 的月份 (expected - obtained 集合差) -- 与下面 per-link 循环里的
-            # record_confirmed_gap (下载失败/抓取失败等, 只覆盖已有链接的月份)
-            # 是互斥的两类缺口, 谁都不会覆盖这些月份, 之前从未被记进
-            # confirmed_gaps, 违反 CLAUDE.md 零容忍规则 (2026-07 Stake 2025-09
-            # 缺口静默漏记事故)。若之后 L2 触发自动纠名, rename_fund_id 会把
-            # confirmed_gaps 整表迁到新 fund_id, 这里不用等纠名完成再记。
-            if links:
-                for _gap_ym in rep.gaps:
-                    store_mod.record_confirmed_gap(
-                        conn, fund_id=req.fund_id, missing_month=_gap_ym,
-                        exhausted_levels="no_link_found",
-                    )
-                if rep.gaps:
-                    _job_log(jid, f"discovery gaps 记入 confirmed_gaps: {len(rep.gaps)} 月")
+            # 记住归档页地址 与 记录 discovery 缺口 都挪到摄取循环之后 (见那里),
+            # 因为这两件事都只有在"这一轮真入库了月度数据"之后才站得住脚。
+            discovery_rep = rep
 
         if not links:
             conn.close()
@@ -547,7 +650,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                             _job_update(jid, fund_id=new_id)
                             old_dir, new_dir = pdf_dir, Path(llm_cli.PDF_ROOT) / new_id
                             if old_dir.exists():
-                                old_dir.rename(new_dir)
+                                _rename_pdf_dir(old_dir, new_dir)
                             pdf_dir = new_dir
                             _job_log(jid, f"renamed: {old_id} -> {new_id}")
                         else:
@@ -574,6 +677,39 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             )
             stats[dec.action] = stats.get(dec.action, 0) + 1
             _job_log(jid, f"[{i}/{len(links)}] {ym} [{channel}] {dec.action} {dec.gate_summary}")
+
+        # ---- 摄取循环之后才做的两件事 (2026-07-29 事故) ----
+        # 那次: discovery 只判出 1 条链接 (且是误判的营销页), 却已经
+        #   (a) 把该营销页所在的支持页记成归档页 -> 下次更新直奔坏页, 永久卡住
+        #   (b) 凭这条误判链接的月份当序列起点, 把之后 16 个月写成 no_link_found
+        # 而这一轮实际入库 0 个月 (那条"链接"是网页, 下载必然失败)。
+        # 两件事都需要"这一轮真入库了月度数据"作前提: 没入到任何数据, 说明我们对
+        # 这支基金什么都还没确认, 既不该记住来源, 更不该断言哪些月份不存在
+        # (CLAUDE.md 一.3: 缺口零容忍, 而把"我们没弄成"写成"发行商没发布"是最坏的
+        # 一种缺口污染 -- 它看起来像已核实的结论)。
+        if discovery_rep is not None and stats.get("monthly", 0) > 0:
+            _arch = (discovery_rep.archive_pointer.archive_url
+                     if discovery_rep.archive_pointer else None)
+            if _remember_archive_url(conn, req.fund_id, _arch):
+                _job_log(jid, f"归档页地址已记住: {_arch}")
+
+            # discovery_rep.gaps 是"预期区间里压根没找到任何 PDF 链接"的月份
+            # (expected - obtained 集合差) -- 与循环里的 record_confirmed_gap
+            # (下载失败/提取失败等, 只覆盖有链接的月份) 是互斥的两类缺口, 谁都
+            # 不覆盖这些月份, 之前从未被记进 confirmed_gaps (2026-07 Stake
+            # 2025-09 缺口静默漏记事故)。若本 job 触发过自动纠名, rename_fund_id
+            # 已把 confirmed_gaps 整表迁到新 fund_id, req.fund_id 也已更新。
+            for _gap_ym in discovery_rep.gaps:
+                store_mod.record_confirmed_gap(
+                    conn, fund_id=req.fund_id, missing_month=_gap_ym,
+                    exhausted_levels="no_link_found",
+                )
+            if discovery_rep.gaps:
+                _job_log(jid, f"discovery gaps 记入 confirmed_gaps: "
+                              f"{len(discovery_rep.gaps)} 月")
+        elif discovery_rep is not None and discovery_rep.gaps:
+            _job_log(jid, f"本轮未入库任何月度数据, {len(discovery_rep.gaps)} 个"
+                          f"缺口不记入 confirmed_gaps (未经证实)")
 
         conn.close()
         _job_update(jid, stats=stats)
@@ -612,7 +748,7 @@ def start_ingest(req: IngestRequest):
     # upsert_fund 之前的整段时间里找不到归属行, 新加的基金看起来"消失"了。
     conn = store_mod.open_conn()
     store_mod.ensure_tables_if_missing(conn)
-    _upsert_fund_preserving_url_type(conn, store_mod, fund_id, fund_name, req)
+    _upsert_fund_preserving_existing(conn, store_mod, fund_id, fund_name, req)
     conn.close()
 
     jid = _job_new(fund_id)

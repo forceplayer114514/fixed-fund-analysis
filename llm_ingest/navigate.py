@@ -201,7 +201,7 @@ def navigate_one_hop(
       client: Gemini 客户端
 
     返回 (next_url, next_html, pdf_urls). 任一步失败 -> (None, None, []).
-    调用方负责在 pdf_urls 上跑 confirm_pdf_is_monthly_report 打样.
+    调用方负责把 pdf_urls 交 discover.classify_pdf_links 判定.
     """
     _ = issuer_domain  # placeholder, 现用 start_url 的域
     # 循环 / 上限守卫: visited 已到 MAX_TOTAL_FETCHES 说明本轮 discovery 抓太多次
