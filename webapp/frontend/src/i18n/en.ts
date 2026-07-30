@@ -37,4 +37,10 @@ export const en: Record<keyof typeof cn, string> = {
   'chart.spliceTip': '{name}: splice base point, equal to the anchor fund cumulative value at {month}; from the next month onward this is the fund own return',
   'chart.insufficientHistory': '{name} (less than 12 months of history)',
   'chart.anchorHint': 'Anchor mode shows the full history of the anchored fund · click the line again to release the anchor',
+
+  'heatmap.title': 'Monthly excess return heatmap',
+  'heatmap.year': 'Year',
+  'heatmap.cellNoData': '{ym}: no data',
+  'heatmap.cellTip': '{ym}\nFund monthly return: {fund}%\nBenchmark monthly return: {bench}%\nExcess: {excess}%',
+  'heatmap.legend': 'Color scale: blue = positive excess, red = negative excess, gray = no data (colorblind-friendly pair); shade intensity is clipped at the 90th percentile for this fund (a single crisis month does not monopolize full saturation); hover a cell to see the raw fund/benchmark/excess returns. Doubles as a data-quality check view.',
 }

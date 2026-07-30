@@ -2,10 +2,14 @@ import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { monthlyExcess, monthlyBench, computeAxisMonths, percentile, type FundReturns } from '../lib/rebase'
 import { buildShortCodeMap } from '../lib/fundCodes'
+import { useChartTheme } from '../theme/useChartTheme'
+import { useT } from '../i18n/useT'
 
 /** 月度超额热力图（PDD 2.6）：仅锚定时渲染于 CompareTable 下方。
  *  单元格 e_t = r_fund − monthlyBench(rba)（与 Phase 1 管道口径一致）；缺月灰格；发散色标 0 中心。 */
 export default function ExcessHeatmap() {
+  const palette = useChartTheme()
+  const t = useT()
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const anchorFundId = useStore(s => s.anchorFundId)
   const smoothingMode = useStore(s => s.smoothingMode)
@@ -44,15 +48,16 @@ export default function ExcessHeatmap() {
       .map(p => Math.abs(p.excess as number))
       .sort((a, b) => a - b)
     const m = Math.max(percentile(absVals, 0.9), 0.0001)
-    // 蓝(正超额)/红(负超额)——红绿色盲验证过的发散色对(blue #2a78d6 / red #e34948,
-    // CVD ΔE 21.6 protan，远超≥8门槛)，替换掉原来红绿色对(色盲下几乎无法区分)。
+    // 蓝(正超额)/红(负超额)——红绿色盲验证过的发散色对，基色随主题切换(palette.heatPos/heatNeg)。
+    // 缺月格用 sunken 底(palette.heatEmpty)：它代表禁插值的真实缺口，视觉权重必须低于
+    // 有数据的格子——不透明的中性色，而不是"淡色数值"，避免被误读成"接近零收益"。
     const cellColor = (e: number | null): string => {
-      if (e == null) return '#f0f0f0' // 缺月灰格（禁插值填色）
+      if (e == null) return palette.heatEmpty // 缺月 sunken 底（禁插值填色）
       const a = Math.min(Math.abs(e) / m, 1) // 超过 90 分位裁剪到满色，不再无限稀释
-      return e >= 0 ? `rgba(42,120,214,${a})` : `rgba(227,73,72,${a})`
+      return e >= 0 ? `rgba(${palette.heatPos} / ${a})` : `rgba(${palette.heatNeg} / ${a})`
     }
     return { years, byKey, cellColor }
-  }, [timeSeriesData, anchorFundId, smoothingMode, selectedFundIds])
+  }, [timeSeriesData, anchorFundId, smoothingMode, selectedFundIds, palette])
 
   if (!rows || !anchorFundId) return null
   const months = Array.from({ length: 12 }, (_, i) => i + 1)
@@ -60,34 +65,40 @@ export default function ExcessHeatmap() {
   const fundCode = codeMap.get(anchorFundId) ?? anchorFundId
 
   return (
-    <div className="bg-white rounded-lg p-5 shadow-sm mb-5">
-      <h3 className="text-sm text-gray-400 mb-3">
-        月度超额热力图 · <span className="text-gray-700 font-medium" title={fundName}>{fundCode}</span>
+    <div className="card p-5 mb-5">
+      <h3 className="text-sm text-fg-subtle mb-3">
+        {t('heatmap.title')} · <span className="text-fg font-medium" title={fundName}>{fundCode}</span>
       </h3>
       <div className="overflow-x-auto">
         <table className="text-xs border-collapse">
           <thead>
             <tr>
-              <th className="py-1.5 px-2 text-gray-500 font-medium text-left">年</th>
+              <th className="py-1.5 px-2 text-fg-muted font-medium text-left">{t('heatmap.year')}</th>
               {months.map(mn => (
-                <th key={mn} className="py-1.5 px-2 text-gray-500 font-medium w-12 text-center">{mn}</th>
+                <th key={mn} className="py-1.5 px-2 text-fg-muted font-medium w-12 text-center">{mn}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {rows.years.map(y => (
               <tr key={y}>
-                <td className="py-1 px-2 text-gray-600 font-medium">{y}</td>
+                <td className="py-1 px-2 text-fg-muted font-medium">{y}</td>
                 {months.map(mn => {
                   const p = rows.byKey.get(`${y}-${mn}`)
                   const e = p?.excess ?? null
+                  const ym = `${y}-${String(mn).padStart(2, '0')}`
                   const title = e == null
-                    ? `${y}-${String(mn).padStart(2, '0')}：无数据`
-                    : `${y}-${String(mn).padStart(2, '0')}\n基金月收益: ${((p!.fundReturn as number) * 100).toFixed(3)}%\n基准月收益: ${((monthlyBench(p!.rbaRate as number)) * 100).toFixed(3)}%\n超额: ${(e * 100).toFixed(3)}%`
+                    ? t('heatmap.cellNoData', { ym })
+                    : t('heatmap.cellTip', {
+                        ym,
+                        fund: ((p!.fundReturn as number) * 100).toFixed(3),
+                        bench: (monthlyBench(p!.rbaRate as number) * 100).toFixed(3),
+                        excess: (e * 100).toFixed(3),
+                      })
                   return (
                     <td key={mn} className="p-0.5">
                       <div
-                        className="w-12 h-7 rounded-sm border border-white"
+                        className="w-12 h-7 rounded-sm border border-surface"
                         style={{ backgroundColor: rows.cellColor(e) }}
                         title={title}
                       />
@@ -99,8 +110,8 @@ export default function ExcessHeatmap() {
           </tbody>
         </table>
       </div>
-      <div className="text-xs text-gray-400 mt-2">
-        色标：蓝=正超额、红=负超额、灰=无数据（红绿色盲友好配色）；深浅按该基金 90 分位裁剪（危机月不独占满色）；单元格 hover 见原始月收益/基准/超额。兼数据质检视图。
+      <div className="text-xs text-fg-subtle mt-2">
+        {t('heatmap.legend')}
       </div>
     </div>
   )

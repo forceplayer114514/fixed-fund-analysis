@@ -40,4 +40,10 @@ export const cn = {
   'chart.spliceTip': '{name}：拼接基点，等于锚定基金 {month} 累计值，次月起为该基金自身收益',
   'chart.insufficientHistory': '{name}（历史不足12个月）',
   'chart.anchorHint': '锚定模式下展示锚定基金完整历史 · 再次点击曲线取消锚定',
+
+  'heatmap.title': '月度超额热力图',
+  'heatmap.year': '年',
+  'heatmap.cellNoData': '{ym}：无数据',
+  'heatmap.cellTip': '{ym}\n基金月收益: {fund}%\n基准月收益: {bench}%\n超额: {excess}%',
+  'heatmap.legend': '色标：蓝=正超额、红=负超额、灰=无数据（红绿色盲友好配色）；深浅按该基金 90 分位裁剪（危机月不独占满色）；单元格 hover 见原始月收益/基准/超额。兼数据质检视图。',
 } as const
