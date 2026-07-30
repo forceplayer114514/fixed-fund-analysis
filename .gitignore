@@ -21,3 +21,6 @@ data/*.db.bak-*
 
 # git worktrees (本地隔离工作区)
 .worktrees/
+
+# SDD 临时工作区草稿 (task brief/report/diff, 不入库)
+.superpowers/sdd-frontend/
