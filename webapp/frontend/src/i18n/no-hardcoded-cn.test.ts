@@ -17,6 +17,11 @@ const modules = {
  */
 const PENDING_FILES: string[] = [
   'pages/FundManagement.tsx',
+  'pages/funds/AddFundPanel.tsx',
+  'pages/funds/FundDataDrawer.tsx',
+  'pages/funds/FundTable.tsx',
+  'pages/funds/IngestJobPanel.tsx',
+  'pages/funds/PendingReviewPanel.tsx',
 ]
 
 /** 剥掉块注释与行注释；注释里的中文是允许的（说明代码用）。 */
