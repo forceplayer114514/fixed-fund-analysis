@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import css from '../index.css?raw'
+import { CHART_TOKEN_MAP, chartPalettes } from './chartTheme'
 
 /** 解析 index.css 里的 `:root {...}` / `:root.dark {...}` 变量块。 */
 export function parseCssVars(css: string, selector: string): Record<string, string> {
@@ -53,5 +54,35 @@ describe('index.css 设计 token', () => {
       expect(vars['--heat-pos']).toMatch(/^\d{1,3} \d{1,3} \d{1,3}$/)
       expect(vars['--heat-neg']).toMatch(/^\d{1,3} \d{1,3} \d{1,3}$/)
     }
+  })
+})
+
+describe('chartTheme 与 index.css 对拍（防漂移）', () => {
+  const vars = { light: parseCssVars(css, ':root'), dark: parseCssVars(css, ':root.dark') }
+
+  it.each(['light', 'dark'] as const)('%s：非序列字段值与 CSS 变量一致', theme => {
+    const mismatched = Object.entries(CHART_TOKEN_MAP)
+      .filter(([field, token]) => {
+        const expected = vars[theme][token]
+        const actual = chartPalettes[theme][field as keyof typeof CHART_TOKEN_MAP]
+        return expected !== actual
+      })
+      .map(([field, token]) => `${theme}.${field}: chartTheme="${
+        chartPalettes[theme][field as keyof typeof CHART_TOKEN_MAP]
+      }" vs ${token}="${vars[theme][token]}"`)
+    expect(mismatched).toEqual([])
+  })
+
+  it.each(['light', 'dark'] as const)('%s：8 条序列色与 --series-1..8 一致', theme => {
+    expect(chartPalettes[theme].series).toHaveLength(8)
+    const mismatched = chartPalettes[theme].series
+      .map((c, i) => (c === vars[theme][`--series-${i + 1}`] ? null : `series[${i}]=${c}`))
+      .filter(Boolean)
+    expect(mismatched).toEqual([])
+  })
+
+  it('CHART_TOKEN_MAP 引用的 token 都在 CSS 里存在', () => {
+    const missing = Object.values(CHART_TOKEN_MAP).filter(tk => !vars.light[tk] || !vars.dark[tk])
+    expect(missing).toEqual([])
   })
 })
