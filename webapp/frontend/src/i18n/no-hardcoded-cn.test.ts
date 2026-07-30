@@ -15,14 +15,7 @@ const modules = {
  * 尚未迁移到字典的文件。每完成一个文件的 i18n 改造就从这里删掉它。
  * Task 14 会断言此数组为空 —— 空数组之后，任何新页面写死中文都会让本测试报红。
  */
-const PENDING_FILES: string[] = [
-  'pages/FundManagement.tsx',
-  'pages/funds/AddFundPanel.tsx',
-  'pages/funds/FundDataDrawer.tsx',
-  'pages/funds/FundTable.tsx',
-  'pages/funds/IngestJobPanel.tsx',
-  'pages/funds/PendingReviewPanel.tsx',
-]
+const PENDING_FILES: string[] = []
 
 /** 剥掉块注释与行注释；注释里的中文是允许的（说明代码用）。 */
 function stripComments(code: string): string {

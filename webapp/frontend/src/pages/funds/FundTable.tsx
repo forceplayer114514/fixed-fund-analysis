@@ -1,4 +1,5 @@
 import type { Fund } from '../../types'
+import { useT } from '../../i18n/useT'
 
 interface FundTableProps {
   funds: Fund[]
@@ -33,64 +34,74 @@ export default function FundTable({
   onOpenReview,
   onOpenData,
 }: FundTableProps) {
+  const t = useT()
   return (
-    <div className="bg-white rounded-lg shadow-sm overflow-hidden">
+    <div className="card overflow-hidden">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b-2 border-gray-100 bg-gray-50">
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">基金 ID</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">基金名称</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">数据源基金名</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">APIR</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">数据截止</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">数据状态</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">实时状态</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">待审</th>
-            <th className="text-left py-3 px-4 text-gray-500 font-medium">操作</th>
+          <tr>
+            <th className="th text-left py-3 px-4">{t('funds.colId')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colName')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colSourceName')}</th>
+            <th className="th text-left py-3 px-4">APIR</th>
+            <th className="th text-left py-3 px-4">{t('funds.colDataThrough')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colDataStatus')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colLiveStatus')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colPending')}</th>
+            <th className="th text-left py-3 px-4">{t('funds.colActions')}</th>
           </tr>
         </thead>
         <tbody>
           {funds.map(f => (
-            <tr key={f.fund_id} className={`border-b border-gray-50 ${f.is_hidden ? 'bg-gray-50 opacity-60' : f.gap_count > 0 ? 'bg-red-50' : 'hover:bg-gray-50'}`}>
-              <td className="py-3 px-4 text-gray-500 text-xs">{f.fund_id}</td>
-              <td className="py-3 px-4 font-medium">
+            <tr
+              key={f.fund_id}
+              className={`border-b border-border ${
+                f.is_hidden
+                  ? 'bg-sunken opacity-60'
+                  : f.gap_count > 0
+                    ? 'bg-neg-soft'
+                    : 'even:bg-sunken hover:bg-accent-soft'
+              }`}
+            >
+              <td className="py-3 px-4 text-fg-muted text-xs">{f.fund_id}</td>
+              <td className="py-3 px-4 font-medium text-fg">
                 {f.fund_name}
                 {f.is_hidden && (
-                  <span className="ml-1.5 text-xs text-gray-400 font-normal">(已隐藏)</span>
+                  <span className="ml-1.5 text-xs text-fg-subtle font-normal">{t('funds.hiddenTag')}</span>
                 )}
               </td>
               <td
                 className={
                   f.discovered_source_name
                     && f.discovered_source_name !== f.fund_name
-                    ? "py-3 px-4 text-red-600 font-semibold"
-                    : "py-3 px-4 text-gray-500"
+                    ? "py-3 px-4 text-neg font-semibold"
+                    : "py-3 px-4 text-fg-muted"
                 }
                 title={
                   f.discovered_source_name
                     && f.discovered_source_name !== f.fund_name
-                    ? `输入名: ${f.fund_name}\n抓到名: ${f.discovered_source_name}\n请核对是否为同一基金`
+                    ? t('funds.nameCheckTip', { input: f.fund_name, discovered: f.discovered_source_name })
                     : undefined
                 }
               >
                 {f.discovered_source_name ?? '—'}
               </td>
-              <td className="py-3 px-4 text-gray-500">{f.apir_code ?? '—'}</td>
-              <td className="py-3 px-4 text-gray-500">{f.data_cutoff_month ?? '—'}</td>
+              <td className="py-3 px-4 text-fg-muted">{f.apir_code ?? '—'}</td>
+              <td className="py-3 px-4 text-fg-muted">{f.data_cutoff_month ?? '—'}</td>
               <td className="py-3 px-4">
                 {f.gap_count > 0 ? (
-                  <span className="text-red-600 text-xs font-medium">缺 {f.gap_count} 月</span>
+                  <span className="text-neg text-xs font-medium">{t('funds.gapMonths', { n: f.gap_count })}</span>
                 ) : (
-                  <span className="text-green-600 text-xs">完整</span>
+                  <span className="text-pos text-xs">{t('funds.statusComplete')}</span>
                 )}
               </td>
               <td className="py-3 px-4">
                 {(() => {
                   const st = activeJobs[f.fund_id]
-                  if (!st) return <span className="text-gray-300 text-xs">—</span>
-                  const label = st === 'ingesting_l2_pdf' ? '提取中' : '搜索中'
+                  if (!st) return <span className="text-fg-subtle text-xs">—</span>
+                  const label = st === 'ingesting_l2_pdf' ? t('funds.statusExtracting') : t('funds.statusSearching')
                   return (
-                    <span className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-0.5">
+                    <span className="text-xs text-accent bg-accent-soft rounded px-2 py-0.5">
                       {label}
                     </span>
                   )
@@ -99,60 +110,60 @@ export default function FundTable({
               <td className="py-3 px-4">
                 {f.pending_count > 0 ? (
                   <button
-                    className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 hover:bg-amber-100"
+                    className="text-xs text-warn bg-warn-soft border border-warn-border rounded px-2 py-0.5 hover:opacity-90"
                     onClick={() => onOpenReview(f.fund_id)}
                   >
-                    {f.pending_count} 待审
+                    {f.pending_count} {t('funds.colPending')}
                   </button>
                 ) : (
-                  <span className="text-gray-300 text-xs">—</span>
+                  <span className="text-fg-subtle text-xs">—</span>
                 )}
               </td>
               <td className="py-3 px-4">
                 <button
-                  className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50 disabled:opacity-50"
+                  className="text-xs text-accent border border-border-strong rounded px-2.5 py-1 mr-2 hover:bg-accent-soft disabled:opacity-50"
                   disabled={!!activeJobs[f.fund_id] || updatingFundId === f.fund_id}
                   onClick={() => onUpdate(f)}
                 >
-                  {updatingFundId === f.fund_id ? '起任务中…' : '更新数据'}
+                  {updatingFundId === f.fund_id ? t('funds.startingJob') : t('funds.updateData')}
                 </button>
                 <button
-                  className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50 disabled:opacity-50"
+                  className="text-xs text-accent border border-border-strong rounded px-2.5 py-1 mr-2 hover:bg-accent-soft disabled:opacity-50"
                   disabled={recomputing === f.fund_id}
-                  title={f.gap_count > 0 ? '该基金有数据缺口，重算将失败' : undefined}
+                  title={f.gap_count > 0 ? t('funds.gapBlocksRecompute') : undefined}
                   onClick={() => onRecompute(f.fund_id)}
                 >
-                  {recomputing === f.fund_id ? '计算中...' : '重算'}
+                  {recomputing === f.fund_id ? t('funds.computing') : t('funds.recompute')}
                 </button>
                 <button
-                  className="text-xs text-blue-600 border border-blue-200 rounded px-2.5 py-1 mr-2 hover:bg-blue-50"
+                  className="text-xs text-accent border border-border-strong rounded px-2.5 py-1 mr-2 hover:bg-accent-soft"
                   onClick={() => onOpenData(f)}
                 >
-                  查看数据
+                  {t('funds.viewData')}
                 </button>
                 <button
-                  className="text-xs text-gray-600 border border-gray-200 rounded px-2.5 py-1 mr-2 hover:bg-gray-50"
-                  title="隐藏后不出现在对比看板"
+                  className="text-xs text-fg-muted border border-border-strong rounded px-2.5 py-1 mr-2 hover:bg-sunken"
+                  title={t('funds.hideHint')}
                   onClick={() => onToggleHidden(f)}
                 >
-                  {f.is_hidden ? '取消隐藏' : '隐藏'}
+                  {f.is_hidden ? t('funds.unhide') : t('funds.hide')}
                 </button>
                 {deleteConfirm === f.fund_id ? (
                   <span className="text-xs">
-                    确认删除？
-                    <button className="text-red-600 ml-1 mr-1" onClick={() => onConfirmDelete(f.fund_id)}>
-                      是
+                    {t('funds.deleteConfirmPrompt')}
+                    <button className="text-neg ml-1 mr-1" onClick={() => onConfirmDelete(f.fund_id)}>
+                      {t('funds.yes')}
                     </button>
-                    <button className="text-gray-500" onClick={onCancelDelete}>
-                      否
+                    <button className="text-fg-muted" onClick={onCancelDelete}>
+                      {t('funds.no')}
                     </button>
                   </span>
                 ) : (
                   <button
-                    className="text-xs text-red-500 border border-red-200 rounded px-2.5 py-1 hover:bg-red-50"
+                    className="text-xs text-neg border border-neg-border rounded px-2.5 py-1 hover:bg-neg-soft"
                     onClick={() => onRequestDelete(f.fund_id)}
                   >
-                    删除
+                    {t('funds.delete')}
                   </button>
                 )}
               </td>
@@ -160,8 +171,8 @@ export default function FundTable({
           ))}
           {funds.length === 0 && !fundsLoading && (
             <tr>
-              <td colSpan={9} className="py-10 text-center text-gray-400">
-                暂无基金。点右上"+ 添加基金"起 LLM 摄取任务。
+              <td colSpan={9} className="py-10 text-center text-fg-subtle">
+                {t('funds.emptyState')}
               </td>
             </tr>
           )}

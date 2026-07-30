@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react'
+import { useT } from '../../i18n/useT'
 
 export interface AddFormState {
   fund_id: string
@@ -12,13 +13,19 @@ export interface AddFormState {
   search_engine: 'tavily' | 'grok'
 }
 
+/** message origin 标记：backend=true 时来自后端 detail（原样展示, 不翻译, 只包中立标签）。 */
+export interface AddFormError {
+  message: string
+  backend: boolean
+}
+
 interface AddFundPanelProps {
   open: boolean
   form: AddFormState
   setForm: Dispatch<SetStateAction<AddFormState>>
   showAdvanced: boolean
   setShowAdvanced: Dispatch<SetStateAction<boolean>>
-  error: string
+  error: AddFormError | null
   submitting: boolean
   onSubmit: () => void
 }
@@ -33,30 +40,31 @@ export default function AddFundPanel({
   submitting,
   onSubmit,
 }: AddFundPanelProps) {
+  const t = useT()
   if (!open) return null
 
   return (
     <div className="space-y-3">
       <div>
-        <label className="text-xs text-gray-500 block mb-1">
-          基金名 <span className="text-red-500">*</span>
-          <span className="text-gray-400 ml-1">(唯一必填)</span>
+        <label className="text-xs text-fg-muted block mb-1">
+          {t('funds.nameLabel')} <span className="text-neg">*</span>
+          <span className="text-fg-subtle ml-1">{t('funds.onlyRequired')}</span>
         </label>
         <input
-          className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+          className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
           value={form.fund_name}
           onChange={e => setForm({ ...form, fund_name: e.target.value })}
-          placeholder="如 Bentham Global Income Fund"
+          placeholder={t('funds.namePlaceholder')}
         />
-        <div className="text-xs text-gray-400 mt-1">
-          提交后 Gemini 会自动联网找归档页并抓月度数据。
+        <div className="text-xs text-fg-subtle mt-1">
+          {t('funds.autoIngestHint')}
         </div>
       </div>
 
       <div className="mb-3">
-        <label className="block text-sm font-medium mb-1">搜索引擎</label>
+        <label className="block text-sm font-medium mb-1 text-fg">{t('funds.searchEngine')}</label>
         <div className="flex gap-4">
-          <label className="flex items-center gap-1 text-sm">
+          <label className="flex items-center gap-1 text-sm text-fg">
             <input
               type="radio"
               name="search_engine"
@@ -64,9 +72,9 @@ export default function AddFundPanel({
               checked={form.search_engine === 'tavily'}
               onChange={() => setForm({ ...form, search_engine: 'tavily' })}
             />
-            Tavily（快，确定性高）
+            {t('funds.engineTavily')}
           </label>
-          <label className="flex items-center gap-1 text-sm">
+          <label className="flex items-center gap-1 text-sm text-fg">
             <input
               type="radio"
               name="search_engine"
@@ -74,87 +82,98 @@ export default function AddFundPanel({
               checked={form.search_engine === 'grok'}
               onChange={() => setForm({ ...form, search_engine: 'grok' })}
             />
-            Grok（慢 15–20 秒，直接给答案）
+            {t('funds.engineGrok')}
           </label>
         </div>
       </div>
 
       <button
         type="button"
-        className="text-xs text-gray-500 hover:text-gray-700 underline"
+        className="text-xs text-fg-muted hover:text-fg underline"
         onClick={() => setShowAdvanced(v => !v)}
       >
-        {showAdvanced ? '▼' : '▶'} 高级选项 (全部选填, 用于加速/纠错定位)
+        {showAdvanced ? '▼' : '▶'} {t('funds.advancedOptions')}
       </button>
 
       {showAdvanced && (
-        <div className="space-y-3 border-l-2 border-gray-100 pl-3">
+        <div className="space-y-3 border-l-2 border-border pl-3">
           <div>
-            <label className="text-xs text-gray-500 block mb-1">
-              fund_id <span className="text-gray-400">(选填 -- 留空由基金名自动生成 slug)</span>
+            <label className="text-xs text-fg-muted block mb-1">
+              fund_id <span className="text-fg-subtle">{t('funds.slugHint')}</span>
             </label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.fund_id}
               onChange={e => setForm({ ...form, fund_id: e.target.value })}
-              placeholder="如 bentham_global_income_fund"
+              placeholder={t('funds.slugPlaceholder')}
             />
           </div>
           <div>
-            <label className="text-xs text-gray-500 block mb-1">APIR 代码</label>
+            <label className="text-xs text-fg-muted block mb-1">{t('funds.apir')}</label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.apir_code}
               onChange={e => setForm({ ...form, apir_code: e.target.value })}
-              placeholder="如 ETL5010AU"
+              placeholder={t('funds.apirPlaceholder')}
             />
           </div>
           <div>
-            <label className="text-xs text-gray-500 block mb-1">归档页 URL (跳过搜索)</label>
+            <label className="text-xs text-fg-muted block mb-1">{t('funds.archiveUrl')}</label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.confirmed_url}
               onChange={e => setForm({ ...form, confirmed_url: e.target.value })}
               placeholder="https://.../monthly-reports"
             />
           </div>
           <div>
-            <label className="text-xs text-gray-500 block mb-1">发行商 (加速搜索)</label>
+            <label className="text-xs text-fg-muted block mb-1">{t('funds.issuer')}</label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.issuer}
               onChange={e => setForm({ ...form, issuer: e.target.value })}
-              placeholder="如 Bentham Asset Management"
+              placeholder={t('funds.issuerPlaceholder')}
             />
           </div>
           <div>
-            <label className="text-xs text-gray-500 block mb-1">发行商官网域名</label>
+            <label className="text-xs text-fg-muted block mb-1">{t('funds.issuerDomain')}</label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.issuer_domain}
               onChange={e => setForm({ ...form, issuer_domain: e.target.value })}
-              placeholder="如 benthamam.com"
+              placeholder={t('funds.issuerDomainPlaceholder')}
             />
           </div>
           <div>
-            <label className="text-xs text-gray-500 block mb-1">ASX 代码</label>
+            <label className="text-xs text-fg-muted block mb-1">{t('funds.asxCode')}</label>
             <input
-              className="w-full text-sm border border-gray-200 rounded px-3 py-2"
+              className="w-full text-sm border border-border-strong rounded bg-surface text-fg px-3 py-2 placeholder:text-fg-subtle"
               value={form.asx_code}
               onChange={e => setForm({ ...form, asx_code: e.target.value })}
-              placeholder="如 MXT"
+              placeholder={t('funds.asxPlaceholder')}
             />
           </div>
         </div>
       )}
 
-      {error && <div className="text-xs text-red-500">{error}</div>}
+      {error && (
+        <div className="text-xs text-neg">
+          {error.backend ? (
+            <>
+              <span className="text-fg-muted">{t('common.backendMessage')}</span>
+              <span>{error.message}</span>
+            </>
+          ) : (
+            error.message
+          )}
+        </div>
+      )}
       <button
-        className="w-full text-sm bg-[#1a1a2e] text-white py-2 rounded-lg hover:bg-[#2a2a4e] disabled:opacity-50"
+        className="w-full text-sm bg-accent text-accent-fg py-2 rounded-lg hover:opacity-90 disabled:opacity-50"
         onClick={onSubmit}
         disabled={submitting}
       >
-        {submitting ? '起任务中…' : '开始 LLM 摄取'}
+        {submitting ? t('funds.startingJob') : t('funds.startIngest')}
       </button>
     </div>
   )

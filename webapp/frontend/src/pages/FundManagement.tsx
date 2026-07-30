@@ -3,14 +3,16 @@ import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import type { Fund, IngestJob, MonthlyReturnRow, PendingReview } from '../types'
 import FundTable from './funds/FundTable'
-import AddFundPanel, { type AddFormState } from './funds/AddFundPanel'
+import AddFundPanel, { type AddFormState, type AddFormError } from './funds/AddFundPanel'
 import IngestJobPanel from './funds/IngestJobPanel'
 import PendingReviewPanel from './funds/PendingReviewPanel'
 import FundDataDrawer, { type RbaHistoryRow } from './funds/FundDataDrawer'
+import { useT } from '../i18n/useT'
 
 const POLL_MS = 1500
 
 export default function FundManagement() {
+  const t = useT()
   const funds = useStore(s => s.funds)
   const fundsLoading = useStore(s => s.fundsLoading)
   const fetchFunds = useStore(s => s.fetchFunds)
@@ -34,7 +36,7 @@ export default function FundManagement() {
     // Spec G: 搜索引擎选择, 每次摄取生效, 不记在基金上
     search_engine: 'tavily',
   })
-  const [addError, setAddError] = useState('')
+  const [addError, setAddError] = useState<AddFormError | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   // job 状态
@@ -198,11 +200,11 @@ export default function FundManagement() {
     if (resp.action === 'skipped_authoritative_covered' || resp.action === 'skipped_l3_covered') {
       const tag = resp.existing_tag
       const tagLabel =
-        tag === 'fundmonitors_table' ? 'L3 fundmonitors 表'
-        : tag === 'llm' ? 'LLM PDF 提取'
-        : (tag ?? '权威源')
+        tag === 'fundmonitors_table' ? t('funds.sourceL3')
+        : tag === 'llm' ? t('funds.sourceLlmPdf')
+        : (tag ?? t('funds.sourceAuthoritative'))
       // eslint-disable-next-line no-alert
-      alert(`该月已由权威源 (${tagLabel}) 覆盖, pending 未采纳。`)
+      alert(t('funds.coveredByAuthoritative', { source: tagLabel }))
     }
     setPending(pending.filter(p => p.id !== id))
     await fetchFunds()
@@ -215,13 +217,13 @@ export default function FundManagement() {
   }
 
   const handleAdd = async () => {
-    setAddError('')
+    setAddError(null)
     if (!addForm.fund_name.trim()) {
-      setAddError('基金名 必填 (其余均选填)')
+      setAddError({ message: t('funds.nameRequired'), backend: false })
       return
     }
     if (addForm.apir_code && !/^[A-Z]{3}\d{4}AU$/.test(addForm.apir_code)) {
-      setAddError('APIR 格式应为 3大写字母+4数字+AU（如 ETL5010AU）')
+      setAddError({ message: t('funds.apirInvalid'), backend: false })
       return
     }
     setSubmitting(true)
@@ -241,7 +243,7 @@ export default function FundManagement() {
       // (不必等下一轮表格轮询检测到 job 转终态才 fetchFunds)
       await fetchFunds()
     } catch (e: unknown) {
-      setAddError((e as Error).message)
+      setAddError({ message: (e as Error).message, backend: true })
     }
     setSubmitting(false)
   }
@@ -250,6 +252,7 @@ export default function FundManagement() {
     setShowAdd(false)
     setJob(null)
     setShowAdvanced(false)
+    setAddError(null)
     setAddForm({
       fund_id: '', fund_name: '', apir_code: '',
       confirmed_url: '', issuer: '', issuer_domain: '', asx_code: '',
@@ -260,24 +263,24 @@ export default function FundManagement() {
   return (
     <div>
       <div className="flex justify-between items-center mb-5">
-        <h1 className="text-xl font-semibold">基金管理</h1>
+        <h1 className="text-xl font-semibold text-fg">{t('funds.title')}</h1>
         <div className="flex gap-2">
           <button
-            className="text-sm border border-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-50"
+            className="text-sm border border-border-strong text-fg px-4 py-2 rounded-lg hover:bg-sunken"
             onClick={openRbaHistory}
           >
-            查看 RBA 利率历史
+            {t('funds.viewRbaHistory')}
           </button>
           <button
-            className="text-sm bg-[#1a1a2e] text-white px-4 py-2 rounded-lg hover:bg-[#2a2a4e]"
+            className="text-sm bg-accent text-accent-fg px-4 py-2 rounded-lg hover:opacity-90"
             onClick={() => setShowAdd(true)}
           >
-            + 添加基金
+            {t('funds.addButton')}
           </button>
         </div>
       </div>
 
-      {fundsLoading && <div className="text-gray-400">加载中...</div>}
+      {fundsLoading && <div className="text-fg-subtle">{t('common.loading')}</div>}
 
       <FundTable
         funds={funds}
@@ -299,10 +302,10 @@ export default function FundManagement() {
       {/* 添加基金弹窗 (LLM 摄取版) */}
       {showAdd && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+          <div className="card p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-base font-medium">添加基金 (LLM 摄取)</h2>
-              <button className="text-gray-400 text-xl" onClick={closeModal}>
+              <h2 className="text-base font-medium text-fg">{t('funds.addPanelTitle')}</h2>
+              <button className="text-fg-subtle text-xl" onClick={closeModal}>
                 &times;
               </button>
             </div>

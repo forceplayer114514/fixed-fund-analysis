@@ -1,4 +1,5 @@
 import type { PendingReview } from '../../types'
+import { useT } from '../../i18n/useT'
 
 interface PendingReviewPanelProps {
   fundId: string
@@ -17,52 +18,53 @@ export default function PendingReviewPanel({
   onReject,
   onClose,
 }: PendingReviewPanelProps) {
+  const t = useT()
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[85vh] overflow-y-auto">
+      <div className="card p-6 w-full max-w-3xl max-h-[85vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-base font-medium">
-            待审核: {fundId} ({items.length} 条)
+          <h2 className="text-base font-medium text-fg">
+            {t('funds.reviewTitle', { fundId, n: items.length })}
           </h2>
-          <button className="text-gray-400 text-xl" onClick={onClose}>
+          <button className="text-fg-subtle text-xl" onClick={onClose}>
             &times;
           </button>
         </div>
-        {loading && <div className="text-gray-400 text-sm">加载中…</div>}
+        {loading && <div className="text-fg-subtle text-sm">{t('common.loading')}</div>}
         {!loading && items.length === 0 && (
-          <div className="text-gray-400 text-sm py-6 text-center">无待审记录</div>
+          <div className="text-fg-subtle text-sm py-6 text-center">{t('funds.noPending')}</div>
         )}
         <div className="space-y-3">
           {items.map(p => (
-            <div key={p.id} className="border border-amber-200 bg-amber-50/40 rounded-lg p-3 text-sm">
+            <div key={p.id} className="border border-warn-border bg-warn-soft rounded-lg p-3 text-sm">
               <div className="flex justify-between items-start">
                 <div>
-                  <span className="font-medium">{p.date.slice(0, 7)}</span>{' '}
-                  <span className="text-gray-600">
-                    月度净收益: {(p.net_return * 100).toFixed(4)}%
+                  <span className="font-medium text-fg">{p.date.slice(0, 7)}</span>{' '}
+                  <span className="text-fg-muted">
+                    {t('funds.colNetReturn')}: {(p.net_return * 100).toFixed(4)}%
                   </span>
                 </div>
-                <div className="text-xs text-gray-500">gate: {p.gate_result ?? '—'}</div>
+                <div className="text-xs text-fg-muted">gate: {p.gate_result ?? '—'}</div>
               </div>
-              <div className="mt-1 text-xs text-red-600">未过闸: {p.review_reason ?? '—'}</div>
+              <div className="mt-1 text-xs text-neg">{t('funds.reviewReasonLabel')}: {p.review_reason ?? '—'}</div>
               {p.source_quote && (
-                <div className="mt-2 text-xs text-gray-500 bg-white border border-gray-100 rounded p-2">
-                  <div className="text-gray-400 mb-1">source_quote:</div>
+                <div className="mt-2 text-xs text-fg-muted bg-surface border border-border rounded p-2">
+                  <div className="text-fg-subtle mb-1">source_quote:</div>
                   <div className="whitespace-pre-wrap break-words">{p.source_quote}</div>
                 </div>
               )}
               <div className="mt-2 flex gap-2">
                 <button
-                  className="text-xs bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700"
+                  className="text-xs text-accent-fg bg-accent px-3 py-1 rounded hover:opacity-90"
                   onClick={() => onApprove(p.id)}
                 >
-                  通过 (写入 monthly_returns)
+                  {t('funds.approveLabel')}
                 </button>
                 <button
-                  className="text-xs bg-gray-200 text-gray-700 px-3 py-1 rounded hover:bg-gray-300"
+                  className="text-xs bg-sunken text-fg-muted px-3 py-1 rounded hover:opacity-90"
                   onClick={() => onReject(p.id)}
                 >
-                  拒绝
+                  {t('funds.reject')}
                 </button>
               </div>
             </div>
