@@ -1,4 +1,5 @@
 import WarnBadge from './WarnBadge'
+import { useT } from '../i18n/useT'
 
 interface Props {
   label: string
@@ -12,23 +13,27 @@ interface Props {
 }
 
 export default function MetricCard({ label, value, rank, subtext, warn, warnNote }: Props) {
+  const t = useT()
   return (
-    <div className="flex-1 min-w-[140px] bg-white rounded-lg p-4 shadow-sm">
-      <div className="text-xs text-gray-400 mb-1">
+    <div className="card flex-1 min-w-[150px] p-4">
+      <div className="text-xs text-fg-muted mb-1.5">
         {label}
         {warn && warnNote && <WarnBadge note={warnNote} />}
       </div>
-      <div className="text-lg font-semibold">
-        {value ?? '-'}
+      <div className="flex items-baseline gap-2">
+        <div className="text-xl font-semibold font-mono tabular-nums text-fg">{value ?? '-'}</div>
         {rank != null && (
           <span
-            className={`text-xs font-normal ml-1 ${warn ? 'text-gray-300' : 'text-gray-400'}`}
+            title={t('metric.rankTitle')}
+            className={`text-[11px] font-medium rounded px-1.5 py-0.5 ${
+              warn ? 'bg-sunken text-fg-subtle' : 'bg-accent-soft text-accent'
+            }`}
           >
-            ({rank})
+            #{rank}
           </span>
         )}
       </div>
-      {subtext && <div className="text-xs text-gray-400 mt-1">{subtext}</div>}
+      {subtext && <div className="text-xs text-fg-subtle mt-1.5">{subtext}</div>}
     </div>
   )
 }

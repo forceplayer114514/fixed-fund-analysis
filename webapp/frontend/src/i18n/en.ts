@@ -21,5 +21,10 @@ export const en: Record<keyof typeof cn, string> = {
   'theme.system': 'System',
   'theme.light': 'Light',
   'theme.dark': 'Dark',
+
+  'error.boundaryTitle': 'Something went wrong',
+  'error.reload': 'Reload',
+  'metric.rankTitle': 'Rank under the current basis',
+
   'lang.switch': 'Switch language',
 }

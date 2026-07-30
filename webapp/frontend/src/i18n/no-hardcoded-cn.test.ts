@@ -18,7 +18,6 @@ const modules = {
 const PENDING_FILES: string[] = [
   'components/AnomalyTable.tsx',
   'components/CompareTable.tsx',
-  'components/ErrorBoundary.tsx',
   'components/ExcessHeatmap.tsx',
   'components/NavChart.tsx',
   'components/RollingExcessChart.tsx',

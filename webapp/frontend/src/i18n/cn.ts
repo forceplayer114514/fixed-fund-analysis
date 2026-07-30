@@ -24,5 +24,10 @@ export const cn = {
   'theme.system': '跟随系统',
   'theme.light': '浅色',
   'theme.dark': '深色',
+
+  'error.boundaryTitle': '出错了',
+  'error.reload': '重新加载',
+  'metric.rankTitle': '当前口径下名次',
+
   'lang.switch': '切换语言',
 } as const

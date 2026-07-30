@@ -11,8 +11,8 @@ interface Props {
 export default function WarnBadge({ note }: Props) {
   return (
     <span className="relative inline-flex items-center justify-center w-4 h-4 ml-1 cursor-help group align-middle">
-      <span className="text-orange-400 text-xs leading-none">⚠</span>
-      <span className="pointer-events-none absolute left-1/2 bottom-full z-50 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-gray-800 px-2 py-1 text-xs font-normal text-white opacity-0 transition-opacity duration-100 group-hover:opacity-100">
+      <span className="text-warn text-xs leading-none">⚠</span>
+      <span className="pointer-events-none absolute left-1/2 bottom-full z-50 mb-1 -translate-x-1/2 whitespace-nowrap rounded-md bg-fg text-bg px-2 py-1 text-xs font-normal opacity-0 transition-opacity duration-100 group-hover:opacity-100">
         {note}
       </span>
     </span>

@@ -13,10 +13,10 @@ export default function FundChips() {
           <button
             key={f.fund_id}
             onClick={() => toggleFund(f.fund_id)}
-            className={`px-4 py-1.5 rounded-full text-sm border-2 transition-colors ${
+            className={`px-3.5 py-1.5 rounded-full text-sm border transition-colors ${
               active
-                ? 'border-cyan-400 bg-cyan-50 text-cyan-800 font-medium'
-                : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                ? 'border-accent bg-accent-soft text-accent font-medium'
+                : 'border-border bg-surface text-fg-muted hover:border-border-strong hover:text-fg'
             }`}
           >
             {f.fund_name}
