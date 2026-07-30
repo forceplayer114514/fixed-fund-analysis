@@ -22,7 +22,6 @@ const PENDING_FILES: string[] = [
   'components/ExcessHeatmap.tsx',
   'components/NavChart.tsx',
   'components/RollingExcessChart.tsx',
-  'components/Sidebar.tsx',
   'components/SmoothingCards.tsx',
   'pages/Anomalies.tsx',
   'pages/Dashboard.tsx',
