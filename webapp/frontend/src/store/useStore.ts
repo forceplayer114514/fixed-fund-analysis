@@ -6,6 +6,7 @@ import {
   watchSystemTheme, writeStoredThemeMode,
   type ResolvedTheme, type ThemeMode,
 } from '../theme/theme'
+import { applyLang, readStoredLang, writeStoredLang, type Lang } from '../i18n'
 
 export type Period = 'full' | '3y' | '1y' | 'common'
 /** 图表类型：累计 NAV | 滚动12月超额（删月收益率折线，PDD 2.7） */
@@ -31,6 +32,7 @@ interface AppState {
   // UI 偏好（主题）
   themeMode: ThemeMode
   resolvedTheme: ResolvedTheme
+  lang: Lang
 
   // 数据
   compareData: CompareResponse | null
@@ -55,6 +57,7 @@ interface AppState {
   setThemeMode: (mode: ThemeMode) => void
   /** 启动时调用一次：套用已存主题并订阅系统变化，返回退订函数。 */
   initTheme: () => () => void
+  setLang: (lang: Lang) => void
   patchMonthlyReturn: (id: number, netReturn: number) => Promise<void>
   recomputeFund: (fundId: string) => Promise<void>
   deleteFund: (fundId: string) => Promise<void>
@@ -74,6 +77,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   themeMode: readStoredThemeMode(),
   resolvedTheme: resolveTheme(readStoredThemeMode(), systemPrefersDark()),
+  lang: readStoredLang(),
 
   compareData: null,
   compareLoading: false,
@@ -221,6 +225,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   initTheme: () => {
     applyTheme(get().resolvedTheme)
+    applyLang(get().lang)
     // system 态才需要跟随系统变化；显式 light/dark 下回调直接忽略
     return watchSystemTheme(prefersDark => {
       if (get().themeMode !== 'system') return
@@ -228,5 +233,11 @@ export const useStore = create<AppState>((set, get) => ({
       applyTheme(resolved)
       set({ resolvedTheme: resolved })
     })
+  },
+
+  setLang: (lang: Lang) => {
+    writeStoredLang(lang)
+    applyLang(lang)
+    set({ lang })
   },
 }))
