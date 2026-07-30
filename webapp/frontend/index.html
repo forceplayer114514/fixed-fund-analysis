@@ -4,8 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>固定收益基金分析</title>
+    <script>
+      // 首帧前套上 dark class，避免深色用户看到白闪。逻辑与 src/theme/theme.ts 一致。
+      (function () {
+        try {
+          var m = localStorage.getItem('ff.theme')
+          if (m !== 'light' && m !== 'dark' && m !== 'system') m = 'system'
+          var dark = m === 'dark' || (m === 'system' &&
+            window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {}
+      })()
+    </script>
   </head>
-  <body class="bg-gray-50">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
