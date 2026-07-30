@@ -1,8 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-
-const CSS_PATH = resolve(__dirname, '../index.css')
+import css from '../index.css?raw'
 
 /** 解析 index.css 里的 `:root {...}` / `:root.dark {...}` 变量块。 */
 export function parseCssVars(css: string, selector: string): Record<string, string> {
@@ -31,7 +28,6 @@ const REQUIRED_TOKENS = [
 ]
 
 describe('index.css 设计 token', () => {
-  const css = readFileSync(CSS_PATH, 'utf8')
   const light = parseCssVars(css, ':root')
   const dark = parseCssVars(css, ':root.dark')
 
