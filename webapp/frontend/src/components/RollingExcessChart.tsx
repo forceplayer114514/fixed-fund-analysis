@@ -8,12 +8,14 @@ import { useStore } from '../store/useStore'
 import type { FundReturns } from '../lib/rebase'
 import { rollingExcess, computeAxisMonths } from '../lib/rebase'
 import { buildShortCodeMap } from '../lib/fundCodes'
+import { useT } from '../i18n/useT'
+import { useChartTheme } from '../theme/useChartTheme'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer])
 
-const COLORS = ['#4fc3f7', '#7c4dff', '#ff7043', '#66bb6a', '#ffca28', '#ec407a', '#26c6da', '#ab47bc']
-
 export default function RollingExcessChart() {
+  const t = useT()
+  const palette = useChartTheme()
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const selectedFundIds = useStore(s => s.selectedFundIds)
   const period = useStore(s => s.period)
@@ -48,9 +50,10 @@ export default function RollingExcessChart() {
         return idx != null ? reFull[idx] : null
       })
       const isAnchor = f.fund_id === anchorFundId
+      const displayName = codeMap.get(f.fund_id) ?? f.fund_name
       return {
         id: `roll:${f.fund_id}`,
-        name: short ? `${codeMap.get(f.fund_id) ?? f.fund_name}（历史不足12个月）` : (codeMap.get(f.fund_id) ?? f.fund_name),
+        name: short ? t('chart.insufficientHistory', { name: displayName }) : displayName,
         type: 'line' as const,
         data,
         connectNulls: false,
@@ -59,14 +62,14 @@ export default function RollingExcessChart() {
         lineStyle: {
           width: 1.5,
           opacity: short ? 0 : (anchorFundId ? (isAnchor ? 1 : 0.35) : 1),
-          color: isAnchor ? '#000' : undefined,
+          color: isAnchor ? palette.anchor : undefined,
         },
-        itemStyle: { color: isAnchor ? '#000' : COLORS[i % COLORS.length] },
+        itemStyle: { color: isAnchor ? palette.anchor : palette.series[i % palette.series.length] },
         z: isAnchor ? 10 : 2,
         markLine: i === 0 ? {
           symbol: 'none',
           data: [{ yAxis: 0 }],
-          lineStyle: { color: '#bbb', type: 'dashed' },
+          lineStyle: { color: palette.baseline, type: 'dashed' },
           label: { show: false },
         } : undefined,
       }
@@ -79,6 +82,9 @@ export default function RollingExcessChart() {
     return {
       tooltip: {
         trigger: 'axis',
+        backgroundColor: palette.tooltipBg,
+        borderColor: palette.tooltipBorder,
+        textStyle: { color: palette.tooltipFg },
         formatter: (params: any[]) => {
           if (!params || params.length === 0) return ''
           const date = params[0]?.axisValue ?? ''
@@ -86,23 +92,23 @@ export default function RollingExcessChart() {
             .filter((p: any) => p.data != null)
             .sort((a: any, b: any) => (b.data as number) - (a.data as number))
             .map((p: any) => `${p.marker} ${p.seriesName}: ${((p.data as number) * 100).toFixed(2)}%`)
-          return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.length ? lines.join('<br/>') : '无数据'}`
+          return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.length ? lines.join('<br/>') : t('chart.noData')}`
         },
       },
-      legend: { top: 0, textStyle: { fontSize: 12 } },
+      legend: { top: 0, textStyle: { fontSize: 12, color: palette.axisLabel } },
       grid: { left: 60, right: 20, top: 30, bottom: 50 },
       xAxis: { type: 'category', data: axisMonths,
-        axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
+        axisLabel: { fontSize: 10, color: palette.axisLabel }, axisLine: { show: false }, axisTick: { show: false } },
       yAxis: { type: 'value', min: yMin, max: yMax,
-        axisLabel: { fontSize: 10, color: '#999', formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
-        splitLine: { lineStyle: { color: '#f0f0f0' } } },
+        axisLabel: { fontSize: 10, color: palette.axisLabel, formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
+        splitLine: { lineStyle: { color: palette.splitLine } } },
       dataZoom: [{ type: 'inside', start: 0, end: 100 }],
       series,
     }
-  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode, codeMap])
+  }, [timeSeriesData, selectedFundIds, period, anchorFundId, smoothingMode, codeMap, palette, t])
 
   if (!option) {
-    return <div className="h-80 flex items-center justify-center text-gray-400 text-sm">加载中...</div>
+    return <div className="h-80 flex items-center justify-center text-fg-subtle text-sm">{t('common.loading')}</div>
   }
   return <ReactEChartsCore echarts={echarts} option={option} notMerge lazyUpdate style={{ height: 480 }} />
 }

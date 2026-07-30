@@ -18,13 +18,15 @@ import {
 } from '../lib/rebase'
 import { buildShortCodeMap } from '../lib/fundCodes'
 import RollingExcessChart from './RollingExcessChart'
+import { useT } from '../i18n/useT'
+import { useChartTheme } from '../theme/useChartTheme'
 
 echarts.use([LineChart, ScatterChart, GridComponent, TooltipComponent,
   LegendComponent, DataZoomComponent, MarkLineComponent, CanvasRenderer])
 
-const COLORS = ['#4fc3f7', '#7c4dff', '#ff7043', '#66bb6a', '#ffca28', '#ec407a', '#26c6da', '#ab47bc']
-
 export default function NavChart() {
+  const t = useT()
+  const palette = useChartTheme()
   const timeSeriesData = useStore(s => s.timeSeriesData)
   const selectedFundIds = useStore(s => s.selectedFundIds)
   const period = useStore(s => s.period)
@@ -92,17 +94,17 @@ export default function NavChart() {
       lineStyle: {
         width: 1.5,
         opacity: inC ? (r.isAnchor ? 1 : 0.35) : 1,
-        color: r.isAnchor ? '#000' : undefined,
+        color: r.isAnchor ? palette.anchor : undefined,
       },
-      itemStyle: { color: r.isAnchor ? '#000' : COLORS[i % COLORS.length] },
+      itemStyle: { color: r.isAnchor ? palette.anchor : palette.series[i % palette.series.length] },
       z: r.isAnchor ? 10 : 2,
       // F2：NAV y 轴 1.0 起点基准线（A/B/C 均显示，参考线非数据修饰；silent 不吞 click）
       markLine: i === 0 ? {
         symbol: 'none',
         silent: true,
         data: [{ yAxis: 1.0 }],
-        lineStyle: { color: '#bbb', type: 'dashed', width: 1 },
-        label: { show: true, position: 'end', formatter: '起点', color: '#999', fontSize: 10 },
+        lineStyle: { color: palette.baseline, type: 'dashed', width: 1 },
+        label: { show: true, position: 'end', formatter: t('chart.baseStart'), color: palette.axisLabel, fontSize: 10 },
       } : undefined,
     }))
     const ddSeries = rebased.map((r, i) => ({
@@ -119,9 +121,9 @@ export default function NavChart() {
       lineStyle: {
         width: 1,
         opacity: inC ? (r.isAnchor ? 1 : 0.35) : 0.85,
-        color: r.isAnchor ? '#000' : undefined,
+        color: r.isAnchor ? palette.anchor : undefined,
       },
-      itemStyle: { color: r.isAnchor ? '#000' : COLORS[i % COLORS.length] },
+      itemStyle: { color: r.isAnchor ? palette.anchor : palette.series[i % palette.series.length] },
       areaStyle: { opacity: 0.12 },
       z: r.isAnchor ? 10 : 2,
     }))
@@ -135,10 +137,12 @@ export default function NavChart() {
         name: codeMap.get(r.fund_id) ?? r.fund_name,
         data: [[r.splicePoint!.month, r.splicePoint!.value]],
         symbolSize: 10,
-        itemStyle: { color: 'transparent', borderColor: '#555', borderWidth: 1.5 },
+        itemStyle: { color: 'transparent', borderColor: palette.spliceBorder, borderWidth: 1.5 },
         tooltip: {
-          formatter: () =>
-            `${codeMap.get(r.fund_id) ?? r.fund_name}：拼接基点，等于锚定基金 ${r.splicePoint!.month} 累计值，次月起为该基金自身收益`,
+          formatter: () => t('chart.spliceTip', {
+            name: codeMap.get(r.fund_id) ?? r.fund_name,
+            month: r.splicePoint!.month,
+          }),
         },
         z: 20,
       }))
@@ -147,39 +151,43 @@ export default function NavChart() {
       tooltip: {
         trigger: 'axis',
         axisPointer: { link: [{ xAxisIndex: 'all' }] },
+        backgroundColor: palette.tooltipBg,
+        borderColor: palette.tooltipBorder,
+        textStyle: { color: palette.tooltipFg },
         formatter: (params: any[]) => {
           if (!params || params.length === 0) return ''
           const date = params[0]?.axisValue ?? ''
           const lines = params
             .filter((p: any) => p.seriesType === 'line' && p.seriesId?.startsWith('nav:'))
             .sort((a: any, b: any) => (b.data ?? -Infinity) - (a.data ?? -Infinity))
-            .map((p: any) => `${p.marker} ${p.seriesName}: ${p.data == null ? '无数据' : p.data.toFixed(4)}`)
+            .map((p: any) => `${p.marker} ${p.seriesName}: ${
+              p.data == null ? t('chart.noData') : p.data.toFixed(4)}`)
           return `<div style="font-weight:500;margin-bottom:4px">${date}</div>${lines.join('<br/>')}`
         },
       },
-      legend: { top: 0, textStyle: { fontSize: 12 } },
+      legend: { top: 0, textStyle: { fontSize: 12, color: palette.axisLabel } },
       grid: [
         { left: 60, right: 20, top: 30, height: 290 },
         { left: 60, right: 20, top: 345, height: 150 },
       ],
       xAxis: [
         { type: 'category', data: axisMonths, gridIndex: 0,
-          axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
+          axisLabel: { fontSize: 10, color: palette.axisLabel }, axisLine: { show: false }, axisTick: { show: false } },
         { type: 'category', data: axisMonths, gridIndex: 1,
-          axisLabel: { fontSize: 10, color: '#999' }, axisLine: { show: false }, axisTick: { show: false } },
+          axisLabel: { fontSize: 10, color: palette.axisLabel }, axisLine: { show: false }, axisTick: { show: false } },
       ],
       yAxis: [
         { type: 'value', gridIndex: 0, min: navMin - navRange * 0.05, max: navMax + navRange * 0.05,
-          axisLabel: { fontSize: 10, color: '#999', formatter: (v: number) => v.toFixed(3) },
-          splitLine: { lineStyle: { color: '#f0f0f0' } } },
+          axisLabel: { fontSize: 10, color: palette.axisLabel, formatter: (v: number) => v.toFixed(3) },
+          splitLine: { lineStyle: { color: palette.splitLine } } },
         { type: 'value', gridIndex: 1, max: 0, min: ddMin - Math.abs(ddMin) * 0.05 - 0.001,
-          axisLabel: { fontSize: 10, color: '#999', formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
-          splitLine: { lineStyle: { color: '#f0f0f0' } } },
+          axisLabel: { fontSize: 10, color: palette.axisLabel, formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
+          splitLine: { lineStyle: { color: palette.splitLine } } },
       ],
       dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 }],
       series: [...navSeries, ...ddSeries, ...splicePoints],
     }
-  }, [timeSeriesData, funds, period, anchorFundId, codeMap])
+  }, [timeSeriesData, funds, period, anchorFundId, codeMap, palette, t])
 
   const onEvents = useMemo(() => ({
     click: (params: any) => {
@@ -191,16 +199,16 @@ export default function NavChart() {
   }), [setAnchor, nameToFundId])
 
   return (
-    <div className="bg-white rounded-lg p-5 shadow-sm mb-5">
+    <div className="card p-5 mb-5">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-sm text-gray-400">{chartMetric === 'nav' ? '累计 NAV / 回撤' : '滚动 12 月超额'}</h3>
+        <h3 className="text-sm text-fg-subtle">{chartMetric === 'nav' ? t('chart.titleNav') : t('chart.titleRolling')}</h3>
         <select
-          className="text-sm border border-gray-200 rounded px-3 py-1.5 bg-white"
+          className="text-sm border border-border rounded px-3 py-1.5 bg-surface text-fg"
           value={chartMetric}
           onChange={e => setChartMetric(e.target.value as any)}
         >
-          <option value="nav">累计 NAV</option>
-          <option value="rolling_excess">滚动12月超额</option>
+          <option value="nav">{t('chart.tabNav')}</option>
+          <option value="rolling_excess">{t('chart.tabRolling')}</option>
         </select>
       </div>
       {chartMetric === 'rolling_excess' ? (
@@ -215,11 +223,11 @@ export default function NavChart() {
           style={{ height: 520 }}
         />
       ) : (
-        <div className="h-80 flex items-center justify-center text-gray-400 text-sm">加载中...</div>
+        <div className="h-80 flex items-center justify-center text-fg-subtle text-sm">{t('common.loading')}</div>
       )}
       {anchorFundId && (
-        <div className="text-xs text-gray-400 mt-2">
-          锚定模式下展示锚定基金完整历史 · 再次点击曲线取消锚定
+        <div className="text-xs text-fg-subtle mt-2">
+          {t('chart.anchorHint')}
         </div>
       )}
     </div>

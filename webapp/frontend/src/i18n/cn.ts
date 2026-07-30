@@ -30,4 +30,14 @@ export const cn = {
   'metric.rankTitle': '当前口径下名次',
 
   'lang.switch': '切换语言',
+
+  'chart.tabNav': '累计 NAV',
+  'chart.tabRolling': '滚动12月超额',
+  'chart.titleNav': '累计 NAV / 回撤',
+  'chart.titleRolling': '滚动 12 月超额',
+  'chart.baseStart': '起点',
+  'chart.noData': '无数据',
+  'chart.spliceTip': '{name}：拼接基点，等于锚定基金 {month} 累计值，次月起为该基金自身收益',
+  'chart.insufficientHistory': '{name}（历史不足12个月）',
+  'chart.anchorHint': '锚定模式下展示锚定基金完整历史 · 再次点击曲线取消锚定',
 } as const

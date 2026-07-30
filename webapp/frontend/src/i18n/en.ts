@@ -27,4 +27,14 @@ export const en: Record<keyof typeof cn, string> = {
   'metric.rankTitle': 'Rank under the current basis',
 
   'lang.switch': 'Switch language',
+
+  'chart.tabNav': 'Cumulative NAV',
+  'chart.tabRolling': 'Rolling 12m excess',
+  'chart.titleNav': 'Cumulative NAV / drawdown',
+  'chart.titleRolling': 'Rolling 12-month excess',
+  'chart.baseStart': 'Base',
+  'chart.noData': 'No data',
+  'chart.spliceTip': '{name}: splice base point, equal to the anchor fund cumulative value at {month}; from the next month onward this is the fund own return',
+  'chart.insufficientHistory': '{name} (less than 12 months of history)',
+  'chart.anchorHint': 'Anchor mode shows the full history of the anchored fund · click the line again to release the anchor',
 }
