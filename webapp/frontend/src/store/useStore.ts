@@ -1,6 +1,11 @@
 import { create } from 'zustand'
 import { api } from '../api/client'
 import type { Fund, Anomaly, CompareResponse, TimeSeriesResponse } from '../types'
+import {
+  applyTheme, readStoredThemeMode, resolveTheme, systemPrefersDark,
+  watchSystemTheme, writeStoredThemeMode,
+  type ResolvedTheme, type ThemeMode,
+} from '../theme/theme'
 
 export type Period = 'full' | '3y' | '1y' | 'common'
 /** 图表类型：累计 NAV | 滚动12月超额（删月收益率折线，PDD 2.7） */
@@ -23,6 +28,10 @@ interface AppState {
   chartMetric: ChartMetric
   smoothingMode: SmoothingMode
 
+  // UI 偏好（主题）
+  themeMode: ThemeMode
+  resolvedTheme: ResolvedTheme
+
   // 数据
   compareData: CompareResponse | null
   compareLoading: boolean
@@ -43,6 +52,9 @@ interface AppState {
   setAnchor: (id: string | null) => void
   setChartMetric: (m: ChartMetric) => void
   setSmoothingMode: (m: SmoothingMode) => void
+  setThemeMode: (mode: ThemeMode) => void
+  /** 启动时调用一次：套用已存主题并订阅系统变化，返回退订函数。 */
+  initTheme: () => () => void
   patchMonthlyReturn: (id: number, netReturn: number) => Promise<void>
   recomputeFund: (fundId: string) => Promise<void>
   deleteFund: (fundId: string) => Promise<void>
@@ -59,6 +71,9 @@ export const useStore = create<AppState>((set, get) => ({
   prevPeriod: 'full',
   chartMetric: 'nav',
   smoothingMode: 'original',
+
+  themeMode: readStoredThemeMode(),
+  resolvedTheme: resolveTheme(readStoredThemeMode(), systemPrefersDark()),
 
   compareData: null,
   compareLoading: false,
@@ -195,5 +210,23 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       set({ compareData: null, timeSeriesData: null })
     }
+  },
+
+  setThemeMode: (mode: ThemeMode) => {
+    const resolved = resolveTheme(mode, systemPrefersDark())
+    writeStoredThemeMode(mode)
+    applyTheme(resolved)
+    set({ themeMode: mode, resolvedTheme: resolved })
+  },
+
+  initTheme: () => {
+    applyTheme(get().resolvedTheme)
+    // system 态才需要跟随系统变化；显式 light/dark 下回调直接忽略
+    return watchSystemTheme(prefersDark => {
+      if (get().themeMode !== 'system') return
+      const resolved = resolveTheme('system', prefersDark)
+      applyTheme(resolved)
+      set({ resolvedTheme: resolved })
+    })
   },
 }))
