@@ -6,7 +6,8 @@
   2. 备份 data/fund_analysis.db -> data/fund_analysis.db.spec_b_backup_{ts}
   3. 单事务清 6 表 (monthly_returns / confirmed_gaps / pending_review /
      fund_metrics / anomalies / ai_reports); funds 表保留
-  4. 读 funds 过滤 Coolabah x 2 (延后 Spec C)
+  4. 读 funds 过滤 fund_id 以 coolabah 开头的基金 (HTML 渲染通道, 见
+     _EXCLUDED_FUND_ID_PREFIXES)
   5. ThreadPoolExecutor(max_workers=4) 并发触发 POST /api/ingest/funds
   6. 每 5 秒轮询 GET /api/ingest/jobs/{id} 直到全部 succeeded/failed
   7. 打印汇总
@@ -43,7 +44,12 @@ HEALTH_URL = f"{WEBAPP_HOST}/health"
 INGEST_URL = f"{WEBAPP_HOST}/api/ingest/funds"
 JOB_URL_TPL = f"{WEBAPP_HOST}/api/ingest/jobs/{{}}"
 
-EXCLUDED_FUNDS = set()
+# Coolabah 系基金 (fund_id 以 coolabah 开头) 走 HTML 渲染成 PDF 的独立摄取通道
+# (见 llm_ingest/html_to_pdf.py), 触发方式与本脚本 trigger_one() 发的普通请求
+# 不同 (需要 confirmed_url 指向渲染源, 而非留空走搜索发现)。批量重爬只处理
+# 走标准 PDF 发现流程的基金, Coolabah 排除在外 (原计划留到 Spec C 单独处理,
+# 但 EXCLUDED_FUNDS 一直是空集合, 从未真正过滤 -- 排除条件写在这个前缀判断里)。
+_EXCLUDED_FUND_ID_PREFIXES = ("coolabah",)
 WIPE_TABLES = [
     "monthly_returns", "confirmed_gaps", "pending_review",
     "fund_metrics", "anomalies", "ai_reports",
@@ -160,7 +166,7 @@ def load_target_funds(fund_id_filter: Optional[str] = None) -> List[Tuple[str, s
         conn.close()
     out = []
     for fid, fname in rows:
-        if fid in EXCLUDED_FUNDS:
+        if fid.lower().startswith(_EXCLUDED_FUND_ID_PREFIXES):
             continue
         if fund_id_filter and fid != fund_id_filter:
             continue
