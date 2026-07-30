@@ -1,50 +1,44 @@
 import { useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import type { FundMetrics } from '../types'
+import { useT } from '../i18n/useT'
+import type { I18nKey } from '../i18n'
 
 function cardBorder(status: string) {
   switch (status) {
     case 'applied':
-      return 'border-l-red-500'
+      return 'border-l-neg'
     case 'watch':
-      return 'border-l-orange-400'
+      return 'border-l-warn'
     case 'insufficient':
-      return 'border-l-gray-300'
+      return 'border-l-border-strong'
     default:
-      return 'border-l-green-500'
+      return 'border-l-pos'
   }
 }
 
-function statusTag(status: string) {
+const STATUS_KEY: Record<string, I18nKey> = {
+  applied: 'smoothing.statusApplied',
+  watch: 'smoothing.statusWatch',
+  insufficient: 'smoothing.statusInsufficient',
+  none: 'smoothing.statusNone',
+}
+
+function statusTagClass(status: string) {
   switch (status) {
     case 'applied':
-      return (
-        <span className="text-xs bg-red-50 text-red-700 px-2 py-0.5 rounded-full font-medium">
-          需去平滑
-        </span>
-      )
+      return 'bg-neg-soft text-neg'
     case 'watch':
-      return (
-        <span className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded-full font-medium">
-          建议关注
-        </span>
-      )
+      return 'bg-warn-soft text-warn'
     case 'insufficient':
-      return (
-        <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-medium">
-          数据不足
-        </span>
-      )
+      return 'bg-sunken text-fg-subtle'
     default:
-      return (
-        <span className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded-full font-medium">
-          无需去平滑
-        </span>
-      )
+      return 'bg-pos-soft text-pos'
   }
 }
 
 export default function SmoothingCards() {
+  const t = useT()
   const compareData = useStore(s => s.compareData)
 
   const cards = useMemo(() => {
@@ -59,24 +53,24 @@ export default function SmoothingCards() {
 
       let status: string
       let prob: number | null
-      let note = ''
+      let note: string
 
       if (isShort) {
         status = 'insufficient'
         prob = null
-        note = `防火墙 1 未通过：历史数据 ${historyMonths} 个月，不足 36 个月，无法检验自相关性`
+        note = t('smoothing.fw1Fail', { n: historyMonths })
       } else if (isGeltner) {
         status = 'applied'
         prob = Math.min((q / (historyMonths - 1)) * 100, 99.9)
-        note = '三重防火墙全部通过，已应用 Geltner 去平滑'
+        note = t('smoothing.allPass')
       } else if (phi > 0 && !isSignificant) {
         status = 'watch'
         prob = Math.min((q / (historyMonths - 1)) * 100, 99.9)
-        note = 'φ 为正但未达显著，建议持续观测'
+        note = t('smoothing.phiPosWeak')
       } else {
         status = 'none'
         prob = null
-        note = '自相关性不显著（φ≈0 或 Q 检验未通过），无需去平滑'
+        note = t('smoothing.notSignificant')
       }
 
       return {
@@ -90,65 +84,69 @@ export default function SmoothingCards() {
         note,
       }
     })
-  }, [compareData])
+  }, [compareData, t])
 
   if (cards.length === 0) return null
 
   return (
-    <div className="bg-white rounded-lg p-5 shadow-sm">
+    <div className="card p-5">
       <h2 className="text-base font-medium mb-4">
-        去平滑分析（Geltner 检验）{' '}
-        <span className="text-xs bg-cyan-50 text-cyan-700 px-2 py-0.5 rounded-full ml-2">
-          {cards.length} 支基金
+        {t('smoothing.title')}{' '}
+        <span className="text-xs bg-accent-soft text-accent px-2 py-0.5 rounded-full ml-2">
+          {t('smoothing.fundCount', { n: cards.length })}
         </span>
       </h2>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {cards.map(c => (
           <div
             key={c.fund_id}
-            className={`bg-gray-50 rounded-lg p-4 border-l-4 ${cardBorder(c.status)}`}
+            className={`bg-sunken rounded-lg p-4 border-l-4 ${cardBorder(c.status)}`}
           >
-            <div className="mb-3">{statusTag(c.status)}</div>
-            <div className="font-medium text-sm mb-3">{c.fund_name}</div>
-            <div className="space-y-1.5 text-xs text-gray-600">
+            <div className="mb-3">
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusTagClass(c.status)}`}>
+                {t(STATUS_KEY[c.status])}
+              </span>
+            </div>
+            <div className="font-medium text-sm mb-3 text-fg">{c.fund_name}</div>
+            <div className="space-y-1.5 text-xs text-fg-muted">
               <div className="flex justify-between">
-                <span className="text-gray-400">自相关系数 φ</span>
-                <span>{c.phi.toFixed(4)}</span>
+                <span className="text-fg-subtle">{t('smoothing.phi')}</span>
+                <span className="font-mono tabular-nums text-fg">{c.phi.toFixed(4)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">Ljung-Box Q</span>
-                <span>{c.q.toFixed(4)}</span>
+                <span className="text-fg-subtle">{t('smoothing.ljungBoxQ')}</span>
+                <span className="font-mono tabular-nums text-fg">{c.q.toFixed(4)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">数据月数</span>
-                <span>
-                  {c.historyMonths} 个月 {c.historyMonths >= 36 ? '✓' : '✗'}
+                <span className="text-fg-subtle">{t('smoothing.months')}</span>
+                <span className="font-mono tabular-nums text-fg">
+                  {t('common.months', { n: c.historyMonths })} {c.historyMonths >= 36 ? '✓' : '✗'}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-400">人为干预概率</span>
+                <span className="text-fg-subtle">{t('smoothing.interventionProb')}</span>
                 <span
-                  className={`font-semibold ${
+                  className={`font-mono tabular-nums font-semibold ${
                     c.status === 'applied'
-                      ? 'text-red-600'
+                      ? 'text-neg'
                       : c.status === 'watch'
-                        ? 'text-orange-500'
-                        : 'text-gray-400'
+                        ? 'text-warn'
+                        : 'text-fg-subtle'
                   }`}
                 >
-                  {c.prob != null ? `${c.prob.toFixed(1)}%` : '无法判定'}
+                  {c.prob != null ? `${c.prob.toFixed(1)}%` : t('smoothing.unknown')}
                 </span>
               </div>
               {c.prob != null && (
-                <div className="h-1.5 bg-gray-200 rounded-full mt-1 overflow-hidden">
+                <div className="h-1.5 bg-border rounded-full mt-1 overflow-hidden">
                   <div
-                    className={`h-full rounded-full ${c.status === 'applied' ? 'bg-red-500' : 'bg-orange-400'}`}
+                    className={`h-full rounded-full ${c.status === 'applied' ? 'bg-neg' : 'bg-warn'}`}
                     style={{ width: `${Math.min(c.prob, 100)}%` }}
                   />
                 </div>
               )}
             </div>
-            <div className="text-xs text-gray-400 mt-3">{c.note}</div>
+            <div className="text-xs text-fg-subtle mt-3">{c.note}</div>
           </div>
         ))}
       </div>

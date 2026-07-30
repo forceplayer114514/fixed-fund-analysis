@@ -17,8 +17,6 @@ const modules = {
  */
 const PENDING_FILES: string[] = [
   'components/AnomalyTable.tsx',
-  'components/CompareTable.tsx',
-  'components/SmoothingCards.tsx',
   'pages/Anomalies.tsx',
   'pages/Dashboard.tsx',
   'pages/FundManagement.tsx',
