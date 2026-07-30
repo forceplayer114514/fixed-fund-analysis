@@ -1,10 +1,12 @@
 import { useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import FundChips from '../components/FundChips'
 import MetricCard from '../components/MetricCard'
 import NavChart from '../components/NavChart'
 import CompareTable from '../components/CompareTable'
 import ExcessHeatmap from '../components/ExcessHeatmap'
+import { useT } from '../i18n/useT'
 import type { FundMetrics } from '../types'
 
 /** 小样本门禁阈值（PDD 1.5）：当前窗口有效样本月数 n < 24 时 IR/胜率不可靠。 */
@@ -22,6 +24,7 @@ function rankAmong(
 }
 
 export default function Dashboard() {
+  const t = useT()
   const funds = useStore(s => s.funds)
   const fundsLoading = useStore(s => s.fundsLoading)
   const fundsError = useStore(s => s.fundsError)
@@ -50,7 +53,7 @@ export default function Dashboard() {
     : undefined
   const isOrig = smoothingMode === 'original'
   const isSmallSample = !m || (m.excess_sample_months ?? 0) < SMALL_SAMPLE_THRESHOLD
-  const smallNote = m ? `样本不足(n=${m.excess_sample_months})，统计指标不可靠` : undefined
+  const smallNote = m ? t('common.smallSample', { n: m.excess_sample_months ?? 0 }) : undefined
   const eligibleForStats = (x: FundMetrics) => (x.excess_sample_months ?? 0) >= SMALL_SAMPLE_THRESHOLD
 
   const excess = m ? (isOrig ? m.orig_annualized_excess_return : m.un_annualized_excess_return) : null
@@ -61,38 +64,46 @@ export default function Dashboard() {
   const recovered = m ? (isOrig ? m.orig_dd_recovered : m.un_dd_recovered) : false
   const recoverySubtext: string | undefined = (() => {
     if (!m) return undefined
-    if (dd === 0 || recoveryMonths == null) return '无回撤'
-    return recovered ? `恢复 ${recoveryMonths} 个月` : `未恢复(已 ${recoveryMonths} 个月)`
+    if (dd === 0 || recoveryMonths == null) return t('common.noDrawdown')
+    return recovered
+      ? t('common.recovered', { n: recoveryMonths })
+      : t('common.notRecovered', { n: recoveryMonths })
   })()
 
-  if (fundsLoading) return <div className="text-gray-400">加载基金列表...</div>
-  if (fundsError) return <div className="text-red-500">基金列表加载失败：{fundsError}</div>
-  if (funds.length === 0) return <div className="text-gray-400">暂无基金数据，请先通过 skills 端添加基金</div>
+  // 排除提示：整句取自字典，链接文字（nav.funds）在句中原样出现，按其位置拆成前后两段插入真实 <Link>
+  const excludedIds = compareData?.excluded?.map(e => e.fund_id).join(t('common.listSeparator')) ?? ''
+  const excludedText = t('dashboard.excludedNotice', { ids: excludedIds })
+  const fundsLinkLabel = t('nav.funds')
+  const [excludedBefore, excludedAfter = ''] = excludedText.split(fundsLinkLabel)
+
+  if (fundsLoading) return <div className="text-fg-subtle">{t('dashboard.loadingFunds')}</div>
+  if (fundsError) return <div className="text-neg">{t('dashboard.fundsLoadFailed')}{fundsError}</div>
+  if (funds.length === 0) return <div className="text-fg-subtle">{t('dashboard.noFunds')}</div>
 
   return (
     <div>
       <div className="flex justify-between items-center mb-5 flex-wrap gap-3">
-        <h1 className="text-xl font-semibold">对比看板</h1>
+        <h1 className="text-xl font-semibold text-fg">{t('dashboard.title')}</h1>
         <div className="flex gap-2">
           <select
-            className="text-sm border border-gray-200 rounded px-3 py-1.5 bg-white disabled:bg-gray-100 disabled:text-gray-400"
+            className="text-sm border border-border rounded-md px-3 py-1.5 bg-surface text-fg disabled:bg-sunken disabled:text-fg-subtle"
             value={period}
             disabled={!!anchorFundId}
-            title={anchorFundId ? '锚定模式下展示锚定基金完整历史' : undefined}
+            title={anchorFundId ? t('dashboard.periodDisabledHint') : undefined}
             onChange={e => setPeriod(e.target.value as any)}
           >
-            <option value="full">全部区间</option>
-            <option value="3y">近3年</option>
-            <option value="1y">近1年</option>
-            <option value="common">共同区间</option>
+            <option value="full">{t('dashboard.periodFull')}</option>
+            <option value="3y">{t('dashboard.period3y')}</option>
+            <option value="1y">{t('dashboard.period1y')}</option>
+            <option value="common">{t('dashboard.periodCommon')}</option>
           </select>
           <select
-            className="text-sm border border-gray-200 rounded px-3 py-1.5 bg-white"
+            className="text-sm border border-border rounded-md px-3 py-1.5 bg-surface text-fg disabled:bg-sunken disabled:text-fg-subtle"
             value={smoothingMode}
             onChange={e => setSmoothingMode(e.target.value as any)}
           >
-            <option value="original">原始</option>
-            <option value="unsmoothed">去平滑</option>
+            <option value="original">{t('dashboard.smoothingOriginal')}</option>
+            <option value="unsmoothed">{t('dashboard.smoothingUnsmoothed')}</option>
           </select>
         </div>
       </div>
@@ -100,36 +111,38 @@ export default function Dashboard() {
       <FundChips />
 
       {compareError && (
-        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-4 mb-5">
-          指标加载失败：{compareError}
+        <div className="bg-neg-soft border border-neg-border text-neg text-sm rounded-lg p-4 mb-5">
+          {t('dashboard.metricsLoadFailed')}{compareError}
         </div>
       )}
 
       {compareData?.excluded && compareData.excluded.length > 0 && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-sm rounded-lg p-3 mb-5">
-          {compareData.excluded.map(e => e.fund_id).join('、')} 因数据缺口已排除对比，请到 <a className="underline" href="/funds">/funds</a> 查看详情
+        <div className="bg-warn-soft border border-warn-border text-warn text-sm rounded-lg p-3 mb-5">
+          {excludedBefore}
+          <Link className="underline" to="/funds">{fundsLinkLabel}</Link>
+          {excludedAfter}
         </div>
       )}
 
       {m ? (
-        <div className="text-sm text-gray-500 mb-3">
-          当前展示：<span className="font-medium text-gray-800">{m.fund_name ?? anchorFundId ?? '-'}</span>
-          <span className="text-gray-400 ml-2">（{m.history_months} 个月历史）</span>
+        <div className="text-sm text-fg-muted mb-3">
+          {t('dashboard.showing')}<span className="font-medium text-fg">{m.fund_name ?? anchorFundId ?? '-'}</span>
+          <span className="text-fg-subtle ml-2">{t('dashboard.historyMonths', { n: m.history_months })}</span>
         </div>
       ) : (
-        <div className="text-sm text-gray-400 mb-3">点击曲线或下方列表行锚定基金查看详情</div>
+        <div className="text-sm text-fg-subtle mb-3">{t('dashboard.pickAnchorShort')}</div>
       )}
 
       {m ? (
         <div className="flex gap-3 mb-6 flex-wrap">
           <MetricCard
-            label="年化超额收益"
+            label={t('metric.excess')}
             value={excess != null ? `${(excess * 100).toFixed(2)}%` : '-'}
             rank={rankAmong(allMetrics, excess, x =>
               isOrig ? x.orig_annualized_excess_return : x.un_annualized_excess_return)}
           />
           <MetricCard
-            label="夏普比率（超额）"
+            label={t('metric.sharpe')}
             value={sharpe != null ? sharpe.toFixed(2) : '-'}
             rank={isSmallSample ? undefined : rankAmong(allMetrics, sharpe,
               x => (isOrig ? x.orig_sharpe_ratio : x.un_sharpe_ratio), eligibleForStats)}
@@ -137,7 +150,7 @@ export default function Dashboard() {
             warnNote={isSmallSample ? smallNote : undefined}
           />
           <MetricCard
-            label="超额胜率"
+            label={t('metric.winRate')}
             value={winRate != null ? `${(winRate * 100).toFixed(1)}%` : '-'}
             rank={isSmallSample ? undefined : rankAmong(allMetrics, winRate,
               x => (isOrig ? x.orig_excess_win_rate : x.un_excess_win_rate), eligibleForStats)}
@@ -145,15 +158,15 @@ export default function Dashboard() {
             warnNote={isSmallSample ? smallNote : undefined}
           />
           <MetricCard
-            label="最大回撤"
+            label={t('metric.maxDrawdown')}
             value={dd != null ? `${(dd * 100).toFixed(2)}%` : '-'}
             rank={rankAmong(allMetrics, dd, x => isOrig ? x.orig_max_drawdown : x.un_max_drawdown)}
             subtext={recoverySubtext}
           />
         </div>
       ) : (
-        <div className="bg-gray-50 border border-dashed border-gray-200 rounded-lg p-6 mb-6 text-center text-sm text-gray-400">
-          点击下方曲线或指标对比列表中的一行锚定基金，查看其完整历史指标卡片与月度超额热力图
+        <div className="bg-sunken border border-dashed border-border rounded-lg p-6 mb-6 text-center text-sm text-fg-subtle">
+          {t('dashboard.pickAnchorLong')}
         </div>
       )}
 

@@ -16,7 +16,6 @@ const modules = {
  * Task 14 会断言此数组为空 —— 空数组之后，任何新页面写死中文都会让本测试报红。
  */
 const PENDING_FILES: string[] = [
-  'pages/Dashboard.tsx',
   'pages/FundManagement.tsx',
 ]
 
