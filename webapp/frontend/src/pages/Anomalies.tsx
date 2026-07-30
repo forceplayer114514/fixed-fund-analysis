@@ -2,8 +2,10 @@ import { useEffect } from 'react'
 import { useStore } from '../store/useStore'
 import AnomalyTable from '../components/AnomalyTable'
 import SmoothingCards from '../components/SmoothingCards'
+import { useT } from '../i18n/useT'
 
 export default function AnomaliesPage() {
+  const t = useT()
   const fetchFunds = useStore(s => s.fetchFunds)
   const fetchAnomalies = useStore(s => s.fetchAnomalies)
   const fetchCompare = useStore(s => s.fetchCompare)
@@ -24,9 +26,9 @@ export default function AnomaliesPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold mb-5">异常审计</h1>
+      <h1 className="text-xl font-semibold mb-5 text-fg">{t('anomaly.title')}</h1>
       {anomaliesLoading && (
-        <div className="text-gray-400 text-sm mb-4">加载异常数据...</div>
+        <div className="text-fg-subtle text-sm mb-4">{t('anomaly.loading')}</div>
       )}
       <AnomalyTable />
       <SmoothingCards />
