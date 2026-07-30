@@ -70,11 +70,9 @@ export default function Dashboard() {
       : t('common.notRecovered', { n: recoveryMonths })
   })()
 
-  // 排除提示：整句取自字典，链接文字（nav.funds）在句中原样出现，按其位置拆成前后两段插入真实 <Link>
+  // 排除提示：前后两段各自是独立字典 key，中间插入真实 <Link>——不依赖任何字符串拼接/切分，
+  // 未来改字典措辞或大小写都不会影响渲染结构（区别于曾用过的运行时 split 方案）。
   const excludedIds = compareData?.excluded?.map(e => e.fund_id).join(t('common.listSeparator')) ?? ''
-  const excludedText = t('dashboard.excludedNotice', { ids: excludedIds })
-  const fundsLinkLabel = t('nav.funds')
-  const [excludedBefore, excludedAfter = ''] = excludedText.split(fundsLinkLabel)
 
   if (fundsLoading) return <div className="text-fg-subtle">{t('dashboard.loadingFunds')}</div>
   if (fundsError) return <div className="text-neg">{t('dashboard.fundsLoadFailed')}{fundsError}</div>
@@ -118,9 +116,9 @@ export default function Dashboard() {
 
       {compareData?.excluded && compareData.excluded.length > 0 && (
         <div className="bg-warn-soft border border-warn-border text-warn text-sm rounded-lg p-3 mb-5">
-          {excludedBefore}
-          <Link className="underline" to="/funds">{fundsLinkLabel}</Link>
-          {excludedAfter}
+          {t('dashboard.excludedNoticePrefix', { ids: excludedIds })}
+          <Link className="underline" to="/funds">{t('nav.funds')}</Link>
+          {t('dashboard.excludedNoticeSuffix')}
         </div>
       )}
 
