@@ -87,7 +87,7 @@ export default function AnomalyTable() {
         </select>
       </div>
 
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
         <table className="w-full text-sm">
           <thead>
             <tr>
