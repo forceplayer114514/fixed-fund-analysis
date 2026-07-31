@@ -7,7 +7,6 @@
 export const cn = {
   'common.loading': '加载中...',
   'common.noData': '暂无数据',
-  'common.error': '出错了',
   'common.noDrawdown': '无回撤',
   'common.months': '{n} 个月',
   'common.recovered': '恢复 {n} 个月',

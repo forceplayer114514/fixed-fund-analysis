@@ -20,7 +20,9 @@ export function translate(lang: Lang, key: I18nKey, params?: I18nParams): string
   if (template == null) return String(key)
   return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
     if (params && Object.prototype.hasOwnProperty.call(params, name)) return String(params[name])
-    console.warn(`[i18n] key "${String(key)}" 缺少参数 "${name}"`)
+    if (import.meta.env.DEV) {
+      console.warn(`[i18n] key "${String(key)}" 缺少参数 "${name}"`)
+    }
     return whole
   })
 }

@@ -4,7 +4,6 @@ import type { cn } from './cn'
 export const en: Record<keyof typeof cn, string> = {
   'common.loading': 'Loading…',
   'common.noData': 'No data',
-  'common.error': 'Something went wrong',
   'common.noDrawdown': 'No drawdown',
   'common.months': '{n} mo',
   'common.recovered': 'Recovered in {n} mo',

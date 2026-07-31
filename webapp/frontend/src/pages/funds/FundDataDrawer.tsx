@@ -66,14 +66,14 @@ export default function FundDataDrawer({
             {!loading && returns.length > 0 && (
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 text-fg-muted font-medium">{t('funds.colYearMonth')}</th>
-                    <th className="text-right py-2 text-fg-muted font-medium">{t('funds.colNetReturn')}</th>
+                  <tr>
+                    <th className="th text-left py-2">{t('funds.colYearMonth')}</th>
+                    <th className="th text-right py-2">{t('funds.colNetReturn')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {returns.map(r => (
-                    <tr key={r.date} className="border-b border-border">
+                    <tr key={r.date} className="border-b border-border even:bg-sunken hover:bg-accent-soft">
                       <td className="py-1.5 text-fg">{r.date.slice(0, 7)}</td>
                       <td className={`num py-1.5 ${r.net_return < 0 ? 'text-neg' : 'text-fg'}`}>
                         {(r.net_return * 100).toFixed(4)}%
@@ -104,14 +104,14 @@ export default function FundDataDrawer({
             {!rbaHistoryLoading && rbaHistory.length > 0 && (
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 text-fg-muted font-medium">{t('funds.colRbaPeriod')}</th>
-                    <th className="text-right py-2 text-fg-muted font-medium">{t('funds.colRbaTarget')}</th>
+                  <tr>
+                    <th className="th text-left py-2">{t('funds.colRbaPeriod')}</th>
+                    <th className="th text-right py-2">{t('funds.colRbaTarget')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {[...rbaHistory].reverse().map(p => (
-                    <tr key={p.start_month} className="border-b border-border">
+                    <tr key={p.start_month} className="border-b border-border even:bg-sunken hover:bg-accent-soft">
                       <td className="py-1.5 text-fg">
                         {formatMonthRange(p.start_month, p.end_month, t)}
                       </td>
