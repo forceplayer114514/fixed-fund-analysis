@@ -151,7 +151,7 @@ export default function FundTable({
                 {deleteConfirm === f.fund_id ? (
                   <span className="text-xs">
                     {t('funds.deleteConfirmPrompt')}
-                    <button className="text-neg ml-1 mr-1" onClick={() => onConfirmDelete(f.fund_id)}>
+                    <button className="bg-neg text-white rounded px-1.5 ml-1 mr-1" onClick={() => onConfirmDelete(f.fund_id)}>
                       {t('funds.yes')}
                     </button>
                     <button className="text-fg-muted" onClick={onCancelDelete}>

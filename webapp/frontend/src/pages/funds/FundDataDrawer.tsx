@@ -75,7 +75,7 @@ export default function FundDataDrawer({
                   {returns.map(r => (
                     <tr key={r.date} className="border-b border-border">
                       <td className="py-1.5 text-fg">{r.date.slice(0, 7)}</td>
-                      <td className={`py-1.5 text-right ${r.net_return < 0 ? 'text-neg' : 'text-fg'}`}>
+                      <td className={`num py-1.5 ${r.net_return < 0 ? 'text-neg' : 'text-fg'}`}>
                         {(r.net_return * 100).toFixed(4)}%
                       </td>
                     </tr>
@@ -115,7 +115,7 @@ export default function FundDataDrawer({
                       <td className="py-1.5 text-fg">
                         {formatMonthRange(p.start_month, p.end_month, t)}
                       </td>
-                      <td className="py-1.5 text-right text-fg">
+                      <td className="num py-1.5 text-fg">
                         {(p.rate * 100).toFixed(2)}%
                       </td>
                     </tr>
