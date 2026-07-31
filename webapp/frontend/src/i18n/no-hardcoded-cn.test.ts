@@ -69,8 +69,13 @@ describe('闸门收口', () => {
       .map((text, i) => ({ line: i + 1, text }))
       .filter(x =>
         /#[0-9a-fA-F]{3,8}\b/.test(x.text) ||
+        // rgb(/rgba(/hsl(/hsla( 只在紧跟数字（字面量参数）时才算违规——
+        // ExcessHeatmap.tsx 用 `rgba(${palette.heatPos} / ${a})` 这种模板字符串
+        // 拼 style={{backgroundColor}} 的运行时调色板值合法（不是写死的颜色），
+        // 后面紧跟的是 `${`，不是数字，天然被这条正则排除，不会被误判。
+        /\b(?:rgb|rgba|hsl|hsla)\(\s*\d/.test(x.text) ||
         /\bdark:/.test(x.text) ||
-        /\b(?:bg|text|border)-(?:gray|slate|zinc|neutral|stone|cyan|red|amber|green|blue)-\d{2,3}\b/.test(x.text),
+        /\b(?:bg|text|border)-(?:gray|slate|zinc|neutral|stone|cyan|red|amber|green|blue|yellow|orange|purple|pink|indigo|teal|emerald|lime|rose|violet|sky|fuchsia)-\d{2,3}\b/.test(x.text),
       )
       .map(x => `${rel}:${x.line}: ${x.text.trim()}`)
     expect(offenders).toEqual([])
