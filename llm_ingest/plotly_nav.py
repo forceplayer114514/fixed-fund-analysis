@@ -20,6 +20,42 @@ from typing import List, Optional, Tuple
 
 _DATA_ARRAY_START_RE = re.compile(r'(?:var\s+data\s*=\s*\[|"data"\s*:\s*\[)')
 
+# 只忽略"载体类型词" -- 说的是这只产品用什么壳装的, 不区分是哪只基金。
+# 刻意**不**收 fundmonitors._NAME_STOPWORDS 里那批金融类别词 (income/credit/
+# floating/rate/high/yield...): 那份闸求的是"交集非空", 越宽越好; 这里求的是
+# "子集", 越宽越容易把兄弟基金放进来, 方向相反。
+_TYPE_WORDS = frozenset({
+    "fund", "funds", "trust", "etf", "class", "units", "unit",
+    "wholesale", "retail", "ordinary", "the", "and", "of", "a", "an",
+    "au", "aud", "ltd", "limited",
+})
+
+
+def _tokens(name: str) -> frozenset:
+    """基金名/trace 名 -> 去载体类型词后的 token 集合 (长度 >=2)."""
+    toks = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return frozenset(t for t in toks if t not in _TYPE_WORDS and len(t) >= 2)
+
+
+def _name_hit(trace_name: str, fund_name_pattern: str) -> bool:
+    """trace 名是否指向目标基金.
+
+    两条路径任一命中即可:
+      (a) 子串 -- 原有语义, 调用方拿片段当 pattern 时走这条
+      (b) token 子集 -- trace 名的 token 全在基金名里。实测 Coolabah 那页
+          trace 叫 "Global Floating-Rate High Yield Complex ETF", 不带发行商
+          前缀, 拿基金全名去子串匹配必然零命中。
+          {global,floating,rate,high,yield,complex} ⊆
+          {coolabah,global,floating,rate,high,yield,complex} -> 命中;
+          兄弟基金 "...High Yield Fund AI" 多出 ai -> 不是子集 -> 排除。
+    子集判定失败只是不命中, 不做任何补救猜测 (宁可漏, 不可错)。
+    """
+    if fund_name_pattern.lower() in trace_name.lower():
+        return True
+    t = _tokens(trace_name)
+    f = _tokens(fund_name_pattern)
+    return bool(t) and bool(f) and t <= f
+
 
 def _extract_data_array_contents(html: str) -> List[str]:
     """提取全部 Plotly data 数组的括号内内容 (不含外层方括号).
@@ -109,7 +145,8 @@ def parse_plotly_nav_series(
 ) -> List[Tuple[str, float]]:
     """从 pandoc HTML 报告 Plotly hovertext 提取基金类 NAV 序列 (逐字转写).
 
-    按 fund_name_pattern 在 trace 的 name 字段过滤; name 含
+    按 fund_name_pattern 在 trace 的 name 字段过滤 (子串或 token 子集, 见
+    _name_hit); name 含
     Benchmark/Index/AusBond 的 trace 自动丢弃 (结构上 benchmark 不可能混入)。
     多 trace 匹配 pattern -> raise (防误把别的份额类 trace 当目标)。零匹配 ->
     raise (防 pattern 打错时空列表被当"无数据"跳过)。返回 [(date, nav), ...] 升序。
@@ -127,6 +164,11 @@ def parse_plotly_nav_series(
 
     benchmark_markers = ("benchmark", "index", "ausbond")
     matched: List[List[Tuple[str, float]]] = []
+    # 页内"长得像基金类"的候选曲线名 (排除基准后, 且带 hover 数组)。判不出来时
+    # 一并写进报错 -- 同一策略常有多个份额类别 (实测 Coolabah 一页一个类:
+    # "(Assisted)" / "(Institutional)"), 登记的基金名没写清是哪一类时, 光说
+    # "零匹配" 没法让人知道该改成什么。
+    candidates: List[str] = []
     for trace in trace_objs:
         nm = re.search(r'"name"\s*:\s*"([^"]+)"', trace)
         if not nm:
@@ -135,8 +177,11 @@ def parse_plotly_nav_series(
         name_lower = name.lower()
         if any(m in name_lower for m in benchmark_markers):
             continue
-        if fund_name_pattern.lower() in name_lower:
-            tm = re.search(r'"text"\s*:\s*\[([^\]]+)\]', trace, re.DOTALL)
+        has_text = re.search(r'"text"\s*:\s*\[([^\]]+)\]', trace, re.DOTALL)
+        if has_text and len(_tokens(name)) >= 2 and name not in candidates:
+            candidates.append(name)
+        if _name_hit(name, fund_name_pattern):
+            tm = has_text
             if not tm:
                 continue
             text_arr = tm.group(1)
@@ -150,14 +195,15 @@ def parse_plotly_nav_series(
             ]
             matched.append(series)
 
+    hint = f" 页内候选曲线={candidates[:6]}" if candidates else ""
     if len(matched) == 0:
         raise ValueError(
             f"parse_plotly_nav_series: 零匹配 pattern={fund_name_pattern!r} "
-            "(benchmark 已排除)"
+            f"(benchmark 已排除).{hint}"
         )
     if len(matched) > 1:
         raise ValueError(
             f"parse_plotly_nav_series: 多 trace 匹配 pattern={fund_name_pattern!r}, "
-            f"命中 {len(matched)} 条, 需换更精确的 pattern"
+            f"命中 {len(matched)} 条, 需换更精确的 pattern.{hint}"
         )
     return sorted(matched[0], key=lambda x: x[0])

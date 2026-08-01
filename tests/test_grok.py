@@ -46,6 +46,22 @@ class TestGrokAsk:
         assert ans.content == "ok"
         assert p.call_count == 2
 
+    def test_backoff_grows_between_retries(self, monkeypatch):
+        """2026-08-01 实测: 503 是中转站在轮换账号, 固定 5 秒 x3 (总共 15 秒)
+        等不到池子恢复, 连续几轮摄取全挂。退避要逐次拉长, 把重试窗口拉开。"""
+        from llm_ingest import grok
+        monkeypatch.setenv("GROK_API_KEY", "k")
+        slept: list = []
+        monkeypatch.setattr(grok.time, "sleep", lambda s: slept.append(s))
+        seq = [_resp(503, {}, "upstream_unavailable")] * (grok.RETRIES + 1)
+        with patch.object(grok.requests, "post", side_effect=seq):
+            with pytest.raises(grok.GrokError):
+                grok.grok_ask("q")
+        assert len(slept) == grok.RETRIES
+        assert slept == sorted(slept), "退避时间必须逐次不减"
+        assert slept[-1] > slept[0], "必须真的拉长, 不能恒定"
+        assert sum(slept) >= 30, f"重试总窗口太短: {slept}"
+
     def test_raises_after_retries_exhausted(self, monkeypatch):
         from llm_ingest import grok
         monkeypatch.setenv("GROK_API_KEY", "k")

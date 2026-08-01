@@ -35,7 +35,11 @@ DEFAULT_BASE_URL = "https://grok2api.supernip.site"
 DEFAULT_MODEL = "grok-chat-fast"
 DEFAULT_TIMEOUT = 180
 RETRY_STATUS = (429, 502, 503, 504)
+# 退避逐次翻倍 (5/10/20 秒, 总窗口 35 秒)。原来固定 5 秒 x3 只有 15 秒 --
+# 2026-08-01 实测中转站轮换账号比这慢, 4 次调用会全部撞在同一批坏账号上,
+# 连着几轮摄取都挂在搜索这一步。
 RETRY_SLEEP = 5
+RETRIES = 3
 PROMPT_DIR = Path(__file__).parent / "prompts"
 
 _URL_RE = re.compile(r"https?://[^\s\)\]<>\"'，、）]+")
@@ -79,9 +83,9 @@ def grok_ask(
     prompt: str,
     *,
     timeout: int = DEFAULT_TIMEOUT,
-    retries: int = 3,
+    retries: int = RETRIES,
 ) -> GrokAnswer:
-    """单次 Grok 调用. 429/502/503/504 重试, 耗尽抛 GrokError.
+    """单次 Grok 调用. 429/502/503/504 重试 (退避逐次翻倍), 耗尽抛 GrokError.
 
     注意: Grok 单次调用内部就会 fan-out 多条 query (实测一次给 24-37 条源),
     因此**不要**照抄 multi_query_search 的三次 query 模式, 一次调用即可,
@@ -99,7 +103,7 @@ def grok_ask(
         except requests.RequestException as e:
             last = f"网络错误: {e}"
             if attempt < retries:
-                time.sleep(RETRY_SLEEP)
+                time.sleep(RETRY_SLEEP * (2 ** attempt))
                 continue
             raise GrokError(last) from e
         if r.status_code == 200:
@@ -115,7 +119,7 @@ def grok_ask(
             return GrokAnswer(content=content, sources=sources, raw=data)
         last = f"HTTP {r.status_code}: {r.text[:200]}"
         if r.status_code in RETRY_STATUS and attempt < retries:
-            time.sleep(RETRY_SLEEP)
+            time.sleep(RETRY_SLEEP * (2 ** attempt))
             continue
         raise GrokError(last)
     raise GrokError(last or "retries_exhausted")

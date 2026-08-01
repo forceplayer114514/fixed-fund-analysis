@@ -378,6 +378,24 @@ class TestCheckFundIdentity:
             "Bentham Syndicated Loan Fund")
         assert r.passed
 
+    def test_etf_wrapper_word_stripped(self):
+        """2026-08-01 实测: Coolabah 月报抬头是 "...High Yield Complex ETF",
+        用户登记的名字没带 ETF, 17 个月全被拦成待审。ETF 与 fund/trust/class
+        同属"这只产品用什么壳装的", 不是区分哪只基金的词。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Coolabah Global Floating-Rate High Yield Complex ETF",
+            "Coolabah Global Floating-Rate High Yield Complex")
+        assert r.passed, r.reason
+
+    def test_etf_stripping_does_not_let_siblings_through(self):
+        """剥掉 ETF 之后, 兄弟份额类别仍必须被拦下。"""
+        from llm_ingest.verify import check_fund_identity
+        r = check_fund_identity(
+            "Coolabah Global Floating-Rate High Yield Fund AI",
+            "Coolabah Global Floating-Rate High Yield Complex")
+        assert not r.passed
+
     def test_user_typo_tolerated(self):
         """真实案例: pdf_cache 里存在 stake_accumlate 目录 (少一个 u)。
         用户输入拼写错误不应导致全部数据转待审。"""

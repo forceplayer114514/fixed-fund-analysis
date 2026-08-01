@@ -137,6 +137,10 @@ _IDENTITY_STOPWORDS = frozenset({
     "fund", "funds", "trust", "the", "of", "and", "a", "an",
     "class", "units", "unit", "au", "aud", "nz", "nzd",
     "wholesale", "retail", "ltd", "limited", "pty", "plc",
+    # etf: 2026-08-01 实测 Coolabah 月报抬头是 "...High Yield Complex ETF",
+    # 用户登记的名字没带 ETF, 17 个月全被拦成待审。ETF 说的是这只产品用什么壳
+    # 装的, 与 fund/trust/class 同类, 不是区分哪只基金的词。
+    "etf",
 })
 _IDENTITY_CUTOFF = 0.85
 

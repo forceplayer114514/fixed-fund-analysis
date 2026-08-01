@@ -362,6 +362,9 @@ class TestGrokAskedTwiceConcurrently:
 
     def test_both_failures_fall_back_to_tavily_visibly(self, monkeypatch):
         from llm_ingest import grok
+        # 两次都是 503 会触发整步重试 (见 TestGrokStepLevelRetry), 这里只关心
+        # 降级可见, 别真等那 20 秒
+        monkeypatch.setattr(d2.time, "sleep", lambda s: None)
         self._stub_answer(monkeypatch, {
             "Stake Accumulate": grok.GrokError("HTTP 503"),
             "Stake Accumulate Fund": grok.GrokError("HTTP 503"),
@@ -468,6 +471,7 @@ class TestLocateCandidates:
         def _boom(*a, **k):
             raise grok.GrokError("HTTP 503: upstream_unavailable")
 
+        monkeypatch.setattr(d2.time, "sleep", lambda s: None)
         monkeypatch.setattr(d2, "_grok_answer_archive", _boom)
         monkeypatch.setattr(
             d2, "multi_query_search", lambda *a, **k: ["https://issuer.com/reports"])
@@ -489,6 +493,375 @@ class TestLocateCandidates:
             d2, "rank_urls", lambda urls, *a, **k: [{"url": urls[0], "score": 1, "reason": ""}])
         _d, _r, ev = d2.locate_candidates("F", "I", client=object())
         assert ev["engine_used"] == "tavily"
+
+
+class TestAnchorTextInsideNestedMarkup:
+    """2026-08-01 Coolabah 事故回归: 锚文字被 <span>/<i> 包住时链接整条被漏掉。
+
+    旧正则 `>([^<]+)</a>` 要求锚文字是纯文本, 中间不能有任何标签。Elementor /
+    Divi / Webflow 这类页面搭建工具默认给锚文字套一层 <span>, 于是:
+      <a href=".../performance-report-..."><span>Full Performance Report</span></a>
+    一次都匹配不上, _extract_monthlyish_page_links 完全看不见这条链接 ->
+    导航无从起跳 -> 发现层判 0 个月 -> no_archive。
+    """
+
+    # 照抄 coolabahcapital.com 基金介绍页实测 HTML
+    NESTED_HTML = (
+        '<a href="https://coolabahcapital.com/performance-report-coolabah-global-'
+        'floating-rate-high-yield-complex-etf" target="_blank">'
+        '<span class="elementor-icon-list-icon">'
+        '<i aria-hidden="true" class="fas fa-file-download"></i></span>'
+        '<span class="elementor-icon-list-text">Full Performance Report</span></a>'
+    )
+
+    def test_nested_span_anchor_is_extracted(self):
+        base = "https://coolabahcapital.com/coolabah-global-floating-rate-high-yield-fund/"
+        got = d2._extract_monthlyish_page_links(self.NESTED_HTML, base)
+        assert got == [
+            "https://coolabahcapital.com/performance-report-coolabah-global-"
+            "floating-rate-high-yield-complex-etf"
+        ]
+
+    def test_plain_text_anchor_still_works(self):
+        """回归: 纯文本锚文字不能因为改正则而失效。"""
+        html = '<a href="/legal/monthly-performance-report">Monthly performance report</a>'
+        assert d2._extract_monthlyish_page_links(html, "https://hellostake.com/x") == [
+            "https://hellostake.com/legal/monthly-performance-report"
+        ]
+
+    def test_nested_anchor_without_monthly_keyword_is_skipped(self):
+        html = ('<a href="/contact-form"><span class="ico"></span>'
+                '<span>Contact Us</span></a>')
+        assert d2._extract_monthlyish_page_links(html, "https://x.com/a") == []
+
+    def test_nested_anchor_pointing_at_pdf_stays_out_of_nav_list(self):
+        """套壳的 .pdf 链接仍必须被排除 -- 不能混进 PDF 清单 (2026-07-29 事故)。"""
+        html = ('<a href="/docs/Monthly_Report_Jun26.pdf">'
+                '<span><i class="fa"></i></span><span>Monthly Report</span></a>')
+        base = "https://x.com/a"
+        assert d2._extract_monthlyish_page_links(html, base) == []
+        assert d2._extract_pdf_links(html, base) == [
+            "https://x.com/docs/Monthly_Report_Jun26.pdf"
+        ]
+
+
+class TestGrokStepLevelRetry:
+    """2026-08-01: 503 是中转站在轮换账号, 两个并发调用会同时落在同一批坏账号上,
+    一起失败。单次调用内部的重试解决不了"这一瞬间池子整个不可用", 所以两次都失败
+    且都是可重试状态码时, 整步再来一遍 (重新分配账号)。
+
+    Tavily 那条降级路当前配额耗尽, 等于没有兜底 -- Grok 一抽风整个搜索层就瘫,
+    这次实测连着三轮摄取全挂在这里。
+    """
+
+    def test_step_retried_once_when_both_attempts_hit_retryable_error(self, monkeypatch):
+        calls = {"n": 0}
+
+        def _twice(fund_name, issuer, asx_code):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ([], ["A: GrokError: HTTP 503: upstream_unavailable",
+                             "B: GrokError: HTTP 503: upstream_unavailable"],
+                        ["A", "B"])
+            ans = type("A", (), {"archive_url": "https://issuer.com/reports",
+                                 "issuer_domain": "issuer.com",
+                                 "sources": [], "evidence": "ok"})()
+            return ([ans], [], ["A", "B"])
+
+        monkeypatch.setattr(d2, "_grok_answer_archive_twice", _twice)
+        monkeypatch.setattr(d2.time, "sleep", lambda s: None)
+        _domain, ranked, ev = d2.locate_candidates(
+            "F", "I", engine="grok", client=object())
+        assert calls["n"] == 2, "整步只重试一次"
+        assert ranked and ranked[0]["url"] == "https://issuer.com/reports"
+        assert ev["engine_used"] == "grok"
+        assert ev.get("grok_step_retried") is True
+
+    def test_no_step_retry_when_error_is_not_retryable(self, monkeypatch):
+        """鉴权失败之类重试多少次都一样, 不浪费时间, 直接降级。"""
+        calls = {"n": 0}
+
+        def _twice(fund_name, issuer, asx_code):
+            calls["n"] += 1
+            return ([], ["A: GrokError: HTTP 401: bad key",
+                         "B: GrokError: HTTP 401: bad key"], ["A", "B"])
+
+        monkeypatch.setattr(d2, "_grok_answer_archive_twice", _twice)
+        monkeypatch.setattr(d2.time, "sleep", lambda s: None)
+        monkeypatch.setattr(d2, "multi_query_search", lambda *a, **k: [])
+        _domain, _ranked, ev = d2.locate_candidates(
+            "F", "I", engine="grok", client=object())
+        assert calls["n"] == 1
+        assert ev["engine_used"] == "tavily"
+        assert not ev.get("grok_step_retried")
+
+    def test_no_step_retry_when_one_attempt_succeeded(self, monkeypatch):
+        calls = {"n": 0}
+
+        def _twice(fund_name, issuer, asx_code):
+            calls["n"] += 1
+            ans = type("A", (), {"archive_url": "https://issuer.com/x",
+                                 "issuer_domain": "issuer.com",
+                                 "sources": [], "evidence": ""})()
+            return ([ans], ["B: GrokError: HTTP 503: upstream_unavailable"], ["A", "B"])
+
+        monkeypatch.setattr(d2, "_grok_answer_archive_twice", _twice)
+        monkeypatch.setattr(d2.time, "sleep", lambda s: None)
+        _domain, ranked, ev = d2.locate_candidates(
+            "F", "I", engine="grok", client=object())
+        assert calls["n"] == 1
+        assert ranked
+        assert not ev.get("grok_step_retried")
+
+
+class TestNavigateAlwaysGetsFetchBudget:
+    """2026-08-01: 中转链接那步把抓取预算吃光, 导航一次都没跑到。
+
+    Coolabah 业绩汇总页挂着 9 条兄弟基金链接 (同一策略的全球版/纽西兰版/机构版/
+    辅助版...), 链接文字全是 "Full Performance Report", 全被当中转页挨个抓;
+    2 个候选页 + 6 条中转 = 抓满 8 次, 步 6 循环直接 break。实测那一轮的跳转记录
+    六条全是"(中转链接)", 没有一条导航跳转 -- 而目标月报页正需要模型去挑。
+    """
+
+    def test_navigate_runs_even_with_many_nav_seeds(self, monkeypatch):
+        page = "https://issuer.com/performance/"
+        seeds = "".join(
+            f'<a href="https://issuer.com/report-sibling-{i}">Full Performance Report</a>'
+            for i in range(9))
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(d2, "_fetch", lambda u, **k: seeds if u == page else "<html/>")
+        monkeypatch.setattr(disc_mod, "classify_pdf_links", lambda *a, **k: ([], [], 0))
+
+        nav_called: list = []
+        from llm_ingest import navigate as nav_mod
+
+        def _nav(start_url, start_html, fund_name, domain, visited, client):
+            nav_called.append(start_url)
+            return (None, None, [])
+
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", _nav)
+
+        d2.find_archive_v2("F", "I", client=object())
+        assert nav_called, "中转链接再多也不能把导航挤掉"
+
+    def test_seed_budget_leaves_room_for_navigate(self, monkeypatch):
+        from llm_ingest.navigate import MAX_TOTAL_FETCHES
+        assert d2.NAV_RESERVED_FETCHES >= 1
+        assert d2.NAV_RESERVED_FETCHES < MAX_TOTAL_FETCHES
+
+
+class TestNavSeedsFromUrlSlug:
+    """2026-08-01 实测: 光靠锚文字认中转链接不够。
+
+    Grok 给的入口是 coolabahcapital.com/performance/ (业绩汇总页), 目标基金的
+    月报页确实链在上面, 但那条链接的锚文字是 'Complex ETF (CBOE: YLDX)' --
+    一个月报关键词都没有, 于是整条被跳过; 而同页 6 条兄弟基金的链接锚文字里带
+    'performance report', 反而全被当成中转页抓了一遍, 8 次抓取预算就此耗尽。
+
+    信号在 URL 里: 目标 slug 含全部基金名 token, 兄弟基金必然缺一个或多一个。
+    """
+
+    FUND = "Coolabah Global Floating-Rate High Yield Complex"
+    TARGET = ("https://coolabahcapital.com/performance-report-coolabah-global-"
+              "floating-rate-high-yield-complex-etf")
+    SIBLINGS = [
+        "https://coolabahcapital.com/performance-report-coolabah-global-floating-rate-high-yield-fund-ai",
+        "https://coolabahcapital.com/performance-report-floating-rate-high-yield-PIE-fund",
+        "https://coolabahcapital.com/performance-report-coolabah-active-composite-bond-fund/",
+    ]
+
+    def _page(self):
+        # 目标: 锚文字无月报关键词; 兄弟: 锚文字有关键词
+        html = f'<a href="{self.TARGET}">Complex ETF (CBOE: YLDX)</a>'
+        html += "".join(
+            f'<a href="{u}">Full Performance Report</a>' for u in self.SIBLINGS)
+        return html
+
+    def test_slug_match_picks_up_link_with_no_keyword_in_anchor_text(self):
+        got = d2._extract_monthlyish_page_links(
+            self._page(), "https://coolabahcapital.com/performance/",
+            fund_name=self.FUND)
+        assert self.TARGET in got
+
+    def test_slug_matched_seed_is_tried_first(self):
+        """抓取次数有硬上限, 目标排在 6 条兄弟基金后面就永远轮不到。"""
+        got = d2._extract_monthlyish_page_links(
+            self._page(), "https://coolabahcapital.com/performance/",
+            fund_name=self.FUND)
+        assert got[0] == self.TARGET
+
+    def test_target_outranks_siblings(self):
+        """兄弟基金可以被收进来当候选 (打开一页的代价很小), 但必须排在目标后面 --
+        抓取次数有硬上限, 顺序错了目标就永远轮不到。"""
+        assert d2._slug_matches_fund(self.TARGET, self.FUND)
+        for u in self.SIBLINGS:
+            assert d2._slug_score(u, self.FUND) < d2._slug_score(self.TARGET, self.FUND), u
+
+    def test_unrelated_same_issuer_page_is_excluded(self):
+        """同发行商但完全是另一支基金 (只中 coolabah 一个词) 不该进候选。"""
+        assert not d2._slug_matches_fund(
+            "https://coolabahcapital.com/performance-report-coolabah-active-composite-bond-fund/",
+            self.FUND)
+
+    def test_share_class_abbreviated_in_url_still_matches(self):
+        """2026-08-01 实测: 基金登记名按曲线名写成 "...Fund (Assisted)", 而网址
+        里份额类别是缩写 -- .../performance-report-coolabah-floating-rate-high-
+        yield-fund-ai, 没有 assisted 这个词。要求 token 全中会把正确的那页排除
+        掉 (实测那两页一次都没被打开), 所以这里只按命中比例收。"""
+        fund = "Coolabah Floating-Rate High Yield Fund (Assisted)"
+        for u in (
+            "https://coolabahcapital.com/performance-report-coolabah-floating-rate-high-yield-fund-ai",
+            "https://coolabahcapital.com/performance-report-coolabah-floating-rate-high-yield-fund-i",
+        ):
+            assert d2._slug_matches_fund(u, fund), u
+        assert not d2._slug_matches_fund(
+            "https://coolabahcapital.com/performance-report-coolabah-active-composite-bond-fund/",
+            fund)
+
+    def test_without_fund_name_behaviour_is_unchanged(self):
+        """不给基金名时 (既有调用方) 只走锚文字关键词那条老路。"""
+        got = d2._extract_monthlyish_page_links(
+            self._page(), "https://coolabahcapital.com/performance/")
+        assert self.TARGET not in got
+        assert len(got) == len(self.SIBLINGS)
+
+
+def _plotly_html(name: str, points, extra_links: str = "") -> str:
+    """造一页内嵌 Plotly NAV 序列的报告 HTML (hovertext 格式照抄 Coolabah 真实页)."""
+    texts = ", ".join(f'"{name}<br />{d}: ${v}"' for d, v in points)
+    return (
+        f"<html><body>{extra_links}<div class='js-plotly-plot'></div><script>"
+        f'var data = [{{"name": "{name}", "text": [{texts}]}}];'
+        "</script></body></html>"
+    )
+
+
+_SERIES = [("2025-01-31", "100.00"), ("2025-02-28", "100.85"),
+           ("2025-03-31", "101.40"), ("2026-06-30", "108.95")]
+
+
+class TestSelfReportPage:
+    """2026-08-01 Coolabah 事故回归: "这一页自己就是月报"。
+
+    发现层原来只有一种判定形态 -- 把页内 .pdf 清单交 classify_pdf_links 问"哪几条
+    是本基金月报"。Coolabah 的月报页上根本没有可下载的月报文件 (数据以 Plotly 图表
+    内嵌在页里), 于是即使导航跳到了这一页, 照样判 0 个月、返回 no_archive。
+
+    判定顺序是本组测试的重点: 只在 PDF 路径彻底失败后才启用, 有正规 PDF 归档的
+    基金优先级完全不变。
+    """
+
+    FUND = "Coolabah Global Floating-Rate High Yield Complex"
+    TRACE = "Global Floating-Rate High Yield Complex ETF"
+
+    def test_page_with_series_and_no_monthly_pdf_returns_self_report_pointer(
+            self, monkeypatch):
+        page = "https://coolabahcapital.com/performance-report-x"
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(d2, "_fetch",
+                            lambda *a, **k: _plotly_html(self.TRACE, _SERIES))
+        monkeypatch.setattr(disc_mod, "classify_pdf_links",
+                            lambda *a, **k: ([], [], 0))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop",
+                            lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(self.FUND, "Coolabah", client=object())
+        assert ptr.self_report_url == page
+        assert ptr.self_report_kind == "performance_report_html"
+        assert ptr.self_report_first_ym == "2025-01"
+        assert ptr.self_report_last_ym == "2026-06"
+        assert ptr.discovered_links == [], "自报页不产出 PDF 月报清单"
+
+    def test_real_monthly_pdf_wins_over_self_report(self, monkeypatch):
+        """优先级回归: 同一页既有真月报 PDF 又有 Plotly 序列 -> 走 PDF 路径。"""
+        page = "https://issuer.com/reports"
+        pdf = "https://issuer.com/Monthly_Jun26.pdf"
+        _stub_locate(monkeypatch, page)
+        html = _plotly_html(self.TRACE, _SERIES,
+                            extra_links=f'<a href="{pdf}">Monthly Report</a>')
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: html)
+        monkeypatch.setattr(disc_mod, "classify_pdf_links",
+                            lambda *a, **k: ([("2026-06", pdf)], [], 0))
+
+        ptr = d2.find_archive_v2(self.FUND, "Coolabah", client=object())
+        assert ptr.archive_url == page
+        assert ptr.discovered_links == [("2026-06", pdf)]
+        assert ptr.self_report_url is None, "PDF 路径成功时不得走自报"
+
+    def test_ambiguous_traces_do_not_produce_self_report(self, monkeypatch):
+        """多 trace 命中 -> parse 抛错 -> 静默放行, 绝不挑一个 (2026-07-18 教训)。"""
+        page = "https://coolabahcapital.com/performance-report-x"
+        _stub_locate(monkeypatch, page)
+        texts = ", ".join(f'"x<br />{d}: ${v}"' for d, v in _SERIES)
+        two = ("<html><script>var data = ["
+               f'{{"name": "{self.TRACE}", "text": [{texts}]}},'
+               f'{{"name": "Global Floating-Rate High Yield Complex", "text": [{texts}]}}'
+               "];</script></html>")
+        monkeypatch.setattr(d2, "_fetch", lambda *a, **k: two)
+        monkeypatch.setattr(disc_mod, "classify_pdf_links", lambda *a, **k: ([], [], 0))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(self.FUND, "Coolabah", client=object())
+        assert ptr.self_report_url is None
+        assert ptr.no_archive is True
+
+    def test_series_shorter_than_three_points_is_rejected(self, monkeypatch):
+        page = "https://coolabahcapital.com/performance-report-x"
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(
+            d2, "_fetch",
+            lambda *a, **k: _plotly_html(self.TRACE, _SERIES[:2]))
+        monkeypatch.setattr(disc_mod, "classify_pdf_links", lambda *a, **k: ([], [], 0))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(self.FUND, "Coolabah", client=object())
+        assert ptr.self_report_url is None
+
+    def test_refusal_reason_reaches_evidence(self, monkeypatch):
+        """2026-08-01: 兄弟份额类别场景 (Coolabah Floating-Rate High Yield Fund
+        有 Assisted / Institutional 两页) 判定必然拒绝, 这是对的; 但结论里必须
+        写清为什么拒绝、页内有哪些候选曲线, 否则用户只看到"未产出任何链接",
+        无从知道该把登记名改成什么。"""
+        page = "https://coolabahcapital.com/performance-report-x-ai"
+        _stub_locate(monkeypatch, page)
+        monkeypatch.setattr(
+            d2, "_fetch",
+            lambda *a, **k: _plotly_html("Floating-Rate High Yield Fund (Assisted)",
+                                         _SERIES))
+        monkeypatch.setattr(disc_mod, "classify_pdf_links", lambda *a, **k: ([], [], 0))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(
+            "Coolabah Floating-Rate High Yield Fund", "Coolabah", client=object())
+        assert ptr.self_report_url is None
+        assert "判定拒绝" in ptr.evidence
+        assert "Assisted" in ptr.evidence, "候选曲线名必须能传到结论里"
+        assert ptr.raw["self_report_notes"], "拒绝理由也要留在 raw 供排查"
+
+    def test_landing_page_hops_to_self_report_page(self, monkeypatch):
+        """端到端: 介绍页 (锚文字套 span, 零 Plotly) -> 中转链接跳月报页 -> 检出自报。"""
+        landing = "https://coolabahcapital.com/coolabah-global-floating-rate-high-yield-fund/"
+        report = "https://coolabahcapital.com/performance-report-x"
+        landing_html = (
+            f'<a href="{report}" target="_blank"><span class="ico">'
+            '<i class="fas fa-file-download"></i></span>'
+            '<span class="txt">Full Performance Report</span></a>'
+        )
+        pages = {landing: landing_html,
+                 report: _plotly_html(self.TRACE, _SERIES)}
+        _stub_locate(monkeypatch, landing)
+        monkeypatch.setattr(d2, "_fetch", lambda u, **k: pages.get(u, ""))
+        monkeypatch.setattr(disc_mod, "classify_pdf_links", lambda *a, **k: ([], [], 0))
+        from llm_ingest import navigate as nav_mod
+        monkeypatch.setattr(nav_mod, "navigate_one_hop", lambda *a, **k: (None, None, []))
+
+        ptr = d2.find_archive_v2(self.FUND, "Coolabah", client=object())
+        assert ptr.self_report_url == report
+        assert ptr.self_report_first_ym == "2025-01"
 
 
 if __name__ == "__main__":

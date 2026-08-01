@@ -57,6 +57,15 @@ class ArchivePointer:
     # 直接采用, 不再重判一次 -- 定位归档页与列出月报本是同一次判断的两个用途,
     # 重复调用只是白烧一次 API。
     discovered_links: List[Tuple[str, str]] = field(default_factory=list)
+    # "这一页自己就是月报" (Coolabah 一类: 数据以 Plotly 图表内嵌在页里, 没有可
+    # 下载的月报 PDF)。只在 PDF 路径彻底失败后才由 discover2._detect_self_report
+    # 填写, 有正规 PDF 归档的基金这几个字段永远为空。
+    # 序列本身**不**带出来当数据用 -- 它只是判别器与月份区间来源, 真数据仍要走
+    # render_html_to_pdf -> PDF 提取 -> 两道闸 (绕过闸就绕过了反捏造防线)。
+    self_report_url: Optional[str] = None
+    self_report_kind: str = ""                  # "performance_report_html"
+    self_report_first_ym: Optional[str] = None  # 序列首月, 供推定成立月
+    self_report_last_ym: Optional[str] = None   # 序列末月, 即最新一期
 
 
 @dataclass
@@ -680,7 +689,26 @@ def probe_l1_official(
     )
     # v2 完全空 (无 archive 且无 latest_pdf) 时降级 v1 (可能 v1 web_search 拿到 v2 没找到的 URL)
     if not pointer.archive_url and not pointer.latest_pdf_url:
+        _self_report = (pointer.self_report_url, pointer.self_report_kind,
+                        pointer.self_report_first_ym, pointer.self_report_last_ym)
+        _v2_evidence = pointer.evidence
+        _v2_notes = list((pointer.raw or {}).get("self_report_notes") or [])
         pointer = find_archive_via_search(fund_name, issuer, issuer_domain, asx_code, client=client)
+        # v1 不认识自报页, 会整个换掉 pointer -- 把 v2 检出的自报线索接回来, 否则
+        # 白检一场。v1 若真找到 PDF 归档, 下游本来就优先走 PDF, 不受影响。
+        if _self_report[0] and not pointer.self_report_url:
+            (pointer.self_report_url, pointer.self_report_kind,
+             pointer.self_report_first_ym, pointer.self_report_last_ym) = _self_report
+        # v2 的判定结论同样会被换掉 -- 这是"什么都没找到"时 job 日志里唯一能说明
+        # 原因的东西 (页面自带净值序列但份额类别没写清之类), 丢了就只剩一句
+        # "未产出任何链接"。接回来, 不覆盖 v1 自己的结论。
+        if _v2_notes:
+            pointer.raw = dict(pointer.raw or {})
+            pointer.raw["self_report_notes"] = _v2_notes
+        if _v2_evidence and _v2_evidence not in (pointer.evidence or ""):
+            _v1_ev = (pointer.evidence or "").strip()
+            pointer.evidence = (f"{_v1_ev} || v2: {_v2_evidence}" if _v1_ev
+                                else f"v2: {_v2_evidence}")
 
     # v2 快路: find_archive_v2 定位归档页时已经对该页全部 PDF 链接跑过
     # classify_pdf_links, 结果就在 discovered_links 里, 直接采用。
