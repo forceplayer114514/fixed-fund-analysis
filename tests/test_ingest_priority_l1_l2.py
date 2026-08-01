@@ -54,7 +54,9 @@ def test_l1_ok_skips_pdf_and_records_discovered_source_name(tmp_db):
         "url": "https://fundmonitors.com/x",
         "page_fund_name": "Test Fund From Page",
         "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch:
+    }), patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch, \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]), \
+         patch("llm_ingest.discover2._fetch", return_value=None):
         jid = ing._job_new("test_fund")
         ing._run_ingest_job(jid, _make_req())
 
@@ -96,7 +98,9 @@ def test_l1_fail_falls_back_to_pdf(tmp_db):
         "status": "fetch_fail", "records": [], "ytd_map": {},
         "url": None, "page_fund_name": None, "errors": [],
     }), patch.object(d2_mod, "find_archive_v2", return_value=fake_pointer), \
-         patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch:
+         patch("llm_ingest.discover._fetch", return_value=None) as mock_fetch, \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]), \
+         patch("llm_ingest.discover2._fetch", return_value=None):
         # discovery 会尝试跑 (返 None 让 discover fallback 到 raise)
         jid = ing._job_new("test_fund")
         try:
@@ -115,7 +119,9 @@ def test_l1_paywall_no_discovered_source_name(tmp_db):
         "status": "paywall", "records": [], "ytd_map": {},
         "url": "https://fundmonitors.com/x",
         "page_fund_name": None, "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None):
+    }), patch("llm_ingest.discover._fetch", return_value=None), \
+         patch("llm_ingest.discover2._fetch", return_value=None), \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]):
         jid = ing._job_new("test_fund")
         try:
             ing._run_ingest_job(jid, _make_req())
@@ -135,7 +141,9 @@ def test_l1_exception_records_status(tmp_db):
     from llm_ingest import fundmonitors as fm
 
     with patch.object(fm, "probe", side_effect=RuntimeError("boom")), \
-         patch("llm_ingest.discover._fetch", return_value=None):
+         patch("llm_ingest.discover._fetch", return_value=None), \
+         patch("llm_ingest.discover2._fetch", return_value=None), \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]):
         jid = ing._job_new("test_fund")
         try:
             ing._run_ingest_job(jid, _make_req())
@@ -167,7 +175,9 @@ def test_l1_rename_on_page_fund_name(tmp_db):
         "url": "https://fundmonitors.com/x",
         "page_fund_name": "Test Fund Official",
         "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None):
+    }), patch("llm_ingest.discover._fetch", return_value=None), \
+         patch("llm_ingest.discover2._fetch", return_value=None), \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]):
         jid = ing._job_new("test_fund")
         ing._run_ingest_job(jid, _make_req())
 
@@ -206,7 +216,9 @@ def test_l1_rename_skipped_on_collision_continues(tmp_db):
         "url": "https://fundmonitors.com/x",
         "page_fund_name": "Test Fund Official",
         "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None):
+    }), patch("llm_ingest.discover._fetch", return_value=None), \
+         patch("llm_ingest.discover2._fetch", return_value=None), \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]):
         jid = ing._job_new("test_fund")
         ing._run_ingest_job(jid, _make_req())
 
@@ -233,7 +245,9 @@ def test_l1_ok_stats_monthly_count(tmp_db):
         "status": "ok", "records": fake_records, "ytd_map": {},
         "url": "https://fundmonitors.com/x",
         "page_fund_name": "Test Fund", "errors": [],
-    }), patch("llm_ingest.discover._fetch", return_value=None):
+    }), patch("llm_ingest.discover._fetch", return_value=None), \
+         patch("llm_ingest.discover2._fetch", return_value=None), \
+         patch("llm_ingest.discover2.multi_query_search", return_value=[]):
         jid = ing._job_new("test_fund")
         ing._run_ingest_job(jid, _make_req())
     assert ing._JOBS[jid]["stats"]["monthly"] == 3
