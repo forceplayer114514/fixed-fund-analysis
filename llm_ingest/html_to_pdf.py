@@ -31,6 +31,16 @@ MIN_HOVER_POINTS = 5  # 过滤单点图例标记 trace, 只留真实序列 (test
 # coolabah_floating_rate_high_yield_fund_institut, 污染了生产库。2400px 视口
 # 实测这两处都能完整渲染, 留够余量 (页面里最长的基金全称也就 60 出头字符)。
 REPORT_VIEWPORT = {"width": 2400, "height": 1200}
+# 打印纸张: 宽度按渲染后实际内容宽度取 (见 render_html_to_pdf 里的说明), 高度
+# 固定分页 -- 报告页实测近 4 万像素高, 单页会超出 PDF 页面尺寸上限。
+PRINT_PAGE_HEIGHT_PX = 1600
+PRINT_WIDTH_SLACK_PX = 80    # 左右各 10mm 页边距 (~76px) 的余量
+_MEASURE_CONTENT_JS = """() => ({
+  w: Math.max(
+    document.documentElement ? document.documentElement.scrollWidth : 0,
+    document.body ? document.body.scrollWidth : 0
+  )
+})"""
 
 # 只读 DOM, 不做筛选/计算 -- 筛选逻辑放 Python 侧 (_filter_hover_rows), 便于不
 # 依赖真实浏览器单测。
@@ -142,9 +152,23 @@ def render_html_to_pdf(url: str, out_path: Path, *, timeout: int = 120) -> Path:
                     appendix_html = _build_appendix_html(sections)
                     page.evaluate(_INJECT_APPENDIX_JS, appendix_html)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
+                # 纸张宽度必须盖住渲染后的实际内容宽度, 否则超出的部分会被
+                # **横向裁掉**(不是缩放, 也不是换行)。原来固定 format="A4":
+                # 可打印宽度约 774px, 而报告页内容 1200px 宽, 于是每一行都在
+                # 同一列被切断, 实测抬头变成
+                #   'Fund: Coolabah Global Floating-Rate High Yield Co'
+                #   'Return (since Feb. 2025): 7.65% pa gross (6.4'
+                # -- 基金名被截断直接把身份闸判成兄弟基金 (identity_mismatch),
+                # 数字被截断则更危险 (6.45 变 6.4 是个看起来完全合法的错值)。
+                # 高度仍固定分页: 内容实测近 4 万像素, 单页会超出 PDF 页面尺寸
+                # 上限; 纵向分页不会切字 (跨页的行整体挪到下一页)。
+                dims = page.evaluate(_MEASURE_CONTENT_JS) or {}
+                page_w = max(int(dims.get("w") or 0),
+                             REPORT_VIEWPORT["width"]) + PRINT_WIDTH_SLACK_PX
                 page.pdf(
                     path=str(out_path),
-                    format="A4",
+                    width=f"{page_w}px",
+                    height=f"{PRINT_PAGE_HEIGHT_PX}px",
                     print_background=True,
                     margin={"top": "10mm", "bottom": "10mm",
                             "left": "10mm", "right": "10mm"},

@@ -116,6 +116,31 @@ def _mock_playwright_chain(evaluate_side_effect, pdf_side_effect=None):
     return ctx, page, browser
 
 
+def test_paper_width_covers_content_width_instead_of_a4(tmp_path):
+    """2026-08-01 回归: 固定 A4 打印会把超出可打印宽度的文字**横向裁掉**。
+
+    A4 纵向可打印宽约 774px, Coolabah 报告页内容 1200px 宽, 于是每行都在同一列
+    被切断 -- 实测抬头变成 'Fund: Coolabah Global Floating-Rate High Yield Co',
+    基金名截断直接把身份闸判成兄弟基金 (identity_mismatch), 17 个月全卡在
+    pending; 数字被截断 (6.45 -> 6.4) 更危险, 那是个看起来完全合法的错值。
+    """
+    out_path = tmp_path / "out.pdf"
+
+    def fake_pdf(**kwargs):
+        Path(kwargs["path"]).write_bytes(b"%PDF-1.4 fake pdf bytes")
+
+    ctx, page, browser = _mock_playwright_chain(
+        evaluate_side_effect=[[], {"w": 3200}], pdf_side_effect=fake_pdf)
+    with patch("playwright.sync_api.sync_playwright", return_value=ctx):
+        render_html_to_pdf("https://example.com/wide-report", out_path)
+
+    kwargs = page.pdf.call_args.kwargs
+    assert "format" not in kwargs, "固定纸张格式会裁掉超宽内容"
+    assert kwargs["width"].endswith("px")
+    assert int(kwargs["width"][:-2]) >= 3200, "纸张宽度必须盖住内容宽度"
+    assert kwargs["height"].endswith("px"), "高度固定分页 (内容近 4 万像素高)"
+
+
 def test_playwright_unavailable_raises_html_to_pdf_error(tmp_path):
     with patch.dict(sys.modules, {"playwright.sync_api": None}):
         with pytest.raises(HtmlToPdfError, match="playwright 不可用"):
@@ -129,7 +154,8 @@ def test_empty_output_file_raises_html_to_pdf_error(tmp_path):
         # 模拟渲染"成功返回"但文件为空/未生成 (out_path 不存在)
         pass
 
-    ctx, page, browser = _mock_playwright_chain(evaluate_side_effect=[[], None], pdf_side_effect=fake_pdf)
+    ctx, page, browser = _mock_playwright_chain(
+        evaluate_side_effect=[[], {"w": 1200}], pdf_side_effect=fake_pdf)
     with patch("playwright.sync_api.sync_playwright", return_value=ctx):
         with pytest.raises(HtmlToPdfError, match="空文件|渲染失败"):
             render_html_to_pdf("https://example.com/report", out_path)
@@ -142,14 +168,15 @@ def test_no_chart_data_skips_appendix_injection_but_still_prints(tmp_path):
         Path(kwargs["path"]).write_bytes(b"%PDF-1.4 fake pdf bytes")
 
     # page.evaluate 第一次调用 (dump traces) 返回空列表 -> 无图表数据
-    ctx, page, browser = _mock_playwright_chain(evaluate_side_effect=[[]], pdf_side_effect=fake_pdf)
+    ctx, page, browser = _mock_playwright_chain(
+        evaluate_side_effect=[[], {"w": 1200}], pdf_side_effect=fake_pdf)
     with patch("playwright.sync_api.sync_playwright", return_value=ctx):
         result = render_html_to_pdf("https://example.com/plain-report", out_path)
 
     assert result == out_path
     assert out_path.exists() and out_path.stat().st_size > 0
-    # 无图表数据时只调用一次 evaluate (dump), 不该有第二次 (注入附录)
-    assert page.evaluate.call_count == 1
+    # 无图表数据时 evaluate 只有 dump + 量内容宽度两次, 不该有注入附录那次
+    assert page.evaluate.call_count == 2
     page.pdf.assert_called_once()
 
 
@@ -168,14 +195,15 @@ def test_chart_data_present_injects_appendix_then_prints(tmp_path):
         }],
     }]
     ctx, page, browser = _mock_playwright_chain(
-        evaluate_side_effect=[plots, None], pdf_side_effect=fake_pdf,
+        evaluate_side_effect=[plots, None, {"w": 1200}], pdf_side_effect=fake_pdf,
     )
     with patch("playwright.sync_api.sync_playwright", return_value=ctx):
         result = render_html_to_pdf("https://example.com/plotly-report", out_path)
 
     assert result == out_path
-    # 有图表数据: evaluate 调用 2 次 (dump + 注入), 第二次带 appendix html 参数
-    assert page.evaluate.call_count == 2
+    # 有图表数据: evaluate 调用 3 次 (dump + 注入 + 量内容宽度), 第二次带
+    # appendix html 参数
+    assert page.evaluate.call_count == 3
     inject_call_args = page.evaluate.call_args_list[1]
     injected_html = inject_call_args[0][1]
     assert "FRHY" in injected_html

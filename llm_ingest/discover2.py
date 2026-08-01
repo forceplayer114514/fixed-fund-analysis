@@ -27,6 +27,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -38,10 +39,14 @@ from .discover import (
     _pick_issuer_domain,
     _same_host,
 )
+from . import plotly_nav
 from .search import TavilyError, multi_query_search
 
 # ---- 常量 ----
 TOP_N_PROBE = 4          # 排序后取 top-N 并发探测
+# 从抓取总预算 (navigate.MAX_TOTAL_FETCHES) 里锁给"步 6 导航"的名额, 不许中转
+# 链接那步占用 (理由见 find_archive_v2 步 5 的说明)
+NAV_RESERVED_FETCHES = 3
 FETCH_TIMEOUT = 30       # 单次抓页超时
 PROBE_CONCURRENCY = 4    # 并发线程池
 
@@ -50,11 +55,21 @@ PROBE_CONCURRENCY = 4    # 并发线程池
 #  (a) .pdf 直链
 #  (b) href 里含 report/factsheet/monthly/performance 且是链接文本或路径特征
 _PDF_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', re.I)
-_HTML_LINK_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>', re.I)
+# 锚文字可能被 <span>/<i> 等标签包住 (Elementor/Divi/Webflow 默认就这么生成),
+# 所以内部按"任意内容非贪婪到 </a>"取, 再由 _anchor_text 剥标签。上限 600 字符
+# 是防未闭合 <a> 让匹配跨到几屏之外的另一个 </a> 上去 (真实锚文字远不到这个量级)。
+_HTML_LINK_RE = re.compile(
+    r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.{0,600}?)</a>', re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
 _MONTHLY_HINTS = re.compile(
     r"(monthly|month-end|fund\s*report|fact\s*sheet|performance|report|update)",
     re.I,
 )
+
+
+def _anchor_text(inner_html: str) -> str:
+    """`<a>` 内部 HTML -> 纯锚文字 (剥标签 + 压空白)."""
+    return " ".join(_TAG_RE.sub(" ", inner_html or "").split())
 
 
 def _extract_pdf_links(html: str, base_url: str) -> List[str]:
@@ -72,7 +87,47 @@ def _extract_pdf_links(html: str, base_url: str) -> List[str]:
     return out
 
 
-def _extract_monthlyish_page_links(html: str, base_url: str) -> List[str]:
+def _slug_score(url: str, fund_name: Optional[str]) -> int:
+    """URL 路径里出现了几个基金名 token (去载体类型词后).
+
+    2026-08-01: 光靠锚文字关键词认中转链接会漏。Coolabah 业绩汇总页上目标基金
+    那条链接的锚文字是 "Complex ETF (CBOE: YLDX)", 一个月报关键词都没有; 而同页
+    6 条兄弟基金的锚文字全带 "Full Performance Report"。区分信号在 URL 里。
+    """
+    if not fund_name:
+        return 0
+    want = plotly_nav._tokens(fund_name)
+    if not want:
+        return 0
+    have = set(re.findall(r"[a-z0-9]+", urlparse(url).path.lower()))
+    return len(want & have)
+
+
+def _slug_matches_fund(url: str, fund_name: Optional[str]) -> bool:
+    """这条链接值不值得打开看一眼 (按基金名 token 命中比例判).
+
+    刻意**不**要求 token 全中。这个判据只决定"打开哪些页", 不决定信谁的数据 --
+    真正的关卡是打开之后的曲线名匹配 (parse_plotly_nav_series 要求 token 子集,
+    且命中数 != 1 就拒绝)。所以这里该宽松召回, 漏掉的代价是整支基金摄取不了,
+    多收的代价只是白抓一页。
+
+    一开始定成"必须全中", 立刻被真实数据打脸: 基金登记名写
+    "...High Yield Fund (Assisted)" (曲线名就是这么写的), 而网址里份额类别是
+    缩写 -- .../performance-report-coolabah-floating-rate-high-yield-fund-ai,
+    没有 "assisted" 这个词, 于是正确的那两页一次都没被打开。
+    """
+    want = plotly_nav._tokens(fund_name) if fund_name else frozenset()
+    if not want:
+        return False
+    hit = _slug_score(url, fund_name)
+    # 至少中 2 个, 且占基金名的六成以上 (只中 "coolabah" 一个词的同发行商无关
+    # 页面挡在外面; 少一个份额类别缩写词的正确页面放进来)
+    return hit >= 2 and hit * 10 >= len(want) * 6
+
+
+def _extract_monthlyish_page_links(
+    html: str, base_url: str, fund_name: Optional[str] = None,
+) -> List[str]:
     """抓页 HTML -> 链接文字含月报关键词但**不是 .pdf** 的网页链接 (去重保序).
 
     这些是"可能通往月报的中转页", 只能当导航起跳点, 绝不可混进 PDF 清单交
@@ -94,19 +149,24 @@ def _extract_monthlyish_page_links(html: str, base_url: str) -> List[str]:
     不要退回混列表的老做法。
     """
     seen: set = set()
-    out: List[str] = []
-    for href, text in _HTML_LINK_RE.findall(html):
-        if not _MONTHLY_HINTS.search(text or ""):
-            continue
+    out: List[Tuple[int, str]] = []
+    for href, inner in _HTML_LINK_RE.findall(html):
         full = urljoin(base_url, href)
+        by_slug = _slug_matches_fund(full, fund_name)
+        if not by_slug and not _MONTHLY_HINTS.search(_anchor_text(inner)):
+            continue
         if full.lower().split("?", 1)[0].endswith(".pdf") or full in seen:
             continue
         low = full.lower()
         if any(k in low for k in ("/login", "/contact", "/subscribe", "mailto:", "tel:")):
             continue
         seen.add(full)
-        out.append(full)
-    return out
+        out.append((_slug_score(full, fund_name) if by_slug else 0, full))
+    # 按 URL 里命中的基金名 token 数从多到少排: 抓取次数有硬上限
+    # (navigate.MAX_TOTAL_FETCHES), 实测 Coolabah 业绩汇总页上目标排在 6 条兄弟
+    # 基金之后, 预算耗尽就永远轮不到。稳定排序, 同分保持页内原始顺序。
+    out.sort(key=lambda x: -x[0])
+    return [u for _score, u in out]
 
 
 # ---- Step 1: Gemini 排优先级 (语言活) ----
@@ -274,6 +334,19 @@ def _grok_name_variants(fund_name: str) -> Tuple[str, str]:
     return (a, b)
 
 
+GROK_STEP_RETRY_SLEEP = 20   # 整步重试前的等待 (中转站换账号需要时间)
+_RETRYABLE_GROK_RE = re.compile(r"HTTP (429|502|503|504)\b|网络错误|Timeout|超时")
+
+
+def _is_retryable_grok_error(msg: str) -> bool:
+    """Grok 失败原因是不是"等一会儿换个账号可能就好了"那一类.
+
+    中转站账号额度耗尽返 503 upstream_unavailable, 网关抖动返 502 -- 这些重试
+    有效。鉴权/参数错误重试多少次都一样, 不该白等。
+    """
+    return bool(_RETRYABLE_GROK_RE.search(msg or ""))
+
+
 def _grok_answer_archive_twice(
     fund_name: str, issuer: str, asx_code: Optional[str],
 ) -> Tuple[List[Any], List[str], List[str]]:
@@ -364,6 +437,16 @@ def locate_candidates(
     if engine == "grok":
         answers, errors, name_variants = _grok_answer_archive_twice(
             fund_name, issuer, asx_code)
+        # 两次并发调用是同时发出的, 中转站正在轮换账号时会一起撞上坏账号一起
+        # 失败 -- 单次调用内部的重试解决不了"这一瞬间池子整个不可用"。两次都
+        # 失败且都是可重试状态码时, 隔一会儿整步再来一遍 (重新分配账号)。
+        # 只重试一次: 再挂就是池子真的空了, 继续等没有意义, 让它降级。
+        # 鉴权/参数类错误不在此列, 重试多少次都一样。
+        if not answers and errors and all(_is_retryable_grok_error(e) for e in errors):
+            time.sleep(GROK_STEP_RETRY_SLEEP)
+            answers, errors, name_variants = _grok_answer_archive_twice(
+                fund_name, issuer, asx_code)
+            ev["grok_step_retried"] = True
         ev["grok_name_variants"] = name_variants
         ev["grok_attempts"] = [
             {"archive_url": a.archive_url, "issuer_domain": a.issuer_domain,
@@ -404,12 +487,55 @@ def locate_candidates(
 
 # ---- Step 2: 并发抓页 + 抽 PDF 链接 ----
 
-def _probe_one(url: str) -> Dict[str, Any]:
-    """抓一页, 返 {url, html_ok, pdf_urls, nav_urls, error}.
+SELF_REPORT_KIND = "performance_report_html"
+SELF_REPORT_MIN_POINTS = 3   # 至少 3 个净值点才能算出 2 个月的收益率
+
+
+def _detect_self_report(
+    url: str, html: str, fund_name: Optional[str],
+    notes: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """判"这一页自己就是月报": 页里内嵌本基金 NAV 序列 -> 返区间信息, 否则 None.
+
+    Coolabah 一类发行商把月报做成一张网页 (pandoc HTML + Plotly 图表), 页上没有
+    任何可下载的月报文件, 常规 "页内 .pdf 清单交 classify_pdf_links" 的判定形态
+    对它永远判 0 个月。
+
+    序列只当**判别器**和**月份区间来源**, 不当数据源: 真数据仍要走
+    render_html_to_pdf -> PDF 提取 -> 两道闸。
+    parse_plotly_nav_series 零命中/多 trace 命中都会抛错, 一律放行返 None --
+    宁可漏, 不可错 (2026-07-18 Coolabah 错源 173 月事故)。
+
+    notes: 拒绝理由写进这个列表, 由调用方带进 evidence/job 日志。同一策略常有
+    多个份额类别 (实测 Coolabah "(Assisted)" / "(Institutional)" 各一页), 登记
+    的基金名没写清是哪一类时判定必然拒绝 -- 这时只报 "未产出任何链接" 等于什么
+    都没说, 用户无从知道该把名字改成什么。
+    """
+    if not html or not fund_name:
+        return None
+    try:
+        series = plotly_nav.parse_plotly_nav_series(html, fund_name)
+    except Exception as e:  # noqa: BLE001
+        if notes is not None:
+            notes.append(f"{url}: {e}")
+        return None
+    if len(series) < SELF_REPORT_MIN_POINTS:
+        if notes is not None:
+            notes.append(f"{url}: 净值序列只有 {len(series)} 点, 不足 "
+                         f"{SELF_REPORT_MIN_POINTS} 点")
+        return None
+    return {"url": url, "points": len(series),
+            "first_ym": series[0][0][:7], "last_ym": series[-1][0][:7]}
+
+
+def _probe_one(url: str, fund_name: Optional[str] = None) -> Dict[str, Any]:
+    """抓一页, 返 {url, html_ok, pdf_urls, nav_urls, self_report, error}.
 
     pdf_urls 只含真 .pdf 直链 (交 classify_pdf_links 判); nav_urls 是链接文字像
     月报但不是 PDF 的网页 (只作导航起跳点)。两者必须分开, 理由见
     _extract_monthlyish_page_links。
+    self_report 只在给了 fund_name 时才判 -- 全量 HTML 只在这里在手 (返回值只留
+    2000 字符 snippet), 判定必须在这个函数里做完。
     """
     # 抓失败重试一次 (2026-07-29): 走 Grok 时候选可能只有一两个, 这一次瞬时失败
     # 就等于把最好的线索整条扔掉 -- 该页被当成"空页", 整轮降级去跑导航兜底, 而
@@ -425,19 +551,25 @@ def _probe_one(url: str) -> Dict[str, Any]:
     if url.lower().split("?", 1)[0].endswith(".pdf"):
         return {"url": url, "html_ok": False, "pdf_urls": [url], "nav_urls": [],
                 "error": None}
+    sr_notes: List[str] = []
     return {"url": url, "html_ok": True,
             "pdf_urls": _extract_pdf_links(html, url),
-            "nav_urls": _extract_monthlyish_page_links(html, url),
+            "nav_urls": _extract_monthlyish_page_links(html, url, fund_name),
+            "self_report": _detect_self_report(url, html, fund_name, sr_notes),
+            "self_report_notes": sr_notes,
             "error": None, "html_snippet": html[:2000]}
 
 
-def probe_urls(urls: List[str], *, concurrency: int = PROBE_CONCURRENCY) -> List[Dict[str, Any]]:
+def probe_urls(
+    urls: List[str], *, concurrency: int = PROBE_CONCURRENCY,
+    fund_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """并发抓 URL, 每个返 pdf_urls. 保持输入顺序返回."""
     if not urls:
         return []
     results: List[Optional[Dict[str, Any]]] = [None] * len(urls)
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futures = {ex.submit(_probe_one, u): i for i, u in enumerate(urls)}
+        futures = {ex.submit(_probe_one, u, fund_name): i for i, u in enumerate(urls)}
         for fut in concurrent.futures.as_completed(futures):
             i = futures[fut]
             try:
@@ -490,7 +622,8 @@ def find_archive_v2(
     top_urls = [r["url"] for r in ranked[:top_n]]
 
     # ---- 步 3: 并发抓 top-N, 抽 PDF 链接 ----
-    probes = probe_urls(top_urls, concurrency=min(PROBE_CONCURRENCY, len(top_urls)))
+    probes = probe_urls(top_urls, concurrency=min(PROBE_CONCURRENCY, len(top_urls)),
+                        fund_name=fund_name)
 
     # ---- 步 4~6: 逐个来源判定, 取"判出月份最多"的那个当归档页 ----
     #
@@ -562,6 +695,15 @@ def find_archive_v2(
     from .navigate import navigate_one_hop, MAX_TOTAL_FETCHES
     nav_hops: List[Tuple[str, str]] = []
     visited: set = {p["url"] for p in probes}
+    # 沿途看见的"自身即月报"页 (只在最后 PDF 全线落空时才动用, 见步 6.5)
+    self_reports: List[Dict[str, Any]] = [
+        p["self_report"] for p in probes if p.get("self_report")
+    ]
+    # 判定拒绝的理由 (份额类别没写清 / 多条曲线同时命中 / 点数不够), 最后写进
+    # evidence, 否则失败信息只有一句"未产出任何链接", 用户无从下手。
+    sr_notes: List[str] = []
+    for p in probes:
+        sr_notes.extend(p.get("self_report_notes") or [])
 
     # 步 4: 候选页自身的 PDF (Grok 两次答案去重后的 1~2 个候选; Tavily 为 top-N)
     for p in probes:
@@ -584,7 +726,13 @@ def find_archive_v2(
         for u in (p.get("nav_urls") or []):
             if u not in visited and u not in seeds:
                 seeds.append(u)
-    for seed in seeds:
+    # 中转链接是便宜的启发式尝试, 导航才是真会判断的那一步 -- 给导航留固定名额,
+    # 否则便宜的那步会把抓取预算吃光, 导航一次都跑不到。
+    # 2026-08-01 实测: Coolabah 业绩汇总页挂着 9 条兄弟基金链接 (同一策略的全球版/
+    # 纽西兰版/机构版/辅助版...), 全被当中转页挨个抓, 2 个候选页 + 6 条中转 = 8,
+    # 到导航那步循环直接 break, Gemini 一次都没被调用 -- 而目标月报页正需要它挑。
+    seed_budget = max(0, MAX_TOTAL_FETCHES - NAV_RESERVED_FETCHES - len(visited))
+    for seed in seeds[:seed_budget]:
         if len(visited) >= MAX_TOTAL_FETCHES:
             break
         visited.add(seed)
@@ -592,6 +740,9 @@ def find_archive_v2(
         if not seed_html:
             continue
         nav_hops.append(("(中转链接)", seed))
+        _sr = _detect_self_report(seed, seed_html, fund_name, sr_notes)
+        if _sr:
+            self_reports.append(_sr)
         _consider(seed, _extract_pdf_links(seed_html, seed), "中转页")
     if best is not None:
         return _pointer(best, nav_hops)
@@ -613,11 +764,14 @@ def find_archive_v2(
         start_html = _fetch(start_url, timeout=FETCH_TIMEOUT)
         if not start_html:
             continue
-        next_url, _next_html, next_pdfs = navigate_one_hop(
+        next_url, next_html, next_pdfs = navigate_one_hop(
             start_url, start_html, fund_name, domain, visited, client,
         )
         nav_hops.append((start_url, next_url or "(no_pick)"))
         if next_url:
+            _sr = _detect_self_report(next_url, next_html or "", fund_name, sr_notes)
+            if _sr:
+                self_reports.append(_sr)
             _consider(next_url, next_pdfs, f"导航 {start_url} ->")
         if best is not None:
             return _pointer(best, nav_hops)
@@ -626,13 +780,39 @@ def find_archive_v2(
     if best is not None:
         return _pointer(best, nav_hops)
 
+    # ---- 步 6.5: PDF 全线落空 -> 才考虑"这一页自己就是月报" ----
+    #
+    # 顺序是刻意的: 有正规月报 PDF 归档的基金优先级完全不变, 只有一份月报 PDF 都
+    # 判不出来时, 才回头看沿途哪一页内嵌了本基金的净值序列。
+    # 多页都检出时取点数最多的那个 (序列越长, 能覆盖的月份越多)。
+    if self_reports:
+        sr = max(self_reports, key=lambda x: x["points"])
+        return ArchivePointer(
+            archive_url=None, pagination_param=None, no_archive=True,
+            latest_pdf_url=None, issuer_domain_confirmed=domain,
+            evidence=(f"未判出任何月报 PDF, 但该页自身内嵌本基金净值序列: "
+                      f"{sr['url']} ({sr['points']} 点, "
+                      f"{sr['first_ym']} ~ {sr['last_ym']})"),
+            raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
+                 "month_counts": month_counts,
+                 "self_reports": self_reports},
+            search_sources=real_sources, search_queries=[],
+            self_report_url=sr["url"],
+            self_report_kind=SELF_REPORT_KIND,
+            self_report_first_ym=sr["first_ym"],
+            self_report_last_ym=sr["last_ym"],
+        )
+
     # ---- 步 7: 全无命中 -> 返 no_archive 让上游走 L2/L3 ----
     return ArchivePointer(
         archive_url=None, pagination_param=None, no_archive=True,
         latest_pdf_url=None, issuer_domain_confirmed=domain,
-        evidence="top-N 探测 + 中转页 + 导航兜底均未判出本基金月报, 走 L2/L3 兜底",
+        evidence=("top-N 探测 + 中转页 + 导航兜底均未判出本基金月报, 走 L2/L3 兜底"
+                  + (("; 页面自带净值序列但判定拒绝: " + " | ".join(sr_notes[:3]))
+                     if sr_notes else "")),
         raw={"ranked": ranked, "locate": locate_ev, "nav_hops": nav_hops,
-             "month_counts": month_counts, "probes": [
+             "month_counts": month_counts, "self_report_notes": sr_notes,
+             "probes": [
                  {"url": p["url"], "pdf_count": len(p["pdf_urls"]),
                   "nav_count": len(p.get("nav_urls") or []),
                   "monthly_count": month_counts.get(p["url"]),

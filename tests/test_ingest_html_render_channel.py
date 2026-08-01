@@ -77,7 +77,8 @@ def test_single_file_multi_month_renders_once_and_uses_full_pdf(tmp_db):
 
     months = _expected_months()
     assert len(months) >= 1, "测试前提: inception_month=2026-04 应枚举出至少 1 个月"
-    fake_full_text = "Period Ending Net Return 0.71%"
+    fake_full_text = "Period Ending " + " ".join(
+        f"Net Return {0.60 + i * 0.01:.2f}%" for i in range(1, 40))
 
     render_calls = []
 
@@ -89,8 +90,14 @@ def test_single_file_multi_month_renders_once_and_uses_full_pdf(tmp_db):
 
     def fake_extract_from_pdf(pdf_path, ym, **kwargs):
         extract_calls.append({"ym": ym, "max_pages": kwargs.get("max_pages")})
+        # 每月给不同数值: 枚举出的月份数随当前日期变化, 一旦达到 3 个月, 连续
+        # 相同的精确浮点会被 ANTI-FABRICATION GUARD 判成插值伪造并转 pending
+        # (那是它该做的事)。本测试要验的是"只渲染一次 + 全文喂模型", 与那道闸
+        # 无关, 别让日期推移把它变成假失败。
+        pct = 0.60 + len(extract_calls) * 0.01
         return ex_mod.Extraction(
-            ym=ym, net_return=0.0071, source_quote="Net Return 0.71%",
+            ym=ym, net_return=round(pct / 100, 6),
+            source_quote=f"Net Return {pct:.2f}%",
             measure="nav_pair", measure_label_in_pdf="Net Return (%)",
             rolling={}, not_found=False, raw={},
         )

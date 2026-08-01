@@ -376,7 +376,16 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 _cu_low.endswith((".html", ".htm", ".csv"))
                 or _url_type in ("performance_report_html", "performance_report_csv")
             )
-            if _is_single_file_html and req.inception_month:
+            # 成立月份: 表单没填就回落读 DB。自报页那条通路 (见下面"自身即月报")
+            # 会把序列首月写进 funds.inception_date, 所以此后每次"更新数据"都不必
+            # 人工再填一遍 -- 回落不生效的话会掉进 parse_archive_page, 0 links 后
+            # 清空 confirmed_url 重新搜索, 就是那个死循环。
+            _inception_row = conn.execute(
+                "SELECT inception_date FROM funds WHERE fund_id=?", (req.fund_id,)
+            ).fetchone()
+            _db_inception = (_inception_row[0] if _inception_row else None) or ""
+            _inception_month = req.inception_month or (_db_inception[:7] or None)
+            if _is_single_file_html and _inception_month:
                 # 单文件多月: 从 inception 到当前 (下月-1) 枚举 ym
                 _job_log(jid, f"single_file_multi_month: {req.confirmed_url}")
                 from datetime import datetime as _dt
@@ -392,7 +401,7 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
                 # inception_month 本身没有"上月 NAV"可比, 收益率结构上算不出来
                 # (不是搜不到, 是这个月不该被问) -- 枚举从 inception 次月起,
                 # 不然会被下面 extract 失败误记成 confirmed_gap (2026-07-20 修)
-                all_months = disc_mod._month_range(req.inception_month, _end_ym)
+                all_months = disc_mod._month_range(_inception_month, _end_ym)
                 months = all_months[1:] if len(all_months) > 1 else []
                 links = [(m, req.confirmed_url) for m in months]
                 _job_log(jid, f"single_file_multi_month: {len(links)} months to try")
@@ -476,6 +485,44 @@ def _run_ingest_job(jid: str, req: IngestRequest) -> None:
             # 记住归档页地址 与 记录 discovery 缺口 都挪到摄取循环之后 (见那里),
             # 因为这两件事都只有在"这一轮真入库了月度数据"之后才站得住脚。
             discovery_rep = rep
+
+            # ---- 自身即月报 (Coolabah 一类: 数据以 Plotly 图表内嵌在网页里,
+            # 页上根本没有可下载的月报文件) ----
+            # 发现层一份月报 PDF 都没判出来, 但沿途某一页内嵌了本基金净值序列 ->
+            # 记住这一页, 并在**同一个 job 内**直接走渲染通道, 不让用户再点一次
+            # "更新数据"。
+            # 序列只用来定"哪一页"和"哪些月", 数值仍走
+            # render_html_to_pdf -> PDF 提取 -> 两道闸, 绝不直接入库。
+            _ptr = rep.archive_pointer
+            if not links and _ptr is not None and _ptr.self_report_url:
+                _sr_url = _ptr.self_report_url
+                _url_type = _ptr.self_report_kind
+                _job_log(jid, f"自身即月报: {_sr_url} "
+                              f"({_ptr.self_report_first_ym} ~ {_ptr.self_report_last_ym})")
+                import calendar as _cal
+                _fy, _fm2 = (int(x) for x in _ptr.self_report_first_ym.split("-"))
+                _inception = f"{_ptr.self_report_first_ym}-{_cal.monthrange(_fy, _fm2)[1]:02d}"
+                conn.execute(
+                    "UPDATE funds SET confirmed_url=?, url_type=?, "
+                    "inception_date=?, inception_assumed=0 WHERE fund_id=?",
+                    (_sr_url, _url_type, _inception, req.fund_id),
+                )
+                conn.commit()
+                req = req.model_copy(update={"confirmed_url": _sr_url})
+                # 区间取序列自带的首末日期: 首月没有上月 NAV 可比, 结构上算不出
+                # 收益率 (与 single_file_multi_month 同一条理由), 从次月起; 末月
+                # 就是权威的最新一期, 不必再拿"今天的上个月"去猜。
+                _sr_months = disc_mod._month_range(
+                    _ptr.self_report_first_ym, _ptr.self_report_last_ym)[1:]
+                links = [(m, _sr_url) for m in _sr_months]
+                _job_log(jid, f"pre-rendering HTML -> PDF: {_sr_url}")
+                _sr_path = pdf_dir / _rendered_pdf_filename(_sr_url)
+                try:
+                    html_to_pdf_mod.render_html_to_pdf(_sr_url, _sr_path)
+                except Exception as e:  # noqa: BLE001
+                    raise ValueError(f"HTML 渲染失败 {_sr_url}: {e}")
+                rendered_urls.add(_sr_url)
+                _job_log(jid, f"pre-rendered PDF, {len(links)} months to try")
 
         if not links:
             conn.close()
